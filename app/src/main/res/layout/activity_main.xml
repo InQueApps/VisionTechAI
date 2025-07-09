@@ -1,0 +1,786 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    tools:context=".MainActivity">
+
+    <!-- Split-Screen Dual Camera Container -->
+    <LinearLayout
+        android:id="@+id/splitScreenContainer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="vertical"
+        android:visibility="gone"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ImageView
+            android:id="@+id/backCameraImageView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:scaleType="centerCrop"
+            android:background="#222" />
+
+        <ImageView
+            android:id="@+id/frontCameraImageView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:scaleType="centerCrop"
+            android:background="#222" />
+    </LinearLayout>
+
+    <!-- Camera Preview -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/viewFinder"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- Info Button -->
+    <TextView
+        android:id="@+id/infoButton"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="16dp"
+        android:background="@drawable/info_button_background"
+        android:gravity="center"
+        android:text="ℹ"
+        android:textColor="@android:color/white"
+        android:textSize="18sp"
+        android:textStyle="bold"
+        android:elevation="1000dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer" />
+
+    <!-- Info Panel -->
+    <LinearLayout
+        android:id="@+id/infoPanel"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_margin="16dp"
+        android:background="@drawable/info_panel_background"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:visibility="gone"
+        android:elevation="999dp"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- Info Panel Header -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:paddingBottom="8dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:gravity="center"
+                android:text="Camera Features Guide"
+                android:textColor="@android:color/white"
+                android:textSize="18sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:id="@+id/closeInfoButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:background="@drawable/close_button_background"
+                android:padding="4dp"
+                android:text="↑"
+                android:textColor="@android:color/white"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+        </LinearLayout>
+
+        <!-- Info Content -->
+        <ScrollView
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical">
+
+                <!-- NV Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="NV - Night Vision"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Tap to select between Regular Night Vision (histogram equalization) and ML Night Vision (AI-enhanced). Use sliders to adjust intensity/sensitivity."
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
+                <!-- IMG Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="IMG - Image Processing"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Tap to select between HD (High Definition upsampling) and ED (Edge Detection). HD enhances resolution, ED highlights contours."
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
+                <!-- ROB Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="ROB - Robot Vision"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Tap to access Object Detection using YOLOX AI model. Detects and labels objects in real-time with bounding boxes and confidence scores."
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
+                <!-- Camera Controls Info -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:layout_marginBottom="12dp"
+                    android:text="Camera Controls:"
+                    android:textColor="@android:color/holo_green_light"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="16dp"
+                    android:text="• Switch Camera: Toggle between front and rear cameras\n• Dual Camera: View both cameras simultaneously\n• Record: Take photos or record videos\n• Photo/Video: Switch between photo and video modes"
+                    android:textColor="@android:color/white"
+                    android:textSize="14sp"
+                    android:lineSpacingExtra="4dp" />
+
+                <!-- Tips -->
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="20dp"
+                    android:layout_marginBottom="12dp"
+                    android:text="Tips:"
+                    android:textColor="@android:color/holo_blue_light"
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="• Only one enhancement mode can be active at a time\n• Use sliders to fine-tune the effects\n• The histogram shows real-time color distribution\n• FPS counter shows current frame rate"
+                    android:textColor="@android:color/white"
+                    android:textSize="14sp"
+                    android:lineSpacingExtra="4dp" />
+
+            </LinearLayout>
+
+        </ScrollView>
+
+    </LinearLayout>
+
+    <!-- Camera Controls Container -->
+    <LinearLayout
+        android:id="@+id/controlsContainer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@drawable/controls_background"
+        android:orientation="vertical"
+        android:padding="16dp"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent">
+
+        <!-- Night Vision Slider (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/nightVisionSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="NV Intensity"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <SeekBar
+                android:id="@+id/nightVisionSlider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="50"
+                android:progressTint="@android:color/holo_green_light"
+                android:thumbTint="@android:color/holo_green_light" />
+
+        </LinearLayout>
+
+        <!-- ML Night Vision Slider (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/mlNightVisionSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="ML Sensitivity"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <SeekBar
+                android:id="@+id/mlNightVisionSlider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="70"
+                android:progressTint="@android:color/holo_blue_light"
+                android:thumbTint="@android:color/holo_blue_light" />
+
+        </LinearLayout>
+
+        <!-- Edge Detection Slider (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/edgeDetectionSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Edge Sensitivity"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <SeekBar
+                android:id="@+id/edgeDetectionSlider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="50"
+                android:progressTint="@android:color/holo_orange_light"
+                android:thumbTint="@android:color/holo_orange_light" />
+
+        </LinearLayout>
+
+        <!-- HD Slider (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/hdSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="HD Scale (Downsample 100x ↔ Upsample 5x)"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <SeekBar
+                android:id="@+id/hdSlider"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="50"
+                android:progressTint="@android:color/holo_purple"
+                android:thumbTint="@android:color/holo_purple" />
+
+            <TextView
+                android:id="@+id/hdScaleValueText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Scale: 1.0x"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:layout_marginTop="6dp" />
+
+        </LinearLayout>
+
+        <!-- Color Adjustment Slider (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/colorSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Color Adjustment"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <!-- Red Slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="Red:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp" />
+
+                <SeekBar
+                    android:id="@+id/redSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="200"
+                    android:progress="100"
+                    android:progressTint="@android:color/holo_red_dark"
+                    android:thumbTint="@android:color/holo_red_dark" />
+
+                <TextView
+                    android:id="@+id/redValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="100%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Green Slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="Green:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp" />
+
+                <SeekBar
+                    android:id="@+id/greenSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="200"
+                    android:progress="100"
+                    android:progressTint="@android:color/holo_green_dark"
+                    android:thumbTint="@android:color/holo_green_dark" />
+
+                <TextView
+                    android:id="@+id/greenValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="100%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Blue Slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="Blue:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp" />
+
+                <SeekBar
+                    android:id="@+id/blueSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="200"
+                    android:progress="100"
+                    android:progressTint="@android:color/holo_blue_dark"
+                    android:thumbTint="@android:color/holo_blue_dark" />
+
+                <TextView
+                    android:id="@+id/blueValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="100%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Night Vision Overlay Row -->
+        <LinearLayout
+            android:id="@+id/nightVisionOverlayRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="8dp"
+            android:background="#80000000"
+            android:visibility="gone">
+
+            <!-- Regular Night Vision Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/nvRegularButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="NV Regular"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- Night Vision ML Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/nvMLButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="NV ML"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+        </LinearLayout>
+
+        <!-- IMG Overlay Row (HD, ED, and COL) -->
+        <LinearLayout
+            android:id="@+id/imgOverlayRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="8dp"
+            android:background="#80000000"
+            android:visibility="gone">
+
+            <!-- HD Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/imgHDButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="HD"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- Edge Detection Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/imgEDButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="ED"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- Color Adjustment Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/imgCOLButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="COL"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+        </LinearLayout>
+
+        <!-- ROB Overlay Row (Object Detection and Text Translation) -->
+        <LinearLayout
+            android:id="@+id/robOverlayRow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:padding="8dp"
+            android:background="#80000000"
+            android:visibility="gone">
+
+            <!-- Object Detection Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/robODButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="Object Detection"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- Text Translation Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/robTXTButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="4dp"
+                android:text="TXT"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+        </LinearLayout>
+
+        <!-- Night Vision Controls (Above Bottom Bar) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingBottom="16dp">
+
+            <!-- Night Vision Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/nightVisionButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="4dp"
+                android:text="NV"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- IMG Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/imgButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="IMG"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- ROB Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/robButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:text="ROB"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- Hide/Show Button - Pushed to the right -->
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <ImageView
+                android:id="@+id/sliderArrow"
+                android:layout_width="24dp"
+                android:layout_height="24dp"
+                android:src="@drawable/ic_arrow_up"
+                app:tint="@android:color/white" />
+
+        </LinearLayout>
+
+        <!-- Bottom Controls Row -->
+        <RelativeLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <!-- Camera Switch Button -->
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/cameraSwitchButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_alignParentStart="true"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_switch_camera"
+                app:backgroundTint="@android:color/white"
+                app:tint="@android:color/black" />
+
+            <!-- Dual Camera Button -->
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/dualCameraButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_toEndOf="@id/cameraSwitchButton"
+                android:layout_marginStart="16dp"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_dual_camera"
+                app:backgroundTint="@android:color/white"
+                app:tint="@android:color/black" />
+
+            <!-- Record Button -->
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/recordButton"
+                android:layout_width="80dp"
+                android:layout_height="80dp"
+                android:layout_centerInParent="true"
+                android:src="@drawable/ic_record"
+                app:backgroundTint="@android:color/holo_red_dark"
+                app:tint="@android:color/white" />
+
+            <!-- Photo Button -->
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/photoButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_toEndOf="@id/recordButton"
+                android:layout_marginStart="16dp"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_photo"
+                app:backgroundTint="@android:color/white"
+                app:tint="@android:color/black" />
+
+            <!-- Video Button -->
+            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                android:id="@+id/videoButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_toEndOf="@id/photoButton"
+                android:layout_marginStart="16dp"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_video"
+                app:backgroundTint="@android:color/white"
+                app:tint="@android:color/black" />
+
+        </RelativeLayout>
+
+    </LinearLayout>
+
+</androidx.constraintlayout.widget.ConstraintLayout> 
