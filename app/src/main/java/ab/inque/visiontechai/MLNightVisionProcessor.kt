@@ -1,4 +1,4 @@
-package ab.inque.nightvisioncamera
+package ab.inque.visiontechai
 
 import android.graphics.*
 import android.util.Log

@@ -1,4 +1,4 @@
-package ab.inque.nightvisioncamera
+package ab.inque.visiontechai
 
 import org.junit.Test
 

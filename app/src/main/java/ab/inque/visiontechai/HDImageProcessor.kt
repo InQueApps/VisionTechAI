@@ -1,4 +1,4 @@
-package ab.inque.nightvisioncamera
+package ab.inque.visiontechai
 
 import android.content.Context
 import android.graphics.*
@@ -9,8 +9,21 @@ class HDImageProcessor(private val context: Context) {
     companion object {
         private const val TAG = "HDImageProcessor"
         private const val MIN_SCALE = 0.01f  // 100x downsampling (1/100)
-        private const val MAX_SCALE = 5.0f   // 5x upsampling
+        private const val MAX_SCALE = 4.0f   // 4x upsampling (ESRGAN scale)
         private const val CENTER_SCALE = 1.0f // No effect at center
+        private const val ML_UPSAMPLING_THRESHOLD = 1.5f // Use ML for upsampling above this threshold
+    }
+
+    private val advancedMLProcessor = AdvancedMLUpsamplingProcessor(context)
+    private var useMLUpsampling = true // Default to ML upsampling
+
+    fun setUseMLUpsampling(useML: Boolean) {
+        useMLUpsampling = useML
+        Log.d(TAG, "ML upsampling ${if (useML) "enabled" else "disabled"}")
+    }
+
+    fun isUsingMLUpsampling(): Boolean {
+        return useMLUpsampling
     }
 
     fun processImage(bitmap: Bitmap, sliderValue: Int): Bitmap {
@@ -18,16 +31,23 @@ class HDImageProcessor(private val context: Context) {
             // Convert slider value (0-100) to scale factor
             val scale = convertSliderToScale(sliderValue)
             
-            Log.d(TAG, "Processing image with scale: $scale (slider: $sliderValue)")
+            Log.d(TAG, "Processing image with scale: $scale (slider: $sliderValue), ML: $useMLUpsampling")
             
             return if (scale < CENTER_SCALE) {
                 // Downsampling
                 downsampleImage(bitmap, scale)
             } else if (scale > CENTER_SCALE) {
-                // Simple upsampling - no ML to avoid breaking the app
-                simpleUpsampleImage(bitmap, scale)
+                // Upsampling - choose between ML and standard based on flag
+                if (useMLUpsampling && scale >= ML_UPSAMPLING_THRESHOLD) {
+                    Log.d(TAG, "Using ML upsampling for scale: $scale")
+                    advancedMLProcessor.upsampleImage(bitmap, scale)
+                } else {
+                    Log.d(TAG, "Using standard upsampling for scale: $scale")
+                    standardUpsampleImage(bitmap, scale)
+                }
             } else {
-                // No effect
+                // Scale = 1.0 (CENTER_SCALE) - return original bitmap without any processing
+                Log.d(TAG, "Scale is 1.0, returning original bitmap without processing")
                 bitmap
             }
         } catch (e: Exception) {
@@ -41,7 +61,7 @@ class HDImageProcessor(private val context: Context) {
         // Convert slider (0-100) to scale factor
         // 0 = 100x downsampling (0.01)
         // 50 = no effect (1.0)
-        // 100 = 5x upsampling (5.0)
+        // 51-100 = upsampling (1.0x to 4.0x for standard, locked to 4.0x for ML)
         
         return when {
             sliderValue < 50 -> {
@@ -50,9 +70,14 @@ class HDImageProcessor(private val context: Context) {
                 CENTER_SCALE - (CENTER_SCALE - MIN_SCALE) * (1f - normalized)
             }
             sliderValue > 50 -> {
-                // Upsampling: 50 -> 1.0, 100 -> 5.0
-                val normalized = (sliderValue - 50) / 50f
-                CENTER_SCALE + (MAX_SCALE - CENTER_SCALE) * normalized
+                if (useMLUpsampling) {
+                    // ML upsampling: Always use 4x (ESRGAN scale)
+                    MAX_SCALE
+                } else {
+                    // Standard upsampling: 51 -> 1.0x, 100 -> 4.0x
+                    val normalized = (sliderValue - 50) / 50f
+                    CENTER_SCALE + (MAX_SCALE - CENTER_SCALE) * normalized
+                }
             }
             else -> CENTER_SCALE
         }
@@ -134,14 +159,20 @@ class HDImageProcessor(private val context: Context) {
         return Color.rgb(r, g, b)
     }
 
-    private fun simpleUpsampleImage(bitmap: Bitmap, scale: Float): Bitmap {
+    private fun standardUpsampleImage(bitmap: Bitmap, scale: Float): Bitmap {
         val targetWidth = (bitmap.width * scale).toInt()
         val targetHeight = (bitmap.height * scale).toInt()
         
-        Log.d(TAG, "Simple upsampling from ${bitmap.width}x${bitmap.height} to ${targetWidth}x${targetHeight}")
+        Log.d(TAG, "Standard upsampling from ${bitmap.width}x${bitmap.height} to ${targetWidth}x${targetHeight}")
         
-        // Use high-quality upsampling with color preservation
-        return createHighQualityUpsampledBitmap(bitmap, targetWidth, targetHeight)
+        // Try to use Android's built-in high-quality scaling first
+        return try {
+            Bitmap.createScaledBitmap(bitmap, targetWidth, targetHeight, true)
+        } catch (e: Exception) {
+            Log.w(TAG, "Built-in scaling failed, using custom implementation: ${e.message}")
+            // Fallback to custom high-quality upsampling
+            createHighQualityUpsampledBitmap(bitmap, targetWidth, targetHeight)
+        }
     }
 
     private fun createHighQualityUpsampledBitmap(bitmap: Bitmap, newWidth: Int, newHeight: Int): Bitmap {
@@ -184,7 +215,7 @@ class HDImageProcessor(private val context: Context) {
         val p10 = pixels[y1 * width + x0]
         val p11 = pixels[y1 * width + x1]
         
-        // Bicubic interpolation for better quality
+        // Bilinear interpolation for standard upsampling
         val r = (Color.red(p00) * (1 - dx) * (1 - dy) +
                 Color.red(p01) * dx * (1 - dy) +
                 Color.red(p10) * (1 - dx) * dy +

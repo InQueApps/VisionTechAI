@@ -4,17 +4,18 @@ plugins {
 }
 
 android {
-    namespace = "ab.inque.nightvisioncamera"
+    namespace = "ab.inque.visiontechai"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "ab.inque.nightvisioncamera"
+        applicationId = "ab.inque.visiontechai"
         minSdk = 27
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.0"
+        versionCode = 10
+        versionName = "0.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        signingConfig = signingConfigs.getByName("debug")
     }
 
     lint {
@@ -55,7 +56,7 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.ktx)
     
     // TensorFlow Lite for ML processing (minimal dependencies to avoid conflicts)
-    implementation("org.tensorflow:tensorflow-lite:2.14.0")
+    implementation("org.tensorflow:tensorflow-lite:2.16.1")
     implementation("org.tensorflow:tensorflow-lite-support:0.4.4")
     implementation("org.tensorflow:tensorflow-lite-metadata:0.4.4")
     implementation("org.tensorflow:tensorflow-lite-task-vision:0.4.4")

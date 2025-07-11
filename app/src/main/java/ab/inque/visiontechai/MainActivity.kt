@@ -1,9 +1,11 @@
-package ab.inque.nightvisioncamera
+package ab.inque.visiontechai
 
 import android.Manifest
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.content.res.ColorStateList
 import android.graphics.*
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
@@ -38,7 +40,7 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
-import ab.inque.nightvisioncamera.databinding.ActivityMainBinding
+import ab.inque.visiontechai.databinding.ActivityMainBinding
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
@@ -59,29 +61,31 @@ class MainActivity : AppCompatActivity() {
     private var isObjectDetectionEnabled = false
     private var isTextTranslationEnabled = false
     private var isEdgeDetectionEnabled = false
-    private var isHDEnabled = false
+    private var isOpticalFlowEnabled = false
     private var isColorAdjustmentEnabled = false
+    private var isSegmentationEnabled = false
     private var nightVisionIntensity = 0.5f // Default 50%
     private var mlNightVisionSensitivity = 0.7f // Default 70%
     private var edgeDetectionSensitivity = 0.5f // Default 50%
-    private var hdScale = 50 // Default 50% (no effect)
     private var redAdjustment = 1.0f // Default 100%
     private var greenAdjustment = 1.0f // Default 100%
     private var blueAdjustment = 1.0f // Default 100%
     private var activeRecording: Recording? = null
     private lateinit var mlNightVisionProcessor: MLNightVisionProcessor
-    private lateinit var objectDetectionProcessor: YOLOXObjectDetectionProcessor
+    private lateinit var objectDetectionProcessor: ObjectDetectionProcessor
     private lateinit var edgeDetectionProcessor: EdgeDetectionProcessor
-    private lateinit var hdImageProcessor: HDImageProcessor
+    private lateinit var opticalFlowProcessor: OpticalFlowProcessor
+    private lateinit var imageSegmentationProcessor: ImageSegmentationProcessor
     private lateinit var objectDetectionOverlay: ObjectDetectionOverlay
     private lateinit var cameraExecutor: ExecutorService
     private var previewWidth = 0
     private var previewHeight = 0
     private lateinit var nightVisionImageView: ImageView
     private lateinit var edgeDetectionImageView: ImageView
-    private lateinit var hdImageView: ImageView
+    private lateinit var opticalFlowImageView: ImageView
     private lateinit var colorAdjustmentImageView: ImageView
     private lateinit var textTranslationImageView: ImageView
+    private lateinit var segmentationImageView: ImageView
     private lateinit var histogramView: HistogramView
     private lateinit var fpsView: TextView
     private lateinit var dualCameraContainer: LinearLayout
@@ -107,10 +111,28 @@ class MainActivity : AppCompatActivity() {
     ) { permissions ->
         val allGranted = permissions.entries.all { it.value }
         if (allGranted) {
+            Log.d(TAG, "All permissions granted, starting camera")
             startCamera()
         } else {
-            Toast.makeText(this, "Permissions not granted by the user.", Toast.LENGTH_SHORT).show()
-            finish()
+            // Check which permissions were denied
+            val deniedPermissions = permissions.entries.filter { !it.value }.map { it.key }
+            Log.w(TAG, "Permissions denied: $deniedPermissions")
+            
+            // Show specific message based on denied permissions
+            val message = when {
+                deniedPermissions.contains(Manifest.permission.CAMERA) -> 
+                    "Camera permission is required for this app to function."
+                deniedPermissions.contains(Manifest.permission.RECORD_AUDIO) -> 
+                    "Audio recording permission is required for video recording."
+                deniedPermissions.any { it.contains("MEDIA") } -> 
+                    "Media access permission is required to save photos and videos."
+                else -> "Required permissions were not granted. App cannot function properly."
+            }
+            
+            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+            
+            // Always show explanation dialog and try again
+            showPermissionExplanationDialog()
         }
     }
 
@@ -149,8 +171,8 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
         }
 
-        // Create HD overlay ImageView
-        hdImageView = ImageView(this).apply {
+        // Create Optical Flow overlay ImageView
+        opticalFlowImageView = ImageView(this).apply {
             layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -181,6 +203,21 @@ class MainActivity : AppCompatActivity() {
 
         // Create text translation overlay ImageView
         textTranslationImageView = ImageView(this).apply {
+            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply {
+                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                bottomToTop = binding.controlsContainer.id // Don't cover the controls
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+
+        // Create segmentation overlay ImageView
+        segmentationImageView = ImageView(this).apply {
             layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                 android.view.ViewGroup.LayoutParams.MATCH_PARENT
@@ -265,9 +302,10 @@ class MainActivity : AppCompatActivity() {
         // Add overlay ImageViews to the layout
         parentLayout.addView(nightVisionImageView)
         parentLayout.addView(edgeDetectionImageView)
-        parentLayout.addView(hdImageView)
+        parentLayout.addView(opticalFlowImageView)
         parentLayout.addView(colorAdjustmentImageView)
         parentLayout.addView(textTranslationImageView)
+        parentLayout.addView(segmentationImageView)
         parentLayout.addView(histogramView)
         parentLayout.addView(fpsView)
         parentLayout.addView(dualCameraContainer)
@@ -298,11 +336,8 @@ class MainActivity : AppCompatActivity() {
         nightVisionImageView.elevation = 100f
         dualCameraContainer.elevation = 50f
 
-        if (allPermissionsGranted()) {
-            startCamera()
-        } else {
-            requestPermissions()
-        }
+        // Check permissions immediately when app starts
+        checkAndRequestPermissions()
 
         binding.photoButton.setOnClickListener {
             setMode(true)
@@ -327,17 +362,14 @@ class MainActivity : AppCompatActivity() {
             selectMLNightVision()
         }
         binding.imgButton.setOnClickListener {
-            Log.d(TAG, "IMG button clicked - isEdgeDetectionEnabled: $isEdgeDetectionEnabled, isHDEnabled: $isHDEnabled, isColorAdjustmentEnabled: $isColorAdjustmentEnabled")
+            Log.d(TAG, "IMG button clicked - isEdgeDetectionEnabled: $isEdgeDetectionEnabled, isOpticalFlowEnabled: $isOpticalFlowEnabled, isColorAdjustmentEnabled: $isColorAdjustmentEnabled, isSegmentationEnabled: $isSegmentationEnabled")
             // If any IMG mode is active, disable it
-            if (isEdgeDetectionEnabled || isHDEnabled || isColorAdjustmentEnabled) {
+            if (isEdgeDetectionEnabled || isOpticalFlowEnabled || isColorAdjustmentEnabled || isSegmentationEnabled) {
                 disableAllIMG()
             } else {
                 // Otherwise show the overlay to select a mode
                 toggleIMGOverlay()
             }
-        }
-        binding.imgHDButton.setOnClickListener {
-            selectHD()
         }
         binding.imgEDButton.setOnClickListener {
             selectEdgeDetection()
@@ -346,20 +378,20 @@ class MainActivity : AppCompatActivity() {
             selectColorAdjustment()
         }
         binding.robButton.setOnClickListener {
-            Log.d(TAG, "ROB button clicked - isObjectDetectionEnabled: $isObjectDetectionEnabled, isTextTranslationEnabled: $isTextTranslationEnabled")
+            Log.d(TAG, "ROB button clicked - isOpticalFlowEnabled: $isOpticalFlowEnabled, isSegmentationEnabled: $isSegmentationEnabled")
             // If any ROB mode is active, disable it
-            if (isObjectDetectionEnabled || isTextTranslationEnabled) {
+            if (isOpticalFlowEnabled || isSegmentationEnabled) {
                 disableAllROB()
             } else {
                 // Otherwise show the overlay to select a mode
                 toggleROBOverlay()
             }
         }
-        binding.robODButton.setOnClickListener {
-            selectObjectDetection()
+        binding.robOFButton.setOnClickListener {
+            selectOpticalFlow()
         }
-        binding.robTXTButton.setOnClickListener {
-            selectTextTranslation()
+        binding.robSEGButton.setOnClickListener {
+            selectSegmentation()
         }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
@@ -367,9 +399,7 @@ class MainActivity : AppCompatActivity() {
         binding.cameraSwitchButton.setOnClickListener {
             switchCamera()
         }
-        binding.dualCameraButton.setOnClickListener {
-            toggleDualCamera()
-        }
+
         binding.infoButton.setOnClickListener {
             toggleInfoPanel()
         }
@@ -427,25 +457,7 @@ class MainActivity : AppCompatActivity() {
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
 
-        // Set up HD slider
-        binding.hdSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) {
-                    hdScale = progress
-                    Log.d(TAG, "HD scale: $hdScale")
-                    // Map progress (0-50) to 0.1x-1.0x, 50-100 to 1.0x-5.0x
-                    val scaleFactor = when {
-                        progress < 50 -> 0.1f + 0.9f * (progress / 50f) // 0.1x to 1.0x
-                        progress == 50 -> 1.0f
-                        else -> 1.0f + 4.0f * ((progress - 50) / 50f) // 1.0x to 5.0x
-                    }
-                    binding.hdScaleValueText.text = String.format("Scale: %.2fx", scaleFactor)
-                }
-            }
 
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
 
         // Set up color adjustment sliders
         binding.redSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -494,13 +506,16 @@ class MainActivity : AppCompatActivity() {
         mlNightVisionProcessor = MLNightVisionProcessor()
 
         // Initialize Object Detection processor
-        objectDetectionProcessor = YOLOXObjectDetectionProcessor(this)
+        objectDetectionProcessor = ObjectDetectionProcessor(this)
         
         // Initialize Edge Detection processor
         edgeDetectionProcessor = EdgeDetectionProcessor()
         
-        // Initialize HD Image processor
-        hdImageProcessor = HDImageProcessor(this)
+        // Initialize Optical Flow processor
+        opticalFlowProcessor = OpticalFlowProcessor(this)
+        
+        // Initialize Image Segmentation processor
+        imageSegmentationProcessor = ImageSegmentationProcessor(this)
         
         // Ensure info button is always on top
         binding.infoButton.bringToFront()
@@ -515,7 +530,6 @@ class MainActivity : AppCompatActivity() {
                 isNightVisionEnabled -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
                 isMLNightVisionEnabled -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
                 isEdgeDetectionEnabled -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
-                isHDEnabled -> binding.hdSliderContainer.visibility = View.VISIBLE
                 isColorAdjustmentEnabled -> binding.colorSliderContainer.visibility = View.VISIBLE
                 else -> binding.nightVisionSliderContainer.visibility = View.VISIBLE // Default
             }
@@ -525,9 +539,46 @@ class MainActivity : AppCompatActivity() {
             binding.nightVisionSliderContainer.visibility = View.GONE
             binding.mlNightVisionSliderContainer.visibility = View.GONE
             binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
             binding.colorSliderContainer.visibility = View.GONE
         }
+    }
+
+    private fun disableAllAlgorithms() {
+        // Disable all algorithm flags
+        isNightVisionEnabled = false
+        isMLNightVisionEnabled = false
+        isEdgeDetectionEnabled = false
+        isOpticalFlowEnabled = false
+        isColorAdjustmentEnabled = false
+        isSegmentationEnabled = false
+        
+        // Reset all button states
+        binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
+        binding.imgButton.setStrokeColorResource(android.R.color.white)
+        binding.robButton.setStrokeColorResource(android.R.color.white)
+        binding.nightVisionButton.strokeWidth = 1
+        binding.imgButton.strokeWidth = 1
+        binding.robButton.strokeWidth = 1
+        
+        // Hide all sliders
+        binding.nightVisionSliderContainer.visibility = View.GONE
+        binding.mlNightVisionSliderContainer.visibility = View.GONE
+        binding.edgeDetectionSliderContainer.visibility = View.GONE
+        binding.colorSliderContainer.visibility = View.GONE
+        
+        // Hide all overlays
+        objectDetectionOverlay.visibility = View.GONE
+        nightVisionImageView.visibility = View.GONE
+        edgeDetectionImageView.visibility = View.GONE
+        opticalFlowImageView.visibility = View.GONE
+        colorAdjustmentImageView.visibility = View.GONE
+        textTranslationImageView.visibility = View.GONE
+        segmentationImageView.visibility = View.GONE
+        
+        // Hide all overlay rows
+        binding.nightVisionOverlayRow.visibility = View.GONE
+        binding.imgOverlayRow.visibility = View.GONE
+        binding.robOverlayRow.visibility = View.GONE
     }
 
     private fun showActiveSlider() {
@@ -536,7 +587,6 @@ class MainActivity : AppCompatActivity() {
             binding.nightVisionSliderContainer.visibility = View.GONE
             binding.mlNightVisionSliderContainer.visibility = View.GONE
             binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
             binding.colorSliderContainer.visibility = View.GONE
             
             // Show only the active slider
@@ -544,7 +594,6 @@ class MainActivity : AppCompatActivity() {
                 isNightVisionEnabled -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
                 isMLNightVisionEnabled -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
                 isEdgeDetectionEnabled -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
-                isHDEnabled -> binding.hdSliderContainer.visibility = View.VISIBLE
                 isColorAdjustmentEnabled -> binding.colorSliderContainer.visibility = View.VISIBLE
             }
         }
@@ -574,32 +623,11 @@ class MainActivity : AppCompatActivity() {
         // Toggle regular night vision
         isNightVisionEnabled = !isNightVisionEnabled
         if (isNightVisionEnabled) {
-            // Disable all other modes if regular night vision is enabled
-            isMLNightVisionEnabled = false
-            isEdgeDetectionEnabled = false
-            isObjectDetectionEnabled = false
-            isTextTranslationEnabled = false
-            isHDEnabled = false
-            
-            // Reset all button states
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.robButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.imgOverlayRow.visibility = View.GONE
-            binding.robOverlayRow.visibility = View.GONE
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
             // Enable night vision
+            isNightVisionEnabled = true
             binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_green_light)
             binding.nightVisionButton.strokeWidth = 3
             binding.nightVisionSliderContainer.visibility = View.VISIBLE
@@ -638,34 +666,11 @@ class MainActivity : AppCompatActivity() {
         // Toggle ML night vision
         isMLNightVisionEnabled = !isMLNightVisionEnabled
         if (isMLNightVisionEnabled) {
-            // Disable all other modes if ML night vision is enabled
-            isNightVisionEnabled = false
-            isEdgeDetectionEnabled = false
-            isObjectDetectionEnabled = false
-            isTextTranslationEnabled = false
-            isHDEnabled = false
-            
-            // Reset all button states
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.imgButton.strokeWidth = 1
-            binding.robButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.imgOverlayRow.visibility = View.GONE
-            binding.robOverlayRow.visibility = View.GONE
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
             // Enable ML night vision
+            isMLNightVisionEnabled = true
             binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_blue_light)
             binding.nightVisionButton.strokeWidth = 3
             binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
@@ -694,66 +699,6 @@ class MainActivity : AppCompatActivity() {
             fpsView.visibility = View.VISIBLE
             binding.controlsContainer.visibility = View.VISIBLE
             Toast.makeText(this, "ML Night Vision Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun toggleNightVision() {
-        isNightVisionEnabled = !isNightVisionEnabled
-        if (isNightVisionEnabled) {
-            // Disable all other modes if regular night vision is enabled
-            isMLNightVisionEnabled = false
-            isEdgeDetectionEnabled = false
-            isObjectDetectionEnabled = false
-            isTextTranslationEnabled = false
-            isHDEnabled = false
-            
-            // Reset all button states
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.robButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.imgOverlayRow.visibility = View.GONE
-            binding.robOverlayRow.visibility = View.GONE
-            
-            // Enable night vision
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_green_light)
-            binding.nightVisionButton.strokeWidth = 3
-            binding.nightVisionSliderContainer.visibility = View.VISIBLE
-            binding.viewFinder.visibility = View.VISIBLE
-            nightVisionImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.viewFinder.visibility = View.VISIBLE
-            nightVisionImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Night Vision Disabled", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -816,7 +761,6 @@ class MainActivity : AppCompatActivity() {
     private fun disableAllIMG() {
         // Disable all IMG modes
         isEdgeDetectionEnabled = false
-        isHDEnabled = false
         isColorAdjustmentEnabled = false
         
         // Reset button state
@@ -827,10 +771,8 @@ class MainActivity : AppCompatActivity() {
         // Hide overlays and sliders
         binding.imgOverlayRow.visibility = View.GONE
         binding.edgeDetectionSliderContainer.visibility = View.GONE
-        binding.hdSliderContainer.visibility = View.GONE
         binding.colorSliderContainer.visibility = View.GONE
         edgeDetectionImageView.visibility = View.GONE
-        hdImageView.visibility = View.GONE
         colorAdjustmentImageView.visibility = View.GONE
         
         // Show normal camera view
@@ -841,8 +783,8 @@ class MainActivity : AppCompatActivity() {
 
     private fun disableAllROB() {
         // Disable all ROB modes
-        isObjectDetectionEnabled = false
-        isTextTranslationEnabled = false
+        isOpticalFlowEnabled = false
+        isSegmentationEnabled = false
         
         // Reset button state
         binding.robButton.setStrokeColorResource(android.R.color.white)
@@ -851,8 +793,8 @@ class MainActivity : AppCompatActivity() {
         
         // Hide overlays
         binding.robOverlayRow.visibility = View.GONE
-        objectDetectionOverlay.visibility = View.GONE
-        textTranslationImageView.visibility = View.GONE
+        opticalFlowImageView.visibility = View.GONE
+        segmentationImageView.visibility = View.GONE
         
         // Show normal camera view
         binding.viewFinder.visibility = View.VISIBLE
@@ -860,47 +802,27 @@ class MainActivity : AppCompatActivity() {
         Log.d(TAG, "All ROB modes disabled")
     }
 
-    private fun selectHD() {
+    private fun selectOpticalFlow() {
         // Hide overlay
-        binding.imgOverlayRow.visibility = View.GONE
+        binding.robOverlayRow.visibility = View.GONE
         
-        // Toggle HD
-        isHDEnabled = !isHDEnabled
-        if (isHDEnabled) {
-            // Disable all other modes if HD is enabled
-            isNightVisionEnabled = false
-            isMLNightVisionEnabled = false
-            isEdgeDetectionEnabled = false
-            isObjectDetectionEnabled = false
-            isTextTranslationEnabled = false
+        // Toggle Optical Flow
+        isOpticalFlowEnabled = !isOpticalFlowEnabled
+        if (isOpticalFlowEnabled) {
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
-            // Reset all button states
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.robButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            nightVisionImageView.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            binding.robOverlayRow.visibility = View.GONE
-            
-            // Enable HD
-            binding.imgButton.setStrokeColorResource(android.R.color.holo_purple)
-            binding.imgButton.strokeWidth = 3
-            binding.hdSliderContainer.visibility = View.VISIBLE
+            // Enable Optical Flow
+            isOpticalFlowEnabled = true
+            binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
+            binding.robButton.strokeWidth = 3
+            binding.imgButton.setStrokeColorResource(android.R.color.white)
+            binding.imgButton.strokeWidth = 1
             binding.viewFinder.visibility = View.VISIBLE
-            hdImageView.visibility = View.VISIBLE
+            opticalFlowImageView.visibility = View.VISIBLE
             
-            // Show active slider if expanded
-            showActiveSlider()
+            // Clear previous frame to start fresh
+            opticalFlowProcessor.clear()
             
             // Ensure all UI elements remain visible and on top
             histogramView.visibility = View.VISIBLE
@@ -909,20 +831,25 @@ class MainActivity : AppCompatActivity() {
             binding.controlsContainer.bringToFront()
             histogramView.bringToFront()
             fpsView.bringToFront()
-            Toast.makeText(this, "HD Enabled", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Optical Flow Enabled", Toast.LENGTH_SHORT).show()
         } else {
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.hdSliderContainer.visibility = View.GONE
+            binding.robButton.setStrokeColorResource(android.R.color.white)
+            binding.robButton.strokeWidth = 1
             binding.viewFinder.visibility = View.VISIBLE
-            hdImageView.visibility = View.GONE
+            opticalFlowImageView.visibility = View.GONE
+            
+            // Clear optical flow processor
+            opticalFlowProcessor.clear()
+            
             // Ensure all UI elements remain visible
             histogramView.visibility = View.VISIBLE
             fpsView.visibility = View.VISIBLE
             binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "HD Disabled", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Optical Flow Disabled", Toast.LENGTH_SHORT).show()
         }
     }
+
+
 
     private fun selectEdgeDetection() {
         // Hide overlay
@@ -931,32 +858,11 @@ class MainActivity : AppCompatActivity() {
         // Toggle edge detection
         isEdgeDetectionEnabled = !isEdgeDetectionEnabled
         if (isEdgeDetectionEnabled) {
-            // Disable all other modes if edge detection is enabled
-            isNightVisionEnabled = false
-            isMLNightVisionEnabled = false
-            isObjectDetectionEnabled = false
-            isTextTranslationEnabled = false
-            isHDEnabled = false
-            
-            // Reset all button states
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.robButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            nightVisionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            binding.robOverlayRow.visibility = View.GONE
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
             // Enable edge detection
+            isEdgeDetectionEnabled = true
             binding.imgButton.setStrokeColorResource(android.R.color.holo_orange_light)
             binding.imgButton.strokeWidth = 3
             binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
@@ -995,35 +901,11 @@ class MainActivity : AppCompatActivity() {
         // Toggle color adjustment
         isColorAdjustmentEnabled = !isColorAdjustmentEnabled
         if (isColorAdjustmentEnabled) {
-            // Disable all other modes if color adjustment is enabled
-            isNightVisionEnabled = false
-            isMLNightVisionEnabled = false
-            isObjectDetectionEnabled = false
-            isTextTranslationEnabled = false
-            isHDEnabled = false
-            isEdgeDetectionEnabled = false
-            
-            // Reset all button states
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.robButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            nightVisionImageView.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            binding.robOverlayRow.visibility = View.GONE
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
             // Enable color adjustment
+            isColorAdjustmentEnabled = true
             binding.imgButton.setStrokeColorResource(android.R.color.holo_blue_light)
             binding.imgButton.strokeWidth = 3
             binding.colorSliderContainer.visibility = View.VISIBLE
@@ -1055,6 +937,49 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun selectSegmentation() {
+        // Hide overlay
+        binding.robOverlayRow.visibility = View.GONE
+        
+        // Toggle segmentation
+        isSegmentationEnabled = !isSegmentationEnabled
+        if (isSegmentationEnabled) {
+            // Disable all other algorithms
+            disableAllAlgorithms()
+            
+            // Enable segmentation
+            isSegmentationEnabled = true
+            binding.robButton.setStrokeColorResource(android.R.color.holo_purple)
+            binding.robButton.strokeWidth = 3
+            binding.imgButton.setStrokeColorResource(android.R.color.white)
+            binding.imgButton.strokeWidth = 1
+            binding.viewFinder.visibility = View.VISIBLE
+            segmentationImageView.visibility = View.VISIBLE
+            
+            // Show active slider if expanded
+            showActiveSlider()
+            
+            // Ensure all UI elements remain visible and on top
+            histogramView.visibility = View.VISIBLE
+            fpsView.visibility = View.VISIBLE
+            binding.controlsContainer.visibility = View.VISIBLE
+            binding.controlsContainer.bringToFront()
+            histogramView.bringToFront()
+            fpsView.bringToFront()
+            Toast.makeText(this, "Image Segmentation Enabled", Toast.LENGTH_SHORT).show()
+        } else {
+            binding.robButton.setStrokeColorResource(android.R.color.white)
+            binding.robButton.strokeWidth = 1
+            binding.viewFinder.visibility = View.VISIBLE
+            segmentationImageView.visibility = View.GONE
+            // Ensure all UI elements remain visible
+            histogramView.visibility = View.VISIBLE
+            fpsView.visibility = View.VISIBLE
+            binding.controlsContainer.visibility = View.VISIBLE
+            Toast.makeText(this, "Image Segmentation Disabled", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     private fun selectObjectDetection() {
         // Hide overlay
         binding.robOverlayRow.visibility = View.GONE
@@ -1062,32 +987,11 @@ class MainActivity : AppCompatActivity() {
         // Toggle object detection
         isObjectDetectionEnabled = !isObjectDetectionEnabled
         if (isObjectDetectionEnabled) {
-            // Disable all other modes if object detection is enabled
-            isNightVisionEnabled = false
-            isMLNightVisionEnabled = false
-            isEdgeDetectionEnabled = false
-            isHDEnabled = false
-            
-            // Reset all button states
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.imgButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            nightVisionImageView.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            binding.imgOverlayRow.visibility = View.GONE
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
             // Enable object detection
+            isObjectDetectionEnabled = true
             binding.robButton.setStrokeColorResource(android.R.color.holo_red_light)
             binding.robButton.strokeWidth = 3
             binding.viewFinder.visibility = View.VISIBLE
@@ -1124,37 +1028,11 @@ class MainActivity : AppCompatActivity() {
         // Toggle text translation
         isTextTranslationEnabled = !isTextTranslationEnabled
         if (isTextTranslationEnabled) {
-            // Disable all other modes if text translation is enabled
-            isNightVisionEnabled = false
-            isMLNightVisionEnabled = false
-            isEdgeDetectionEnabled = false
-            isHDEnabled = false
-            isColorAdjustmentEnabled = false
-            isObjectDetectionEnabled = false
-            
-            // Reset all button states
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.imgButton.strokeWidth = 1
-            
-            // Hide all other sliders and overlays
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            binding.colorSliderContainer.visibility = View.GONE
-            objectDetectionOverlay.visibility = View.GONE
-            nightVisionImageView.visibility = View.GONE
-            edgeDetectionImageView.visibility = View.GONE
-            hdImageView.visibility = View.GONE
-            colorAdjustmentImageView.visibility = View.GONE
-            
-            // Hide overlay rows
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            binding.imgOverlayRow.visibility = View.GONE
+            // Disable all other algorithms
+            disableAllAlgorithms()
             
             // Enable text translation
+            isTextTranslationEnabled = true
             binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
             binding.robButton.strokeWidth = 3
             binding.viewFinder.visibility = View.VISIBLE
@@ -1223,12 +1101,12 @@ class MainActivity : AppCompatActivity() {
                         bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
                     } else null
                 }
-                isHDEnabled -> {
-                    // Get the HD processed image
-                    val drawable = hdImageView.drawable
+                isOpticalFlowEnabled -> {
+                    // Get the Optical Flow processed image
+                    val drawable = opticalFlowImageView.drawable
                     if (drawable is BitmapDrawable) {
                         val bitmap = drawable.bitmap
-                        Log.d(TAG, "Capturing HD upsampled image: ${bitmap.width}x${bitmap.height}")
+                        Log.d(TAG, "Capturing Optical Flow image: ${bitmap.width}x${bitmap.height}")
                         bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
                     } else null
                 }
@@ -1306,6 +1184,14 @@ class MainActivity : AppCompatActivity() {
 
     private fun takeOriginalPhoto() {
         val imageCapture = imageCapture ?: return
+        
+        // Always save processed image since we removed HD functionality
+        Log.d(TAG, "Saving processed camera image")
+        takeProcessedPhoto()
+    }
+    
+    private fun takeRawPhoto() {
+        val imageCapture = imageCapture ?: return
         val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -1324,12 +1210,48 @@ class MainActivity : AppCompatActivity() {
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
                 override fun onError(exc: ImageCaptureException) {
-                    Log.e(TAG, "Photo capture failed: ${exc.message}", exc)
+                    Log.e(TAG, "Raw photo capture failed: ${exc.message}", exc)
                 }
                 override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                    val msg = "Photo saved to gallery"
+                    val msg = "Raw photo saved to gallery"
                     Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
-                    Log.d(TAG, "Photo capture succeeded: ${output.savedUri}")
+                    Log.d(TAG, "Raw photo capture succeeded: ${output.savedUri}")
+                    
+                    // Notify media scanner to update gallery
+                    output.savedUri?.let { uri ->
+                        sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                    }
+                }
+            }
+        )
+    }
+    
+    private fun takeProcessedPhoto() {
+        val imageCapture = imageCapture ?: return
+        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val contentValues = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+            put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+            if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
+            }
+        }
+        val outputOptions = ImageCapture.OutputFileOptions.Builder(
+            contentResolver,
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            contentValues
+        ).build()
+        imageCapture.takePicture(
+            outputOptions,
+            ContextCompat.getMainExecutor(this),
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onError(exc: ImageCaptureException) {
+                    Log.e(TAG, "Processed photo capture failed: ${exc.message}", exc)
+                }
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    val msg = "Processed photo saved to gallery"
+                    Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
+                    Log.d(TAG, "Processed photo capture succeeded: ${output.savedUri}")
                     
                     // Notify media scanner to update gallery
                     output.savedUri?.let { uri ->
@@ -1402,7 +1324,7 @@ class MainActivity : AppCompatActivity() {
     private fun toggleDualCamera() {
         isDualCameraMode = !isDualCameraMode
         if (isDualCameraMode) {
-            binding.dualCameraButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.GREEN))
+
             binding.viewFinder.visibility = View.GONE
             binding.splitScreenContainer.visibility = View.VISIBLE
             
@@ -1413,7 +1335,6 @@ class MainActivity : AppCompatActivity() {
             startSplitScreenDualCamera()
             Toast.makeText(this, "Dual Camera Split-Screen Enabled", Toast.LENGTH_SHORT).show()
         } else {
-            binding.dualCameraButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.WHITE))
             binding.splitScreenContainer.visibility = View.GONE
             binding.viewFinder.visibility = View.VISIBLE
             stopSplitScreenDualCamera()
@@ -1779,7 +1700,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Dual camera mode not available, using single camera", Toast.LENGTH_SHORT).show()
                 // Fallback to single camera
                 isDualCameraMode = false
-                binding.dualCameraButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.WHITE))
                 binding.viewFinder.visibility = View.VISIBLE
                 dualCameraContainer.visibility = View.GONE
                 startCamera()
@@ -1851,7 +1771,6 @@ class MainActivity : AppCompatActivity() {
                 frontCameraView.visibility = View.GONE
                 this.visibility = View.GONE
                 isDualCameraMode = false
-                binding.dualCameraButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.WHITE))
                 startCamera()
                 Toast.makeText(this@MainActivity, "Dual camera mode disabled", Toast.LENGTH_SHORT).show()
             }
@@ -1901,11 +1820,112 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun requestPermissions() {
+        Log.d(TAG, "Requesting permissions: ${REQUIRED_PERMISSIONS.joinToString()}")
         requestPermissionLauncher.launch(REQUIRED_PERMISSIONS)
     }
 
     private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
         ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun hasMinimumRequiredPermissions(): Boolean {
+        // At minimum, we need camera permission
+        return ContextCompat.checkSelfPermission(baseContext, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun showPermissionExplanationDialog() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Permissions Required")
+            .setMessage("This app needs camera and media permissions to function properly:\n\n" +
+                    "• Camera: To capture photos and videos\n" +
+                    "• Audio: To record video with sound\n" +
+                    "• Media: To save your photos and videos\n\n" +
+                    "Please grant these permissions to use the app.")
+            .setPositiveButton("Grant Permissions") { _, _ ->
+                // Always try to request permissions again
+                requestPermissions()
+            }
+            .setNeutralButton("Open Settings") { _, _ ->
+                // Open app settings
+                val intent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = android.net.Uri.fromParts("package", packageName, null)
+                }
+                startActivity(intent)
+            }
+            .setNegativeButton("Exit") { _, _ ->
+                finish()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun showPermissionRationaleDialog(permissions: Array<String>) {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("Permissions Needed")
+            .setMessage("This app needs the following permissions to work:\n\n" +
+                    "• Camera: To take photos and record videos\n" +
+                    "• Audio: To record sound in videos\n" +
+                    "• Media: To save your photos and videos\n\n" +
+                    "These permissions are essential for the app to function.")
+            .setPositiveButton("Grant Permissions") { _, _ ->
+                requestPermissions()
+            }
+            .setNegativeButton("Cancel") { _, _ ->
+                Toast.makeText(this, "App cannot function without required permissions", Toast.LENGTH_LONG).show()
+                finish()
+            }
+            .setCancelable(false)
+            .show()
+    }
+
+    private fun checkAndRequestPermissions() {
+        Log.d(TAG, "Checking permissions...")
+        
+        if (allPermissionsGranted()) {
+            Log.d(TAG, "All permissions already granted, starting camera")
+            startCamera()
+        } else if (hasMinimumRequiredPermissions()) {
+            // At least camera permission is granted, start with limited functionality
+            Log.d(TAG, "Minimum permissions granted, starting camera with limited functionality")
+            startCamera()
+            
+            // Show a toast about limited functionality
+            Toast.makeText(this, "Some features may be limited due to missing permissions", Toast.LENGTH_LONG).show()
+        } else {
+            Log.d(TAG, "No permissions granted, requesting permissions")
+            
+            // Always request permissions, regardless of previous denials
+            val permissionsToRequest = REQUIRED_PERMISSIONS.filter {
+                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
+            }
+            
+            if (permissionsToRequest.isNotEmpty()) {
+                Log.d(TAG, "Requesting permissions: ${permissionsToRequest.joinToString()}")
+                
+                // Always show rationale first to explain why permissions are needed
+                showPermissionRationaleDialog(permissionsToRequest.toTypedArray())
+            } else {
+                Log.w(TAG, "No permissions to request but not all granted")
+                showPermissionExplanationDialog()
+            }
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Always check permissions when resuming, even if previously denied
+        if (allPermissionsGranted() && imageCapture == null) {
+            Log.d(TAG, "Permissions granted on resume, starting camera")
+            startCamera()
+        } else if (hasMinimumRequiredPermissions() && imageCapture == null) {
+            // At least camera permission is granted, start with limited functionality
+            Log.d(TAG, "Minimum permissions granted on resume, starting camera with limited functionality")
+            startCamera()
+        } else if (imageCapture == null) {
+            // No permissions granted, try requesting them again
+            Log.d(TAG, "No permissions granted on resume, checking permissions again")
+            checkAndRequestPermissions()
+        }
     }
 
     override fun onDestroy() {
@@ -1916,67 +1936,181 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "CameraXApp"
         private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
-        private val REQUIRED_PERMISSIONS = mutableListOf(
-            Manifest.permission.CAMERA,
-            Manifest.permission.RECORD_AUDIO
-        ).apply {
-            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.P) {
-                add(Manifest.permission.WRITE_EXTERNAL_STORAGE)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                add(Manifest.permission.READ_MEDIA_IMAGES)
-                add(Manifest.permission.READ_MEDIA_VIDEO)
-                add(Manifest.permission.READ_MEDIA_AUDIO)
-            }
-        }.toTypedArray()
+        private const val USE_SIMPLE_YUV_CONVERSION = true // Set to false to use complex conversion
+        private val REQUIRED_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.READ_MEDIA_IMAGES,
+                Manifest.permission.READ_MEDIA_VIDEO
+            )
+        } else {
+            arrayOf(
+                Manifest.permission.CAMERA,
+                Manifest.permission.RECORD_AUDIO,
+                Manifest.permission.WRITE_EXTERNAL_STORAGE
+            )
+        }
     }
 
-    // Utility function to convert YUV to Bitmap (move to top-level for split-screen use)
+    // Robust YUV to Bitmap conversion with multiple fallback methods
     private fun yuvToBitmap(image: ImageProxy): Bitmap? {
         try {
             val width = image.width
             val height = image.height
             val rotation = image.imageInfo.rotationDegrees
+            
+            // Try multiple YUV formats since different cameras use different formats
+            val formats = listOf(ImageFormat.NV21, ImageFormat.YV12, ImageFormat.YUV_420_888)
+            
+            for (format in formats) {
+                try {
+                    // Create YuvImage with current format
+                    val yuvImage = YuvImage(
+                        image.planes[0].buffer.array(),
+                        format,
+                        width,
+                        height,
+                        null
+                    )
+                    
+                    // Convert to JPEG with high quality
+                    val out = ByteArrayOutputStream()
+                    yuvImage.compressToJpeg(Rect(0, 0, width, height), 100, out)
+                    val imageBytes = out.toByteArray()
+                    
+                    // Convert JPEG to Bitmap
+                    val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+                    
+                    if (bitmap != null) {
+                        Log.d(TAG, "Successfully converted YUV using format: $format")
+                        
+                        // Apply rotation if needed
+                        return if (rotation != 0) {
+                            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+                            Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
+                        } else {
+                            bitmap
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "Format $format failed: ${e.message}")
+                    continue
+                }
+            }
+            
+            // If all YuvImage formats fail, try manual conversion
+            Log.w(TAG, "All YuvImage formats failed, trying manual conversion")
+            return tryManualYuvConversion(image)
+            
+        } catch (e: Exception) {
+            Log.e(TAG, "Error converting YUV to bitmap: ${e.message}")
+            e.printStackTrace()
+            
+            // Last resort: try manual conversion
+            return tryManualYuvConversion(image)
+        }
+    }
+    
+    // Manual YUV conversion as fallback with better error handling
+    private fun tryManualYuvConversion(image: ImageProxy): Bitmap? {
+        try {
+            val width = image.width
+            val height = image.height
+            val rotation = image.imageInfo.rotationDegrees
+            
+            Log.d(TAG, "Starting manual YUV conversion for ${width}x${height}")
+            
             // Get YUV planes
             val yPlane = image.planes[0]
             val uPlane = image.planes[1]
             val vPlane = image.planes[2]
-            val yBuffer = yPlane.buffer
-            val uBuffer = uPlane.buffer
-            val vBuffer = vPlane.buffer
-            // Create a simple grayscale bitmap first to test
+            
+            // Get plane info for debugging
+            val yStride = yPlane.rowStride
+            val uStride = uPlane.rowStride
+            val vStride = vPlane.rowStride
+            val uPixelStride = uPlane.pixelStride
+            val vPixelStride = vPlane.pixelStride
+            
+            Log.d(TAG, "YUV plane info - Y stride: $yStride, U stride: $uStride, V stride: $vStride")
+            Log.d(TAG, "UV pixel stride - U: $uPixelStride, V: $vPixelStride")
+            
+            // Create bitmap
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             val pixels = IntArray(width * height)
-            // Reset buffer positions
+            
+            // Get Y values (luminance)
+            val yBuffer = yPlane.buffer
             yBuffer.rewind()
+            val yValues = ByteArray(yBuffer.remaining())
+            yBuffer.get(yValues)
+            
+            Log.d(TAG, "Y buffer size: ${yValues.size}, expected: ${width * height}")
+            
+            // Get U and V values (chrominance)
+            val uBuffer = uPlane.buffer
+            val vBuffer = vPlane.buffer
             uBuffer.rewind()
             vBuffer.rewind()
+            val uValues = ByteArray(uBuffer.remaining())
+            val vValues = ByteArray(vBuffer.remaining())
+            uBuffer.get(uValues)
+            vBuffer.get(vValues)
+            
+            Log.d(TAG, "U buffer size: ${uValues.size}, V buffer size: ${vValues.size}")
+            
+            // Manual YUV to RGB conversion with proper UV sampling
             var pixelIndex = 0
-            for (j in 0 until height) {
-                for (i in 0 until width) {
-                    if (yBuffer.hasRemaining()) {
-                        val y = yBuffer.get().toInt() and 0xFF
-                        // For now, just use Y channel (grayscale) to test
-                        pixels[pixelIndex] = Color.rgb(y, y, y)
-                        pixelIndex++
-                    }
+            for (y in 0 until height) {
+                for (x in 0 until width) {
+                    // Get Y value
+                    val yIndex = y * width + x
+                    val yValue = if (yIndex < yValues.size) yValues[yIndex].toInt() and 0xFF else 0
+                    
+                    // Get U and V values with proper stride handling
+                    val uvRow = y / 2
+                    val uvCol = x / 2
+                    
+                    // Calculate UV indices with proper stride
+                    val uIndex = uvRow * uStride + uvCol * uPixelStride
+                    val vIndex = uvRow * vStride + uvCol * vPixelStride
+                    
+                    val uValue = if (uIndex < uValues.size) uValues[uIndex].toInt() and 0xFF else 128
+                    val vValue = if (vIndex < vValues.size) vValues[vIndex].toInt() and 0xFF else 128
+                    
+                    // YUV to RGB conversion (BT.601)
+                    val r = yValue + 1.402 * (vValue - 128)
+                    val g = yValue - 0.344 * (uValue - 128) - 0.714 * (vValue - 128)
+                    val b = yValue + 1.772 * (uValue - 128)
+                    
+                    val red = r.coerceIn(0.0, 255.0).toInt()
+                    val green = g.coerceIn(0.0, 255.0).toInt()
+                    val blue = b.coerceIn(0.0, 255.0).toInt()
+                    
+                    pixels[pixelIndex++] = Color.rgb(red, green, blue)
                 }
             }
+            
+            Log.d(TAG, "Manual conversion completed, setting pixels")
             bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            // Apply rotation and camera-specific corrections
-            val correctedBitmap = if (rotation != 0) {
+            
+            // Apply rotation if needed
+            return if (rotation != 0) {
                 val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
                 Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
             } else {
                 bitmap
             }
-            return correctedBitmap
+            
         } catch (e: Exception) {
-            Log.e(TAG, "Error converting YUV to bitmap: ${e.message}")
+            Log.e(TAG, "Manual YUV conversion failed: ${e.message}")
             e.printStackTrace()
             return null
         }
     }
+    
+
 
     private inner class NightVisionAnalyzer(private val listener: (Double) -> Unit) : ImageAnalysis.Analyzer {
         override fun analyze(image: ImageProxy) {
@@ -2004,6 +2138,42 @@ class MainActivity : AppCompatActivity() {
             val bitmap = yuvToBitmap(image)
             if (bitmap != null) {
                 val (redHistogram, greenHistogram, blueHistogram) = calculateHistograms(bitmap)
+                
+                // Debug: Log histogram differences to verify color channels are distinct
+                val redMax = redHistogram.maxOrNull() ?: 0
+                val greenMax = greenHistogram.maxOrNull() ?: 0
+                val blueMax = blueHistogram.maxOrNull() ?: 0
+                
+                if (frameCount % 30 == 0) { // Log every 30 frames to avoid spam
+                    Log.d(TAG, "Histogram max values - Red: $redMax, Green: $greenMax, Blue: $blueMax")
+                    
+                    // Check if histograms are identical (which would indicate a problem)
+                    val redSum = redHistogram.sum()
+                    val greenSum = greenHistogram.sum()
+                    val blueSum = blueHistogram.sum()
+                    
+                    if (redSum == greenSum && greenSum == blueSum) {
+                        Log.w(TAG, "Warning: All histogram sums are identical - color conversion may not be working properly")
+                    }
+                    
+                    // Sample a few pixels to verify color conversion
+                    val pixels = IntArray(bitmap.width * bitmap.height)
+                    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
+                    
+                    if (pixels.isNotEmpty()) {
+                        val samplePixel = pixels[pixels.size / 2] // Sample middle pixel
+                        val r = Color.red(samplePixel)
+                        val g = Color.green(samplePixel)
+                        val b = Color.blue(samplePixel)
+                        Log.d(TAG, "Sample pixel RGB: R=$r, G=$g, B=$b")
+                        
+                        // Check if all channels are the same (indicating grayscale)
+                        if (r == g && g == b) {
+                            Log.w(TAG, "Warning: Sample pixel is grayscale - color conversion may not be working")
+                        }
+                    }
+                }
+                
                 runOnUiThread {
                     histogramView.updateHistograms(redHistogram, greenHistogram, blueHistogram)
                 }
@@ -2012,7 +2182,7 @@ class MainActivity : AppCompatActivity() {
                 if (isObjectDetectionEnabled) {
                     val detections = objectDetectionProcessor.detectObjects(bitmap)
                     runOnUiThread {
-                        objectDetectionOverlay.updateDetections(detections)
+                        objectDetectionOverlay.setResults(detections, bitmap.height, bitmap.width)
                     }
                 }
             }
@@ -2062,15 +2232,15 @@ class MainActivity : AppCompatActivity() {
                 }
             }
 
-            if (isHDEnabled) {
+            if (isOpticalFlowEnabled) {
                 val inputBitmap = yuvToBitmap(image)
                 if (inputBitmap != null) {
-                    val hdBitmap = hdImageProcessor.processImage(inputBitmap, hdScale)
+                    val opticalFlowBitmap = opticalFlowProcessor.processOpticalFlow(inputBitmap)
                     runOnUiThread {
-                        hdImageView.setImageBitmap(applyCameraFlip(hdBitmap))
+                        opticalFlowImageView.setImageBitmap(applyCameraFlip(opticalFlowBitmap))
                     }
                 } else {
-                    Log.w(TAG, "HD processing failed")
+                    Log.w(TAG, "Optical flow processing failed")
                 }
             }
 
@@ -2095,6 +2265,28 @@ class MainActivity : AppCompatActivity() {
                     }
                 } else {
                     Log.w(TAG, "Text translation processing failed")
+                }
+            }
+
+            if (isSegmentationEnabled) {
+                val inputBitmap = yuvToBitmap(image)
+                if (inputBitmap != null) {
+                    // Log the preview dimensions
+                    val previewWidth = binding.viewFinder.width
+                    val previewHeight = binding.viewFinder.height
+                    Log.d(TAG, "Preview dimensions: ${previewWidth}x${previewHeight}")
+                    Log.d(TAG, "Input bitmap dimensions: ${inputBitmap.width}x${inputBitmap.height}")
+                    
+                    val segmentationOverlay = imageSegmentationProcessor.segmentImage(inputBitmap)
+                    if (segmentationOverlay != null) {
+                        runOnUiThread {
+                            segmentationImageView.setImageBitmap(applyCameraFlip(segmentationOverlay))
+                        }
+                    } else {
+                        Log.w(TAG, "Segmentation processing failed")
+                    }
+                } else {
+                    Log.w(TAG, "Segmentation processing failed - could not convert YUV to bitmap")
                 }
             }
 

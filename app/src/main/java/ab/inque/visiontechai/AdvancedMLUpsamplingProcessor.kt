@@ -1,7 +1,8 @@
-package ab.inque.nightvisioncamera
+package ab.inque.visiontechai
 
 import android.content.Context
 import android.graphics.*
+import android.os.SystemClock
 import android.util.Log
 import org.tensorflow.lite.Interpreter
 import org.tensorflow.lite.support.image.ImageProcessor
@@ -17,11 +18,13 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
         private const val TAG = "AdvancedMLUpsamplingProcessor"
         // Use the ESRGAN TFLite model
         private const val MODEL_FILE = "esrgan.tflite"
-        // ESRGAN expects input: float32, [0,1], shape [1, h, w, 3]
-        private const val INPUT_SIZE = 64 // You may need to update this if ESRGAN expects a different size
-        private const val SCALE_FACTOR = 4 // ESRGAN is usually 4x
-        private const val OUTPUT_SIZE = INPUT_SIZE * SCALE_FACTOR
-        private const val PATCH_OVERLAP = 8 // Overlap between patches for seamless stitching
+        // ESRGAN expects input: float32, [0,1], shape [1, 128, 128, 3]
+        private const val INPUT_SIZE = 128 // ESRGAN input size
+        private const val SCALE_FACTOR = 4 // ESRGAN 4x upsampling
+        private const val OUTPUT_SIZE = INPUT_SIZE * SCALE_FACTOR // 512x512 output
+        private const val PATCH_OVERLAP = 0 // No overlap for clean patch processing
+        private const val MAX_INFERENCE_TIME_MS = 5000L // 5 second timeout
+        private const val MAX_PATCHES_PER_IMAGE = 16 // Limit patches to prevent freezing
     }
 
     private var interpreter: Interpreter? = null
@@ -45,8 +48,8 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
             Log.d(TAG, "Advanced model loaded from assets. Size: ${modelBytes.size} bytes")
             
             val options = Interpreter.Options().apply {
-                setNumThreads(2) // Use fewer threads to avoid conflicts
-                setUseXNNPACK(true)
+                setNumThreads(1) // Use single thread to prevent conflicts
+                setUseXNNPACK(false) // Disable XNNPACK to prevent freezing
                 // Don't use NNAPI to avoid conflicts with other services
                 // setUseNNAPI(true) // Commented out to prevent conflicts
             }
@@ -74,6 +77,10 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
     }
 
     fun upsampleImage(bitmap: Bitmap, scale: Float): Bitmap {
+        if (scale == 1.0f) {
+            Log.d(TAG, "Scale is 1.0, saving original image without upsampling.")
+            return bitmap
+        }
         if (!isInitialized || interpreter == null) {
             Log.w(TAG, "Advanced ML model not initialized, using fallback upsampling")
             return fallbackUpsampling(bitmap, scale)
@@ -83,17 +90,12 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
             val originalWidth = bitmap.width
             val originalHeight = bitmap.height
             
-            val targetWidth = (originalWidth * scale).toInt()
-            val targetHeight = (originalHeight * scale).toInt()
+            // For ML upsampling, always use 4x scale
+            val targetWidth = originalWidth * SCALE_FACTOR
+            val targetHeight = originalHeight * SCALE_FACTOR
             
-            // Safety check: prevent processing images that are too large
-            val maxDimension = 2048
-            if (targetWidth > maxDimension || targetHeight > maxDimension) {
-                Log.w(TAG, "Target size too large (${targetWidth}x${targetHeight}), using fallback")
-                return fallbackUpsampling(bitmap, scale)
-            }
-            
-            Log.d(TAG, "Advanced ML upsampling from ${originalWidth}x${originalHeight} to ${targetWidth}x${targetHeight}")
+            Log.d(TAG, "ESRGAN 4x upsampling from ${originalWidth}x${originalHeight} to ${targetWidth}x${targetHeight}")
+            Log.d(TAG, "Processing with 128x128 patches -> 512x512 outputs")
             
             return processWithAdvancedMLModel(bitmap, targetWidth, targetHeight)
             
@@ -106,68 +108,97 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
 
     private fun processWithAdvancedMLModel(bitmap: Bitmap, targetWidth: Int, targetHeight: Int): Bitmap {
         try {
-            val effectivePatchSize = INPUT_SIZE - PATCH_OVERLAP
-            val effectiveOutputPatchSize = OUTPUT_SIZE - (PATCH_OVERLAP * SCALE_FACTOR)
+            Log.d(TAG, "Processing image with 128x128 patches for 4x upsampling")
+            Log.d(TAG, "Input: ${bitmap.width}x${bitmap.height} -> Output: ${targetWidth}x${targetHeight}")
             
-            val patchesX = (targetWidth + effectiveOutputPatchSize - 1) / effectiveOutputPatchSize
-            val patchesY = (targetHeight + effectiveOutputPatchSize - 1) / effectiveOutputPatchSize
+            // Calculate number of 128x128 patches needed
+            val inputPatchesX = (bitmap.width + INPUT_SIZE - 1) / INPUT_SIZE
+            val inputPatchesY = (bitmap.height + INPUT_SIZE - 1) / INPUT_SIZE
+            
+            // Limit the number of patches to prevent freezing
+            if (inputPatchesX * inputPatchesY > MAX_PATCHES_PER_IMAGE) {
+                Log.w(TAG, "Too many patches (${inputPatchesX * inputPatchesY}), using fallback upsampling")
+                return fallbackUpsampling(bitmap, targetWidth.toFloat() / bitmap.width)
+            }
+            
+            Log.d(TAG, "Processing ${inputPatchesX}x${inputPatchesY} patches")
+            Log.d(TAG, "Each patch: 128x128 -> 512x512 (4x upsampling)")
             
             val outputBitmap = Bitmap.createBitmap(targetWidth, targetHeight, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(outputBitmap)
             
-            // Process each patch with overlap
-            for (patchY in 0 until patchesY) {
-                for (patchX in 0 until patchesX) {
-                    val startX = patchX * effectiveOutputPatchSize
-                    val startY = patchY * effectiveOutputPatchSize
-                    val endX = minOf(startX + effectiveOutputPatchSize, targetWidth)
-                    val endY = minOf(startY + effectiveOutputPatchSize, targetHeight)
+            // Process each 128x128 patch
+            var patchCount = 0
+            val totalPatches = inputPatchesX * inputPatchesY
+            
+            for (patchY in 0 until inputPatchesY) {
+                for (patchX in 0 until inputPatchesX) {
+                    patchCount++
+                    Log.d(TAG, "Processing patch $patchCount/$totalPatches (${patchX},${patchY})")
                     
-                    // Calculate corresponding input patch coordinates
-                    val inputStartX = (startX / SCALE_FACTOR).toInt()
-                    val inputStartY = (startY / SCALE_FACTOR).toInt()
+                    // Check for timeout
+                    if (SystemClock.uptimeMillis() > MAX_INFERENCE_TIME_MS) {
+                        Log.w(TAG, "Inference timeout reached, using fallback for remaining patches")
+                        return fallbackUpsampling(bitmap, targetWidth.toFloat() / bitmap.width)
+                    }
+                    
+                    // Calculate input patch coordinates
+                    val inputStartX = patchX * INPUT_SIZE
+                    val inputStartY = patchY * INPUT_SIZE
                     val inputEndX = minOf(inputStartX + INPUT_SIZE, bitmap.width)
                     val inputEndY = minOf(inputStartY + INPUT_SIZE, bitmap.height)
+                    
+                    // Calculate output patch coordinates (4x larger)
+                    val outputStartX = patchX * OUTPUT_SIZE
+                    val outputStartY = patchY * OUTPUT_SIZE
+                    val outputEndX = minOf(outputStartX + OUTPUT_SIZE, targetWidth)
+                    val outputEndY = minOf(outputStartY + OUTPUT_SIZE, targetHeight)
                     
                     // Extract input patch
                     val inputPatch = Bitmap.createBitmap(bitmap, inputStartX, inputStartY, 
                                                        inputEndX - inputStartX, inputEndY - inputStartY)
                     
-                    // Resize patch to model input size if needed
+                    // Resize patch to exactly 128x128 if needed
                     val resizedPatch = if (inputPatch.width != INPUT_SIZE || inputPatch.height != INPUT_SIZE) {
                         Bitmap.createScaledBitmap(inputPatch, INPUT_SIZE, INPUT_SIZE, true)
                     } else {
                         inputPatch
                     }
                     
-                    // Process patch with advanced ML model
+                    Log.d(TAG, "Processing patch ${patchX},${patchY}: ${resizedPatch.width}x${resizedPatch.height}")
+                    
+                    // Process patch with ESRGAN model (128x128 -> 512x512)
                     val outputPatch = processPatchWithAdvancedML(resizedPatch)
                     
-                    // Apply simple color preservation
-                    val colorPreservedPatch = applySimpleColorPreservation(outputPatch, inputPatch)
-                    
-                    // Copy processed patch to output bitmap with blending for overlap regions
-                    val srcRect = Rect(0, 0, colorPreservedPatch.width, colorPreservedPatch.height)
-                    val dstRect = Rect(startX, startY, endX, endY)
-                    
-                    // Use Porter-Duff blending for smooth patch stitching
-                    val paint = Paint().apply {
-                        isAntiAlias = true
-                        isFilterBitmap = true
+                    if (outputPatch != null) {
+                        // Apply color preservation
+                        val colorPreservedPatch = applySimpleColorPreservation(outputPatch, inputPatch)
+                        
+                        // Copy processed patch to output bitmap
+                        val srcRect = Rect(0, 0, colorPreservedPatch.width, colorPreservedPatch.height)
+                        val dstRect = Rect(outputStartX, outputStartY, outputEndX, outputEndY)
+                        
+                        val paint = Paint().apply {
+                            isAntiAlias = true
+                            isFilterBitmap = true
+                        }
+                        
+                        canvas.drawBitmap(colorPreservedPatch, srcRect, dstRect, paint)
+                        
+                        // Clean up
+                        colorPreservedPatch.recycle()
+                        outputPatch.recycle()
                     }
-                    
-                    canvas.drawBitmap(colorPreservedPatch, srcRect, dstRect, paint)
                     
                     // Clean up
                     if (inputPatch != resizedPatch) {
                         resizedPatch.recycle()
                     }
                     inputPatch.recycle()
-                    outputPatch.recycle()
-                    colorPreservedPatch.recycle()
                 }
             }
             
+            Log.d(TAG, "Completed 4x upsampling with patch processing")
             return outputBitmap
             
         } catch (e: Exception) {
@@ -177,8 +208,10 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
         }
     }
 
-    private fun processPatchWithAdvancedML(inputPatch: Bitmap): Bitmap {
+    private fun processPatchWithAdvancedML(inputPatch: Bitmap): Bitmap? {
         try {
+            val startTime = SystemClock.uptimeMillis()
+            
             // Convert Bitmap to float32 [0,1] and add batch dimension
             val inputWidth = inputPatch.width
             val inputHeight = inputPatch.height
@@ -194,8 +227,8 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
 
             // Prepare input tensor
             val inputShape = intArrayOf(1, inputHeight, inputWidth, 3)
-            val inputBuffer = java.nio.ByteBuffer.allocateDirect(4 * 1 * inputHeight * inputWidth * 3)
-                .order(java.nio.ByteOrder.nativeOrder())
+            val inputBuffer = ByteBuffer.allocateDirect(4 * 1 * inputHeight * inputWidth * 3)
+                .order(ByteOrder.nativeOrder())
             for (y in 0 until inputHeight) {
                 for (x in 0 until inputWidth) {
                     for (c in 0..2) {
@@ -209,14 +242,31 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
             val outputHeight = inputHeight * SCALE_FACTOR
             val outputWidth = inputWidth * SCALE_FACTOR
             val outputShape = intArrayOf(1, outputHeight, outputWidth, 3)
-            val outputBuffer = java.nio.ByteBuffer.allocateDirect(4 * 1 * outputHeight * outputWidth * 3)
-                .order(java.nio.ByteOrder.nativeOrder())
+            val outputBuffer = ByteBuffer.allocateDirect(4 * 1 * outputHeight * outputWidth * 3)
+                .order(ByteOrder.nativeOrder())
 
-            // Run inference
-            interpreter?.resizeInput(0, inputShape)
-            interpreter?.allocateTensors()
-            interpreter?.run(inputBuffer, outputBuffer)
-            outputBuffer.rewind()
+            // Check for timeout before running inference
+            if (SystemClock.uptimeMillis() - startTime > MAX_INFERENCE_TIME_MS) {
+                Log.w(TAG, "Inference timeout before running model")
+                return null
+            }
+
+            // Run inference with timeout protection
+            try {
+                interpreter?.resizeInput(0, inputShape)
+                interpreter?.allocateTensors()
+                interpreter?.run(inputBuffer, outputBuffer)
+                outputBuffer.rewind()
+            } catch (e: Exception) {
+                Log.e(TAG, "Inference failed: ${e.message}")
+                return null
+            }
+
+            // Check for timeout after inference
+            if (SystemClock.uptimeMillis() - startTime > MAX_INFERENCE_TIME_MS) {
+                Log.w(TAG, "Inference timeout after running model")
+                return null
+            }
 
             // Convert output buffer to Bitmap (float32 [0,1] to [0,255])
             val outputBitmap = Bitmap.createBitmap(outputWidth, outputHeight, Bitmap.Config.ARGB_8888)
@@ -254,6 +304,7 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
             
             // Apply color preservation to maintain original color characteristics
             return applySimpleColorPreservation(outputBitmap, inputPatch)
+            
         } catch (e: Exception) {
             Log.e(TAG, "Error processing patch with advanced ML: ${e.message}")
             e.printStackTrace()
@@ -264,96 +315,12 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
 
     private fun applySimpleColorPreservation(outputPatch: Bitmap, originalPatch: Bitmap): Bitmap {
         try {
-            // Try the advanced histogram matching first
-            return applyHistogramMatching(outputPatch, originalPatch)
-        } catch (e: Exception) {
-            Log.w(TAG, "Histogram matching failed, using simple color transfer: ${e.message}")
-            // Fallback to simple color transfer
+            // Use simple color transfer instead of complex histogram matching
             return applySimpleColorTransfer(outputPatch, originalPatch)
+        } catch (e: Exception) {
+            Log.w(TAG, "Color preservation failed, returning original output: ${e.message}")
+            return outputPatch
         }
-    }
-    
-    private fun applyHistogramMatching(outputPatch: Bitmap, originalPatch: Bitmap): Bitmap {
-        // Get pixel arrays
-        val originalPixels = IntArray(originalPatch.width * originalPatch.height)
-        val outputPixels = IntArray(outputPatch.width * outputPatch.height)
-        
-        originalPatch.getPixels(originalPixels, 0, originalPatch.width, 0, 0, originalPatch.width, originalPatch.height)
-        outputPatch.getPixels(outputPixels, 0, outputPatch.width, 0, 0, outputPatch.width, outputPatch.height)
-        
-        // Calculate histograms for each channel
-        val originalHistR = IntArray(256)
-        val originalHistG = IntArray(256)
-        val originalHistB = IntArray(256)
-        val outputHistR = IntArray(256)
-        val outputHistG = IntArray(256)
-        val outputHistB = IntArray(256)
-        
-        // Build histograms
-        for (pixel in originalPixels) {
-            originalHistR[Color.red(pixel)]++
-            originalHistG[Color.green(pixel)]++
-            originalHistB[Color.blue(pixel)]++
-        }
-        
-        for (pixel in outputPixels) {
-            outputHistR[Color.red(pixel)]++
-            outputHistG[Color.green(pixel)]++
-            outputHistB[Color.blue(pixel)]++
-        }
-        
-        // Calculate cumulative distribution functions (CDFs)
-        val originalCDFR = calculateCDF(originalHistR)
-        val originalCDFG = calculateCDF(originalHistG)
-        val originalCDFB = calculateCDF(originalHistB)
-        val outputCDFR = calculateCDF(outputHistR)
-        val outputCDFG = calculateCDF(outputHistG)
-        val outputCDFB = calculateCDF(outputHistB)
-        
-        // Create lookup tables for histogram matching
-        val lookupR = createHistogramLookup(outputCDFR, originalCDFR)
-        val lookupG = createHistogramLookup(outputCDFG, originalCDFG)
-        val lookupB = createHistogramLookup(outputCDFB, originalCDFB)
-        
-        // Apply histogram matching with color transfer
-        for (i in outputPixels.indices) {
-            val pixel = outputPixels[i]
-            val r = Color.red(pixel)
-            val g = Color.green(pixel)
-            val b = Color.blue(pixel)
-            
-            // Apply histogram matching
-            val matchedR = lookupR[r]
-            val matchedG = lookupG[g]
-            val matchedB = lookupB[b]
-            
-            // Apply color transfer to maintain overall color balance
-            val originalAvgR = calculateAverage(originalPixels) { Color.red(it) }
-            val originalAvgG = calculateAverage(originalPixels) { Color.green(it) }
-            val originalAvgB = calculateAverage(originalPixels) { Color.blue(it) }
-            
-            val outputAvgR = calculateAverage(outputPixels) { Color.red(it) }
-            val outputAvgG = calculateAverage(outputPixels) { Color.green(it) }
-            val outputAvgB = calculateAverage(outputPixels) { Color.blue(it) }
-            
-            // Calculate color transfer factors
-            val transferStrength = 0.5f // Reduce strength to avoid over-correction
-            val factorR = if (outputAvgR > 0) originalAvgR / outputAvgR else 1.0
-            val factorG = if (outputAvgG > 0) originalAvgG / outputAvgG else 1.0
-            val factorB = if (outputAvgB > 0) originalAvgB / outputAvgB else 1.0
-            
-            // Apply color transfer with smoothing
-            val finalR = (matchedR * (1f - transferStrength) + matchedR * factorR * transferStrength).toInt().coerceIn(0, 255)
-            val finalG = (matchedG * (1f - transferStrength) + matchedG * factorG * transferStrength).toInt().coerceIn(0, 255)
-            val finalB = (matchedB * (1f - transferStrength) + matchedB * factorB * transferStrength).toInt().coerceIn(0, 255)
-            
-            outputPixels[i] = Color.rgb(finalR, finalG, finalB)
-        }
-        
-        val correctedBitmap = Bitmap.createBitmap(outputPatch.width, outputPatch.height, Bitmap.Config.ARGB_8888)
-        correctedBitmap.setPixels(outputPixels, 0, outputPatch.width, 0, 0, outputPatch.width, outputPatch.height)
-        
-        return correctedBitmap
     }
     
     private fun applySimpleColorTransfer(outputPatch: Bitmap, originalPatch: Bitmap): Bitmap {
@@ -376,10 +343,22 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
                 val g = Color.green(pixel)
                 val b = Color.blue(pixel)
                 
-                // Transfer color statistics
-                val newR = ((r - outputStats.avgR) * (originalStats.stdR / outputStats.stdR) + originalStats.avgR).toInt().coerceIn(0, 255)
-                val newG = ((g - outputStats.avgG) * (originalStats.stdG / outputStats.stdG) + originalStats.avgG).toInt().coerceIn(0, 255)
-                val newB = ((b - outputStats.avgB) * (originalStats.stdB / outputStats.stdB) + originalStats.avgB).toInt().coerceIn(0, 255)
+                // Transfer color statistics with safety checks
+                val newR = if (outputStats.stdR > 0) {
+                    ((r - outputStats.avgR) * (originalStats.stdR / outputStats.stdR) + originalStats.avgR).toInt().coerceIn(0, 255)
+                } else {
+                    r
+                }
+                val newG = if (outputStats.stdG > 0) {
+                    ((g - outputStats.avgG) * (originalStats.stdG / outputStats.stdG) + originalStats.avgG).toInt().coerceIn(0, 255)
+                } else {
+                    g
+                }
+                val newB = if (outputStats.stdB > 0) {
+                    ((b - outputStats.avgB) * (originalStats.stdB / outputStats.stdB) + originalStats.avgB).toInt().coerceIn(0, 255)
+                } else {
+                    b
+                }
                 
                 outputPixels[i] = Color.rgb(newR, newG, newB)
             }
@@ -434,56 +413,11 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
             sumSqB += (b - avgB) * (b - avgB)
         }
         
-        val stdR = kotlin.math.sqrt(sumSqR / count)
-        val stdG = kotlin.math.sqrt(sumSqG / count)
-        val stdB = kotlin.math.sqrt(sumSqB / count)
+        val stdR = sqrt(sumSqR / count)
+        val stdG = sqrt(sumSqG / count)
+        val stdB = sqrt(sumSqB / count)
         
         return ColorStats(avgR, avgG, avgB, stdR, stdG, stdB)
-    }
-    
-    private fun calculateCDF(histogram: IntArray): FloatArray {
-        val cdf = FloatArray(256)
-        cdf[0] = histogram[0].toFloat()
-        for (i in 1 until 256) {
-            cdf[i] = cdf[i - 1] + histogram[i]
-        }
-        
-        // Normalize to [0, 1]
-        val total = cdf[255]
-        if (total > 0) {
-            for (i in cdf.indices) {
-                cdf[i] = cdf[i] / total
-            }
-        }
-        
-        return cdf
-    }
-    
-    private fun createHistogramLookup(sourceCDF: FloatArray, targetCDF: FloatArray): IntArray {
-        val lookup = IntArray(256)
-        for (i in 0 until 256) {
-            val sourceValue = sourceCDF[i]
-            var bestMatch = 0
-            var minDiff = Float.MAX_VALUE
-            
-            for (j in 0 until 256) {
-                val diff = kotlin.math.abs(sourceValue - targetCDF[j])
-                if (diff < minDiff) {
-                    minDiff = diff
-                    bestMatch = j
-                }
-            }
-            lookup[i] = bestMatch
-        }
-        return lookup
-    }
-    
-    private fun calculateAverage(pixels: IntArray, colorExtractor: (Int) -> Int): Double {
-        var sum = 0.0
-        for (pixel in pixels) {
-            sum += colorExtractor(pixel)
-        }
-        return sum / pixels.size
     }
 
     private fun fallbackUpsampling(bitmap: Bitmap, scale: Float): Bitmap {
@@ -517,8 +451,7 @@ class AdvancedMLUpsamplingProcessor(private val context: Context) {
         
         outputBitmap.setPixels(outputPixels, 0, newWidth, 0, 0, newWidth, newHeight)
         
-        // Apply color preservation to maintain original color characteristics
-        return applySimpleColorPreservation(outputBitmap, bitmap)
+        return outputBitmap
     }
 
     private fun getHighQualityUpsampledPixel(pixels: IntArray, x: Float, y: Float, width: Int, height: Int): Int {

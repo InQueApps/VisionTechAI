@@ -142,7 +142,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Tap to select between Regular Night Vision (histogram equalization) and ML Night Vision (AI-enhanced). Use sliders to adjust intensity/sensitivity."
+                        android:text="Tap to select between Regular Night Vision (histogram equalization) and ML Night Vision (AI-enhanced). Regular NV uses traditional image processing, while ML NV uses AI to enhance low-light images. Use sliders to adjust intensity/sensitivity."
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -170,7 +170,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Tap to select between HD (High Definition upsampling) and ED (Edge Detection). HD enhances resolution, ED highlights contours."
+                        android:text="Tap to select from two processing modes:\n• ED (Edge Detection): Highlights image contours and edges\n• COL (Color Adjustment): Adjust RGB color channels individually"
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -198,7 +198,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Tap to access Object Detection using YOLOX AI model. Detects and labels objects in real-time with bounding boxes and confidence scores."
+                        android:text="Tap to select from two advanced processing modes:\n• OF (Optical Flow): Shows motion vectors as colored arrows\n• SEG (Segmentation): AI-powered image segmentation"
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -220,7 +220,7 @@
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginBottom="16dp"
-                    android:text="• Switch Camera: Toggle between front and rear cameras\n• Dual Camera: View both cameras simultaneously\n• Record: Take photos or record videos\n• Photo/Video: Switch between photo and video modes"
+                    android:text="• Switch Camera: Toggle between front and rear cameras\n• Dual Camera: View both cameras simultaneously in split-screen mode\n• Record: Take photos or record videos (center button)\n• Photo/Video: Switch between photo and video capture modes"
                     android:textColor="@android:color/white"
                     android:textSize="14sp"
                     android:lineSpacingExtra="4dp" />
@@ -239,7 +239,7 @@
                 <TextView
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="• Only one enhancement mode can be active at a time\n• Use sliders to fine-tune the effects\n• The histogram shows real-time color distribution\n• FPS counter shows current frame rate"
+                    android:text="• Only one enhancement mode can be active at a time\n• Use sliders to fine-tune the effects (tap arrow to expand)\n• The histogram shows real-time color distribution\n• FPS counter shows current frame rate\n• Overlay menus auto-hide after 3 seconds\n• Optical Flow arrows show motion direction and magnitude"
                     android:textColor="@android:color/white"
                     android:textSize="14sp"
                     android:lineSpacingExtra="4dp" />
@@ -394,6 +394,36 @@
                 android:textSize="13sp"
                 android:layout_marginTop="6dp" />
 
+            <!-- ML Button Row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:layout_marginTop="8dp">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/mlUpsamplingButton"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="36dp"
+                    android:text="ML"
+                    android:textSize="12sp"
+                    android:textColor="@android:color/holo_blue_light"
+                    app:strokeColor="@android:color/holo_blue_light"
+                    android:layout_marginEnd="8dp" />
+
+                <TextView
+                    android:id="@+id/mlStatusText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="ML Upsampling: ON"
+                    android:textColor="@android:color/holo_blue_light"
+                    android:textSize="12sp"
+                    android:textStyle="bold" />
+
+            </LinearLayout>
+
         </LinearLayout>
 
         <!-- Color Adjustment Slider (Above Controls) -->
@@ -543,7 +573,7 @@
                 android:layout_height="36dp"
                 android:layout_weight="1"
                 android:layout_marginEnd="4dp"
-                android:text="NV Regular"
+                android:text="Night Vision"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
@@ -556,14 +586,14 @@
                 android:layout_height="36dp"
                 android:layout_weight="1"
                 android:layout_marginStart="4dp"
-                android:text="NV ML"
+                android:text="Night Vision ML"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
 
         </LinearLayout>
 
-        <!-- IMG Overlay Row (HD, ED, and COL) -->
+        <!-- IMG Overlay Row (ED and COL) -->
         <LinearLayout
             android:id="@+id/imgOverlayRow"
             android:layout_width="match_parent"
@@ -573,19 +603,6 @@
             android:background="#80000000"
             android:visibility="gone">
 
-            <!-- HD Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/imgHDButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginEnd="4dp"
-                android:text="HD"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
-
             <!-- Edge Detection Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgEDButton"
@@ -593,8 +610,7 @@
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
+                android:layout_marginEnd="4dp"
                 android:text="ED"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
@@ -615,7 +631,7 @@
 
         </LinearLayout>
 
-        <!-- ROB Overlay Row (Object Detection and Text Translation) -->
+        <!-- ROB Overlay Row (Optical Flow and Segmentation) -->
         <LinearLayout
             android:id="@+id/robOverlayRow"
             android:layout_width="match_parent"
@@ -625,28 +641,28 @@
             android:background="#80000000"
             android:visibility="gone">
 
-            <!-- Object Detection Button -->
+            <!-- Optical Flow Button -->
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/robODButton"
+                android:id="@+id/robOFButton"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
                 android:layout_marginEnd="4dp"
-                android:text="Object Detection"
+                android:text="OF"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
 
-            <!-- Text Translation Button -->
+            <!-- Segmentation Button -->
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/robTXTButton"
+                android:id="@+id/robSEGButton"
                 style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
                 android:layout_marginStart="4dp"
-                android:text="TXT"
+                android:text="SEG"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
@@ -733,17 +749,7 @@
                 app:backgroundTint="@android:color/white"
                 app:tint="@android:color/black" />
 
-            <!-- Dual Camera Button -->
-            <com.google.android.material.floatingactionbutton.FloatingActionButton
-                android:id="@+id/dualCameraButton"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_toEndOf="@id/cameraSwitchButton"
-                android:layout_marginStart="16dp"
-                android:layout_centerVertical="true"
-                android:src="@drawable/ic_dual_camera"
-                app:backgroundTint="@android:color/white"
-                app:tint="@android:color/black" />
+
 
             <!-- Record Button -->
             <com.google.android.material.floatingactionbutton.FloatingActionButton
