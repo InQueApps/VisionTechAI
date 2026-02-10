@@ -287,3 +287,8 @@ app/src/main/assets/*.weights
 !app/src/main/assets/*.xml
 !app/src/main/assets/*.json
 !app/src/main/assets/*.txt
+
+# Ensure all PNG images in the repo (app source/res/assets) are committed
+!app/src/main/**/*.png
+
+app/release/*

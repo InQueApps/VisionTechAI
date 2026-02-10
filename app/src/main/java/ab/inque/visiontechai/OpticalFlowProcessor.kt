@@ -8,49 +8,51 @@ import kotlin.math.*
 class OpticalFlowProcessor(private val context: Context) {
     companion object {
         private const val TAG = "OpticalFlowProcessor"
-        private const val GRID_SIZE = 15 // Increased grid size for fewer arrows
-        private const val ARROW_LENGTH = 15f // Reduced arrow length
-        private const val ARROW_THICKNESS = 1f // Reduced thickness
-        private const val MIN_FLOW_MAGNITUDE = 2.0f // Increased minimum flow magnitude
-        private const val MAX_FLOW_MAGNITUDE = 30.0f // Reduced max flow magnitude
-        private const val MIN_GRADIENT_MAGNITUDE = 5.0f // Minimum gradient magnitude for reliable flow
-        private const val MAX_FLOW_VELOCITY = 20.0f // Maximum allowed flow velocity
+        private const val DOWNSCALE_FACTOR = 8
+        private const val MIN_FLOW_MAGNITUDE = 1.0f
+        private const val MAX_FLOW_MAGNITUDE = 20.0f
+        private const val MIN_GRADIENT_MAGNITUDE = 3.0f
+        private const val MAX_FLOW_VELOCITY = 20.0f
+        private const val GREY_LEVEL = 128
+        private const val SMALL_WINDOW_SIZE = 3
     }
 
-    private var previousFrame: Bitmap? = null
     private var previousGray: FloatArray? = null
-    private var currentGray: FloatArray? = null
+    private var previousSmallW: Int = 0
+    private var previousSmallH: Int = 0
 
     fun processOpticalFlow(currentFrame: Bitmap): Bitmap {
         try {
-            Log.d(TAG, "Processing optical flow for ${currentFrame.width}x${currentFrame.height}")
-            
-            // Convert current frame to grayscale
-            val currentGrayArray = convertToGrayscale(currentFrame)
-            
-            // If we have a previous frame, calculate optical flow
-            val flowOverlay = if (previousGray != null && previousGray!!.size == currentGrayArray.size) {
-                calculateOpticalFlow(previousGray!!, currentGrayArray, currentFrame.width, currentFrame.height)
+            val w = currentFrame.width
+            val h = currentFrame.height
+            Log.d(TAG, "Processing optical flow for ${w}x${h}")
+
+            val smallW = (w / DOWNSCALE_FACTOR).coerceAtLeast(8)
+            val smallH = (h / DOWNSCALE_FACTOR).coerceAtLeast(8)
+            val smallBitmap = Bitmap.createScaledBitmap(currentFrame, smallW, smallH, true)
+            val currentGray = convertToGrayscale(smallBitmap)
+            if (smallBitmap != currentFrame) smallBitmap.recycle()
+
+            val flowGrid: Array<FloatArray>? = if (previousGray != null && previousSmallW == smallW && previousSmallH == smallH) {
+                calculateOpticalFlowGrid(previousGray!!, currentGray, smallW, smallH)
             } else {
                 Log.d(TAG, "No previous frame available, skipping flow calculation")
                 null
             }
-            
-            // Update previous frame
-            previousGray = currentGrayArray
-            previousFrame = currentFrame.copy(currentFrame.config ?: Bitmap.Config.ARGB_8888, false)
-            
-            // Create overlay bitmap with flow arrows
-            return if (flowOverlay != null) {
-                createOverlayBitmap(currentFrame, flowOverlay)
+
+            previousGray = currentGray
+            previousSmallW = smallW
+            previousSmallH = smallH
+
+            return if (flowGrid != null) {
+                createSquaresBitmap(flowGrid, smallW, smallH, w, h)
             } else {
-                currentFrame
+                createGreyBitmap(w, h)
             }
-            
         } catch (e: Exception) {
             Log.e(TAG, "Optical flow processing failed: ${e.message}")
             e.printStackTrace()
-            return currentFrame
+            return createGreyBitmap(currentFrame.width, currentFrame.height)
         }
     }
 
@@ -73,26 +75,36 @@ class OpticalFlowProcessor(private val context: Context) {
         return grayArray
     }
 
-    private fun calculateOpticalFlow(
-        prevGray: FloatArray, 
-        currGray: FloatArray, 
-        width: Int, 
+    /** Returns u and v grids for small image (flow at each cell). */
+    private fun calculateOpticalFlowGrid(
+        prevGray: FloatArray,
+        currGray: FloatArray,
+        width: Int,
         height: Int
-    ): List<FlowVector> {
-        val flowVectors = mutableListOf<FlowVector>()
-        
-        // Calculate flow at grid points
-        for (y in GRID_SIZE until height - GRID_SIZE step GRID_SIZE) {
-            for (x in GRID_SIZE until width - GRID_SIZE step GRID_SIZE) {
+    ): Array<FloatArray> {
+        val uGrid = Array(height) { FloatArray(width) }
+        val vGrid = Array(height) { FloatArray(width) }
+        val margin = SMALL_WINDOW_SIZE + 1
+        var validCount = 0
+        for (y in margin until height - margin) {
+            for (x in margin until width - margin) {
                 val flow = calculateFlowAtPoint(prevGray, currGray, x, y, width, height)
-                if (isValidFlow(flow)) {
-                    flowVectors.add(flow)
-                }
+                uGrid[y][x] = flow.u
+                vGrid[y][x] = flow.v
+                if (isValidFlow(flow)) validCount++
             }
         }
-        
-        Log.d(TAG, "Calculated ${flowVectors.size} valid flow vectors")
-        return flowVectors
+        val uFlat = FloatArray(width * height)
+        val vFlat = FloatArray(width * height)
+        for (y in 0 until height) {
+            for (x in 0 until width) {
+                val idx = y * width + x
+                uFlat[idx] = uGrid[y][x]
+                vFlat[idx] = vGrid[y][x]
+            }
+        }
+        Log.d(TAG, "Calculated flow grid ${width}x${height}, $validCount valid cells")
+        return arrayOf(uFlat, vFlat)
     }
 
     private fun isValidFlow(flow: FlowVector): Boolean {
@@ -104,15 +116,14 @@ class OpticalFlowProcessor(private val context: Context) {
     }
 
     private fun calculateFlowAtPoint(
-        prevGray: FloatArray, 
-        currGray: FloatArray, 
-        x: Int, 
-        y: Int, 
-        width: Int, 
+        prevGray: FloatArray,
+        currGray: FloatArray,
+        x: Int,
+        y: Int,
+        width: Int,
         height: Int
     ): FlowVector {
-        // Improved Lucas-Kanade optical flow implementation
-        val windowSize = 7 // Increased window size for better stability
+        val windowSize = SMALL_WINDOW_SIZE
         var sumIx = 0.0
         var sumIy = 0.0
         var sumIt = 0.0
@@ -183,67 +194,58 @@ class OpticalFlowProcessor(private val context: Context) {
         return FlowVector(x.toFloat(), y.toFloat(), u.toFloat(), v.toFloat())
     }
 
-    private fun createOverlayBitmap(originalBitmap: Bitmap, flowVectors: List<FlowVector>): Bitmap {
-        val overlayBitmap = originalBitmap.copy(originalBitmap.config ?: Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(overlayBitmap)
-        
-        val paint = Paint().apply {
-            color = Color.RED
-            strokeWidth = ARROW_THICKNESS
-            style = Paint.Style.STROKE
-            isAntiAlias = true
-        }
-        
-        // Draw flow vectors as arrows
-        for (flow in flowVectors) {
-            val magnitude = sqrt(flow.u * flow.u + flow.v * flow.v)
-            val normalizedMagnitude = (magnitude / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f)
-            
-            // Color based on magnitude (red for high flow, green for low flow)
-            val color = when {
-                normalizedMagnitude > 0.7f -> Color.RED
-                normalizedMagnitude > 0.4f -> Color.YELLOW
-                else -> Color.GREEN
-            }
-            paint.color = color
-            
-            // Draw arrow
-            drawArrow(canvas, paint, flow.x, flow.y, flow.u, flow.v, magnitude)
-        }
-        
-        return overlayBitmap
+    /** Creates a solid grey bitmap (used when no previous frame or as base). */
+    private fun createGreyBitmap(width: Int, height: Int): Bitmap {
+        val grey = Color.rgb(GREY_LEVEL, GREY_LEVEL, GREY_LEVEL)
+        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bmp)
+        canvas.drawColor(grey)
+        return bmp
     }
 
-    private fun drawArrow(canvas: Canvas, paint: Paint, x: Float, y: Float, u: Float, v: Float, magnitude: Float) {
-        val arrowLength = (ARROW_LENGTH * (magnitude / MAX_FLOW_MAGNITUDE)).coerceAtLeast(3f)
-        
-        // Normalize direction vector
-        val length = sqrt(u * u + v * v)
-        if (length < 0.1f) return
-        
-        val dx = u / length * arrowLength
-        val dy = v / length * arrowLength
-        
-        // Draw arrow line
-        canvas.drawLine(x, y, x + dx, y + dy, paint)
-        
-        // Draw arrow head
-        val angle = atan2(dy, dx)
-        val headLength = arrowLength * 0.25f // Smaller arrow head
-        
-        val headX1 = x + dx - headLength * cos(angle - 0.5f)
-        val headY1 = y + dy - headLength * sin(angle - 0.5f)
-        val headX2 = x + dx - headLength * cos(angle + 0.5f)
-        val headY2 = y + dy - headLength * sin(angle + 0.5f)
-        
-        canvas.drawLine(x + dx, y + dy, headX1, headY1, paint)
-        canvas.drawLine(x + dx, y + dy, headX2, headY2, paint)
+    /**
+     * Build low-res bitmap (one pixel per flow cell), then upscale to output size so flow shows as squares.
+     * Direction colors: red=left, blue=right, green=top, black=bottom; magnitude scales intensity.
+     */
+    private fun createSquaresBitmap(
+        flowGrid: Array<FloatArray>,
+        smallW: Int,
+        smallH: Int,
+        outW: Int,
+        outH: Int
+    ): Bitmap {
+        val uFlat = flowGrid[0]
+        val vFlat = flowGrid[1]
+        val smallPixels = IntArray(smallW * smallH)
+        val strength = 90f
+        for (y in 0 until smallH) {
+            for (x in 0 until smallW) {
+                val idx = y * smallW + x
+                val u = uFlat[idx]
+                val v = vFlat[idx]
+                val mag = sqrt(u * u + v * v)
+                val t = (mag / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f)
+                val leftContrib = if (u < 0) t * (-u / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
+                val rightContrib = if (u > 0) t * (u / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
+                val topContrib = if (v < 0) t * (-v / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
+                val bottomContrib = if (v > 0) t * (v / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
+                val r = (GREY_LEVEL + (leftContrib * strength).toInt() - (bottomContrib * strength).toInt()).coerceIn(0, 255)
+                val g = (GREY_LEVEL + (topContrib * strength).toInt() - (bottomContrib * strength).toInt()).coerceIn(0, 255)
+                val b = (GREY_LEVEL + (rightContrib * strength).toInt() - (bottomContrib * strength).toInt()).coerceIn(0, 255)
+                smallPixels[idx] = Color.rgb(r, g, b)
+            }
+        }
+        val smallBmp = Bitmap.createBitmap(smallW, smallH, Bitmap.Config.ARGB_8888)
+        smallBmp.setPixels(smallPixels, 0, smallW, 0, 0, smallW, smallH)
+        val outBmp = Bitmap.createScaledBitmap(smallBmp, outW, outH, false)
+        if (smallBmp != outBmp) smallBmp.recycle()
+        return outBmp
     }
 
     fun clear() {
-        previousFrame = null
         previousGray = null
-        currentGray = null
+        previousSmallW = 0
+        previousSmallH = 0
         Log.d(TAG, "Optical flow processor cleared")
     }
 

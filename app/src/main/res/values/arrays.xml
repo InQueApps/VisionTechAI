@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Legacy single dropdown options (currently unused, kept for compatibility) -->
+    <string-array name="translation_options">
+        <item>@string/translation_off</item>
+        <item>@string/translation_en_es</item>
+    </string-array>
+
+    <!-- Languages for text translation From/To spinners -->
+    <string-array name="translation_languages">
+        <item>English</item>
+        <item>Spanish</item>
+    </string-array>
+</resources>

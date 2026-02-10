@@ -2,7 +2,9 @@ package ab.inque.visiontechai
 
 import android.Manifest
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.BitmapFactory
@@ -13,6 +15,7 @@ import android.graphics.YuvImage
 import android.graphics.drawable.BitmapDrawable
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.os.Handler
 import android.os.Looper
 import android.provider.MediaStore
@@ -41,13 +44,22 @@ import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
 import ab.inque.visiontechai.databinding.ActivityMainBinding
+import ab.inque.visiontechai.ui.HistogramView
 import java.io.ByteArrayOutputStream
+import java.io.File
 import java.nio.ByteBuffer
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import android.util.Size
+import com.google.mlkit.common.model.RemoteModelManager
+import com.google.mlkit.nl.translate.TranslateLanguage
+import com.google.mlkit.nl.translate.TranslateRemoteModel
+import com.google.mlkit.nl.translate.Translation
+import com.google.mlkit.nl.translate.Translator
+import com.google.mlkit.nl.translate.TranslatorOptions
+import androidx.appcompat.app.AlertDialog
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
@@ -56,26 +68,18 @@ class MainActivity : AppCompatActivity() {
     private var cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
     private var isRecording = false
     private var isPhotoMode = true
-    private var isNightVisionEnabled = false
-    private var isMLNightVisionEnabled = false
-    private var isObjectDetectionEnabled = false
-    private var isTextTranslationEnabled = false
-    private var isEdgeDetectionEnabled = false
-    private var isOpticalFlowEnabled = false
-    private var isColorAdjustmentEnabled = false
-    private var isSegmentationEnabled = false
-    private var nightVisionIntensity = 0.5f // Default 50%
-    private var mlNightVisionSensitivity = 0.7f // Default 70%
-    private var edgeDetectionSensitivity = 0.5f // Default 50%
-    private var redAdjustment = 1.0f // Default 100%
-    private var greenAdjustment = 1.0f // Default 100%
-    private var blueAdjustment = 1.0f // Default 100%
     private var activeRecording: Recording? = null
+    private var processedVideoRecorder: ProcessedVideoRecorder? = null
+    private val visionState = VisionState()
+    private lateinit var visionPipeline: VisionAnalysisPipeline
+    private val frameProcessors: Map<VisionMode, FrameProcessor> by lazy { buildFrameProcessors() }
     private lateinit var mlNightVisionProcessor: MLNightVisionProcessor
     private lateinit var objectDetectionProcessor: ObjectDetectionProcessor
     private lateinit var edgeDetectionProcessor: EdgeDetectionProcessor
     private lateinit var opticalFlowProcessor: OpticalFlowProcessor
     private lateinit var imageSegmentationProcessor: ImageSegmentationProcessor
+    private lateinit var depthEstimationProcessor: DepthEstimationProcessor
+    private lateinit var hdImageProcessor: HDImageProcessor
     private lateinit var objectDetectionOverlay: ObjectDetectionOverlay
     private lateinit var cameraExecutor: ExecutorService
     private var previewWidth = 0
@@ -86,25 +90,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var colorAdjustmentImageView: ImageView
     private lateinit var textTranslationImageView: ImageView
     private lateinit var segmentationImageView: ImageView
+    private lateinit var depthFieldImageView: ImageView
+    private lateinit var hdImageView: ImageView
     private lateinit var histogramView: HistogramView
     private lateinit var fpsView: TextView
-    private lateinit var dualCameraContainer: LinearLayout
-    private lateinit var frontCameraView: androidx.camera.view.PreviewView
-    private lateinit var rearCameraView: androidx.camera.view.PreviewView
-    private var frameCount = 0
-    private var lastFpsTime = System.currentTimeMillis()
-    private var currentFps = 0f
-    private var isDualCameraMode = false
-    private var isSliderExpanded = false
-    // Split-screen dual camera variables
-    private var splitScreenHandler: Handler? = null
-    private var splitScreenRunnable: Runnable? = null
-    private var splitScreenBackBitmap: Bitmap? = null
-    private var splitScreenFrontBitmap: Bitmap? = null
-    private var splitScreenActiveCamera = CameraSelector.DEFAULT_BACK_CAMERA
-    private var splitScreenCapturing = false
-    private var splitScreenCameraProvider: ProcessCameraProvider? = null
-    private var supportsTrueDualCamera = false
+    private var segmentationNullLogCounter = 0
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -231,6 +221,36 @@ class MainActivity : AppCompatActivity() {
             visibility = View.GONE
         }
 
+        // Create depth field overlay ImageView
+        depthFieldImageView = ImageView(this).apply {
+            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply {
+                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                bottomToTop = binding.controlsContainer.id
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+
+        // Create HD overlay ImageView (scale only, separate mode)
+        hdImageView = ImageView(this).apply {
+            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT
+            ).apply {
+                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                bottomToTop = binding.controlsContainer.id
+            }
+            scaleType = ImageView.ScaleType.CENTER_CROP
+            visibility = View.GONE
+        }
+
         // Create histogram view
         histogramView = HistogramView(this).apply {
             layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(200, 150).apply {
@@ -259,43 +279,6 @@ class MainActivity : AppCompatActivity() {
             visibility = View.VISIBLE // Always visible
         }
 
-        // Create dual camera container
-        dualCameraContainer = LinearLayout(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id
-            }
-            orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
-        }
-
-        // Create front camera view (top half)
-        frontCameraView = androidx.camera.view.PreviewView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1.0f
-            )
-        }
-
-        // Create rear camera view (bottom half)
-        rearCameraView = androidx.camera.view.PreviewView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1.0f
-            )
-        }
-
-        // Add camera views to dual camera container
-        dualCameraContainer.addView(frontCameraView)
-        dualCameraContainer.addView(rearCameraView)
-
         // Add the views to the layout in proper z-order
         val parentLayout = binding.viewFinder.parent as androidx.constraintlayout.widget.ConstraintLayout
 
@@ -306,9 +289,10 @@ class MainActivity : AppCompatActivity() {
         parentLayout.addView(colorAdjustmentImageView)
         parentLayout.addView(textTranslationImageView)
         parentLayout.addView(segmentationImageView)
+        parentLayout.addView(depthFieldImageView)
+        parentLayout.addView(hdImageView)
         parentLayout.addView(histogramView)
         parentLayout.addView(fpsView)
-        parentLayout.addView(dualCameraContainer)
 
         // Create object detection overlay before adding it to the layout
         objectDetectionOverlay = ObjectDetectionOverlay(this).apply {
@@ -327,14 +311,14 @@ class MainActivity : AppCompatActivity() {
         // Add object detection overlay
         parentLayout.addView(objectDetectionOverlay)
 
-        // Ensure controls container stays on top
-        binding.controlsContainer.elevation = 1000f
-        histogramView.elevation = 500f
-        fpsView.elevation = 500f
-        objectDetectionOverlay.elevation = 200f
-        edgeDetectionImageView.elevation = 150f
-        nightVisionImageView.elevation = 100f
-        dualCameraContainer.elevation = 50f
+        // Ensure controls container stays on top (use Constants for elevation)
+        binding.controlsContainer.elevation = Constants.ELEVATION_CONTROLS
+        histogramView.elevation = Constants.ELEVATION_HUD
+        fpsView.elevation = Constants.ELEVATION_HUD
+        objectDetectionOverlay.elevation = Constants.ELEVATION_OVERLAY
+        edgeDetectionImageView.elevation = Constants.ELEVATION_EFFECT_OVERLAY
+        hdImageView.elevation = Constants.ELEVATION_EFFECT_OVERLAY
+        nightVisionImageView.elevation = Constants.ELEVATION_NIGHT_VISION
 
         // Check permissions immediately when app starts
         checkAndRequestPermissions()
@@ -346,52 +330,68 @@ class MainActivity : AppCompatActivity() {
             setMode(false)
         }
         binding.nightVisionButton.setOnClickListener {
-            Log.d(TAG, "NV button clicked - isNightVisionEnabled: $isNightVisionEnabled, isMLNightVisionEnabled: $isMLNightVisionEnabled")
-            // If any night vision mode is active, disable it
-            if (isNightVisionEnabled || isMLNightVisionEnabled) {
-                disableAllNightVision()
-            } else {
-                // Otherwise show the overlay to select a mode
-                toggleNightVisionOverlay()
+            when (visionState.mode) {
+                VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> setVisionMode(VisionMode.NONE)
+                else -> toggleCategoryOverlay(VisionMode.Category.NV)
             }
         }
         binding.nvRegularButton.setOnClickListener {
-            selectRegularNightVision()
+            binding.nightVisionOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.NIGHT_VISION)
+            Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.nvMLButton.setOnClickListener {
-            selectMLNightVision()
+            binding.nightVisionOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.ML_NIGHT_VISION)
+            Toast.makeText(this, "ML Night Vision Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.imgButton.setOnClickListener {
-            Log.d(TAG, "IMG button clicked - isEdgeDetectionEnabled: $isEdgeDetectionEnabled, isOpticalFlowEnabled: $isOpticalFlowEnabled, isColorAdjustmentEnabled: $isColorAdjustmentEnabled, isSegmentationEnabled: $isSegmentationEnabled")
-            // If any IMG mode is active, disable it
-            if (isEdgeDetectionEnabled || isOpticalFlowEnabled || isColorAdjustmentEnabled || isSegmentationEnabled) {
-                disableAllIMG()
-            } else {
-                // Otherwise show the overlay to select a mode
-                toggleIMGOverlay()
+            when (visionState.mode) {
+                VisionMode.EDGE_DETECTION, VisionMode.COLOR_ADJUSTMENT, VisionMode.HD -> setVisionMode(VisionMode.NONE)
+                else -> toggleCategoryOverlay(VisionMode.Category.IMG)
             }
         }
         binding.imgEDButton.setOnClickListener {
-            selectEdgeDetection()
+            binding.imgOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.EDGE_DETECTION)
+            Toast.makeText(this, "Edge Detection Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.imgCOLButton.setOnClickListener {
-            selectColorAdjustment()
+            binding.imgOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.COLOR_ADJUSTMENT)
+            Toast.makeText(this, "Color Adjustment Enabled", Toast.LENGTH_SHORT).show()
+        }
+        binding.imgHDButton.setOnClickListener {
+            binding.imgOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.HD)
+            Toast.makeText(this, "HD scale enabled", Toast.LENGTH_SHORT).show()
         }
         binding.robButton.setOnClickListener {
-            Log.d(TAG, "ROB button clicked - isOpticalFlowEnabled: $isOpticalFlowEnabled, isSegmentationEnabled: $isSegmentationEnabled")
-            // If any ROB mode is active, disable it
-            if (isOpticalFlowEnabled || isSegmentationEnabled) {
-                disableAllROB()
-            } else {
-                // Otherwise show the overlay to select a mode
-                toggleROBOverlay()
+            when (visionState.mode) {
+                VisionMode.OPTICAL_FLOW, VisionMode.SEGMENTATION, VisionMode.DEPTH_FIELD, VisionMode.OBJECT_DETECTION, VisionMode.TEXT_TRANSLATION -> setVisionMode(VisionMode.NONE)
+                else -> toggleCategoryOverlay(VisionMode.Category.ROB)
             }
         }
         binding.robOFButton.setOnClickListener {
-            selectOpticalFlow()
+            binding.robOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.OPTICAL_FLOW)
+            opticalFlowProcessor.clear()
+            Toast.makeText(this, "Optical Flow Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.robSEGButton.setOnClickListener {
-            selectSegmentation()
+            binding.robOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.SEGMENTATION)
+            Toast.makeText(this, "Image Segmentation Enabled", Toast.LENGTH_SHORT).show()
+        }
+        binding.robDFButton.setOnClickListener {
+            binding.robOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.DEPTH_FIELD)
+            Toast.makeText(this, "Depth Field Enabled", Toast.LENGTH_SHORT).show()
+        }
+        binding.robTxtButton.setOnClickListener {
+            binding.robOverlayRow.visibility = View.GONE
+            setVisionMode(VisionMode.TEXT_TRANSLATION)
+            Toast.makeText(this, "Text translation enabled", Toast.LENGTH_SHORT).show()
         }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
@@ -399,12 +399,14 @@ class MainActivity : AppCompatActivity() {
         binding.cameraSwitchButton.setOnClickListener {
             switchCamera()
         }
-
+        binding.galleryButton.setOnClickListener {
+            startActivity(android.content.Intent(this, SavedMediaActivity::class.java))
+        }
         binding.infoButton.setOnClickListener {
             toggleInfoPanel()
         }
-        binding.closeInfoButton.setOnClickListener {
-            hideInfoPanel()
+        binding.contactUsButton.setOnClickListener {
+            openContactEmail()
         }
         binding.recordButton.setOnClickListener {
             if (isPhotoMode) {
@@ -418,86 +420,256 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // Set up night vision slider
+        // Set up sliders to update visionState.params
         binding.nightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) {
-                    nightVisionIntensity = progress / 100f
-                    Log.d(TAG, "Night vision intensity: $nightVisionIntensity")
-                }
+                if (fromUser) visionState.params = visionState.params.copy(nightVisionIntensity = progress / 100f)
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
-        // Set up ML night vision slider
         binding.mlNightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) {
-                    mlNightVisionSensitivity = progress / 100f
-                    Log.d(TAG, "ML night vision sensitivity: $mlNightVisionSensitivity")
-                }
+                if (fromUser) visionState.params = visionState.params.copy(mlNightVisionSensitivity = progress / 100f)
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
-        // Set up edge detection slider
         binding.edgeDetectionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) {
-                    edgeDetectionSensitivity = progress / 100f
-                    Log.d(TAG, "Edge detection sensitivity: $edgeDetectionSensitivity")
-                }
+                if (fromUser) visionState.params = visionState.params.copy(edgeDetectionSensitivity = progress / 100f)
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
-
-
-        // Set up color adjustment sliders
+        // HD scale for IMG: 0–100 → 50 = 1.0x, <50 = downsample, >50 = upsample
+        binding.hdSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(hdScaleSliderValue = progress)
+                    val scaleStr = when {
+                        progress < 50 -> String.format("%.2fx", 1f - (50 - progress) * 0.0198f) // ~0.01 at 0
+                        progress > 50 -> String.format("%.1fx", 1f + (progress - 50) * 0.06f)   // 4x at 100
+                        else -> "1.0x"
+                    }
+                    binding.hdScaleValueText.text = "Scale: $scaleStr"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
         binding.redSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    redAdjustment = progress / 100f
+                    visionState.params = visionState.params.copy(redAdjustment = progress / 100f)
                     binding.redValueText.text = "${progress}%"
-                    Log.d(TAG, "Red adjustment: $redAdjustment")
                 }
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
         binding.greenSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    greenAdjustment = progress / 100f
+                    visionState.params = visionState.params.copy(greenAdjustment = progress / 100f)
                     binding.greenValueText.text = "${progress}%"
-                    Log.d(TAG, "Green adjustment: $greenAdjustment")
                 }
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-
         binding.blueSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) {
-                    blueAdjustment = progress / 100f
+                    visionState.params = visionState.params.copy(blueAdjustment = progress / 100f)
                     binding.blueValueText.text = "${progress}%"
-                    Log.d(TAG, "Blue adjustment: $blueAdjustment")
                 }
             }
-
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
+        // Segmentation: segments 3–10 (progress 0–7), refinement 3–15 (progress 0–12)
+        binding.segmentationClustersSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val k = (progress + 3).coerceIn(3, 10)
+                    visionState.params = visionState.params.copy(segmentationNumClusters = k)
+                    binding.segmentationClustersValueText.text = "$k"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        binding.segmentationIterationsSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val it = (progress + 3).coerceIn(3, 15)
+                    visionState.params = visionState.params.copy(segmentationIterations = it)
+                    binding.segmentationIterationsValueText.text = "$it"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        // Depth field: focus 0–100% (far to near)
+        binding.depthFieldFocusSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(depthFieldFocus = progress / 100f)
+                    binding.depthFieldFocusValueText.text = "$progress%"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        // Translation: language From/To (currently English/Spanish)
+        val translationLangAdapter = android.widget.ArrayAdapter.createFromResource(
+            this, R.array.translation_languages, android.R.layout.simple_spinner_item
+        ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
+        binding.translationFromSpinner.adapter = translationLangAdapter
+        binding.translationToSpinner.adapter = translationLangAdapter
+
+        // Default: English → Spanish
+        binding.translationFromSpinner.setSelection(0, false)
+        binding.translationToSpinner.setSelection(1, false)
+
+        val languageCodeToDisplayName: (String) -> String = { code ->
+            when (code) { "en" -> "English"; "es" -> "Spanish"; else -> code }
+        }
+
+        val targetLanguageToMlKit = { code: String? ->
+            when (code) { "en" -> TranslateLanguage.ENGLISH; "es" -> TranslateLanguage.SPANISH; else -> null }
+        }
+
+        fun refreshTranslationDownloadSection() {
+            val fromPos = binding.translationFromSpinner.selectedItemPosition
+            val toPos = binding.translationToSpinner.selectedItemPosition
+            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            if (toCode == null || fromCode == null || fromCode == toCode) {
+                binding.translationDownloadSection.visibility = View.GONE
+                return
+            }
+            // English is built-in; only show download for target languages that are downloaded on demand (e.g. Spanish)
+            if (toCode == "en") {
+                binding.translationDownloadSection.visibility = View.GONE
+                return
+            }
+            val remoteModel = TranslateRemoteModel.Builder(targetLanguageToMlKit(toCode)!!).build()
+            RemoteModelManager.getInstance().isModelDownloaded(remoteModel)
+                .addOnSuccessListener { downloaded ->
+                    runOnUiThread {
+                        if (downloaded) {
+                            binding.translationDownloadSection.visibility = View.GONE
+                        } else {
+                            binding.translationDownloadSection.visibility = View.VISIBLE
+                            binding.translationDownloadPairButton.text = "Download ${languageCodeToDisplayName(fromCode)} → ${languageCodeToDisplayName(toCode)}"
+                        }
+                    }
+                }
+                .addOnFailureListener {
+                    runOnUiThread { binding.translationDownloadSection.visibility = View.GONE }
+                }
+        }
+
+        val updateTranslationParams = {
+            val fromPos = binding.translationFromSpinner.selectedItemPosition
+            val toPos = binding.translationToSpinner.selectedItemPosition
+            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            val effectiveTarget = if (fromCode != null && toCode != null && fromCode != toCode) toCode else null
+            visionState.params = visionState.params.copy(
+                translationSourceLanguageCode = fromCode,
+                translationTargetLanguageCode = effectiveTarget
+            )
+            refreshTranslationDownloadSection()
+        }
+
+        val translationListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                updateTranslationParams()
+            }
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) {}
+        }
+
+        binding.translationFromSpinner.onItemSelectedListener = translationListener
+        binding.translationToSpinner.onItemSelectedListener = translationListener
+
+        // Download button shown below dropdowns when selected pair is not yet downloaded
+        binding.translationDownloadPairButton.setOnClickListener {
+            val fromPos = binding.translationFromSpinner.selectedItemPosition
+            val toPos = binding.translationToSpinner.selectedItemPosition
+            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            if (fromCode == null || toCode == null || fromCode == toCode) return@setOnClickListener
+            val src = targetLanguageToMlKit(fromCode) ?: return@setOnClickListener
+            val tgt = targetLanguageToMlKit(toCode) ?: return@setOnClickListener
+            binding.translationDownloadPairButton.isEnabled = false
+            binding.translationDownloadPairButton.text = "Downloading…"
+            val translator = Translation.getClient(TranslatorOptions.Builder().setSourceLanguage(src).setTargetLanguage(tgt).build())
+            translator.downloadModelIfNeeded()
+                .addOnSuccessListener {
+                    translator.close()
+                    runOnUiThread {
+                        binding.translationDownloadPairButton.isEnabled = true
+                        refreshTranslationDownloadSection()
+                        Toast.makeText(this, "Model ready for offline use", Toast.LENGTH_SHORT).show()
+                    }
+                }
+                .addOnFailureListener { e ->
+                    translator.close()
+                    runOnUiThread {
+                        binding.translationDownloadPairButton.isEnabled = true
+                        binding.translationDownloadPairButton.text = "Download ${languageCodeToDisplayName(fromCode)} → ${languageCodeToDisplayName(toCode)}"
+                        Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+        }
+
+        // View available (downloaded) translators and remove from device
+        binding.translationViewAvailableButton.setOnClickListener {
+            RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
+                .addOnSuccessListener { models ->
+                    runOnUiThread {
+                        val modelList = models.sortedBy { it.language }
+                        if (modelList.isEmpty()) {
+                            Toast.makeText(this, "No downloaded translation models", Toast.LENGTH_SHORT).show()
+                            return@runOnUiThread
+                        }
+                        val items = modelList.map { m ->
+                            val code = m.language
+                            val name = languageCodeToDisplayName(if (code is String) code else "?")
+                            "$name  \u00D7" to m  // × for remove
+                        }
+                        val adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1, items.map { it.first })
+                        val dialog = AlertDialog.Builder(this)
+                            .setTitle("Downloaded translators (tap to remove)")
+                            .setAdapter(adapter) { d, which ->
+                                val model = items[which].second
+                                RemoteModelManager.getInstance().deleteDownloadedModel(model)
+                                    .addOnSuccessListener {
+                                        runOnUiThread {
+                                            d.dismiss()
+                                            Toast.makeText(this, "Model removed", Toast.LENGTH_SHORT).show()
+                                            refreshTranslationDownloadSection()
+                                        }
+                                    }
+                                    .addOnFailureListener { e ->
+                                        runOnUiThread { Toast.makeText(this, "Remove failed: ${e.message}", Toast.LENGTH_SHORT).show() }
+                                    }
+                            }
+                            .setNegativeButton(android.R.string.cancel, null)
+                            .create()
+                        dialog.show()
+                    }
+                }
+                .addOnFailureListener { e ->
+                    runOnUiThread { Toast.makeText(this, "Could not list models: ${e.message}", Toast.LENGTH_SHORT).show() }
+                }
+        }
+
+        // Initialize params based on defaults
+        updateTranslationParams()
 
         setMode(true)
         cameraExecutor = Executors.newSingleThreadExecutor()
@@ -516,57 +688,77 @@ class MainActivity : AppCompatActivity() {
         
         // Initialize Image Segmentation processor
         imageSegmentationProcessor = ImageSegmentationProcessor(this)
-        
+
+        // Initialize Depth Estimation (MiDaS) processor for depth-of-field
+        depthEstimationProcessor = DepthEstimationProcessor(this)
+
+        // HD up/downsampling for IMG modes (Edge, Color)
+        hdImageProcessor = HDImageProcessor(this)
+
+        visionPipeline = VisionAnalysisPipeline(
+            getState = { visionState },
+            processors = frameProcessors,
+            objectDetectionProcessor = objectDetectionProcessor,
+            applyFlip = { b -> if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) ImageUtils.flipBitmapHorizontally(b) else b }
+        )
+
         // Ensure info button is always on top
         binding.infoButton.bringToFront()
     }
 
+    private fun buildFrameProcessors(): Map<VisionMode, FrameProcessor> = mapOf(
+        VisionMode.NIGHT_VISION to NightVisionFrameProcessor(),
+        VisionMode.ML_NIGHT_VISION to MLNightVisionFrameProcessor(mlNightVisionProcessor),
+        VisionMode.EDGE_DETECTION to EdgeDetectionFrameProcessor(edgeDetectionProcessor),
+        VisionMode.COLOR_ADJUSTMENT to ColorAdjustmentFrameProcessor(),
+        VisionMode.HD to HDFrameProcessor(hdImageProcessor),
+        VisionMode.OPTICAL_FLOW to OpticalFlowFrameProcessor(opticalFlowProcessor),
+        VisionMode.SEGMENTATION to SegmentationFrameProcessor(imageSegmentationProcessor),
+        VisionMode.DEPTH_FIELD to DepthFieldFrameProcessor(depthEstimationProcessor),
+        VisionMode.TEXT_TRANSLATION to TextTranslationFrameProcessor(this)
+    )
+
     private fun toggleSlider() {
-        isSliderExpanded = !isSliderExpanded
-        if (isSliderExpanded) {
+        visionState.isSliderExpanded = !visionState.isSliderExpanded
+        if (visionState.isSliderExpanded) {
             binding.sliderArrow.setImageResource(R.drawable.ic_arrow_up)
-            // Show the currently active slider
-            when {
-                isNightVisionEnabled -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
-                isMLNightVisionEnabled -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
-                isEdgeDetectionEnabled -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
-                isColorAdjustmentEnabled -> binding.colorSliderContainer.visibility = View.VISIBLE
-                else -> binding.nightVisionSliderContainer.visibility = View.VISIBLE // Default
-            }
+            showActiveSlider()
         } else {
             binding.sliderArrow.setImageResource(R.drawable.ic_arrow_down)
-            // Hide all sliders
             binding.nightVisionSliderContainer.visibility = View.GONE
             binding.mlNightVisionSliderContainer.visibility = View.GONE
             binding.edgeDetectionSliderContainer.visibility = View.GONE
             binding.colorSliderContainer.visibility = View.GONE
+            binding.hdSliderContainer.visibility = View.GONE
+            binding.segmentationSliderContainer.visibility = View.GONE
+            binding.depthFieldSliderContainer.visibility = View.GONE
+            binding.translationOptionsContainer.visibility = View.GONE
         }
     }
 
-    private fun disableAllAlgorithms() {
-        // Disable all algorithm flags
-        isNightVisionEnabled = false
-        isMLNightVisionEnabled = false
-        isEdgeDetectionEnabled = false
-        isOpticalFlowEnabled = false
-        isColorAdjustmentEnabled = false
-        isSegmentationEnabled = false
-        
-        // Reset all button states
+    private fun setVisionMode(mode: VisionMode) {
+        visionState.mode = mode
+        updateVisionModeUI()
+    }
+
+    private fun updateVisionModeUI() {
+        val m = visionState.mode
+        // Reset all button strokes
         binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
         binding.imgButton.setStrokeColorResource(android.R.color.white)
         binding.robButton.setStrokeColorResource(android.R.color.white)
         binding.nightVisionButton.strokeWidth = 1
         binding.imgButton.strokeWidth = 1
         binding.robButton.strokeWidth = 1
-        
-        // Hide all sliders
+        // Hide all sliders and overlays
         binding.nightVisionSliderContainer.visibility = View.GONE
         binding.mlNightVisionSliderContainer.visibility = View.GONE
         binding.edgeDetectionSliderContainer.visibility = View.GONE
         binding.colorSliderContainer.visibility = View.GONE
-        
-        // Hide all overlays
+        binding.hdSliderContainer.visibility = View.GONE
+        binding.segmentationSliderContainer.visibility = View.GONE
+        binding.depthFieldSliderContainer.visibility = View.GONE
+        binding.translationOptionsContainer.visibility = View.GONE
         objectDetectionOverlay.visibility = View.GONE
         nightVisionImageView.visibility = View.GONE
         edgeDetectionImageView.visibility = View.GONE
@@ -574,565 +766,203 @@ class MainActivity : AppCompatActivity() {
         colorAdjustmentImageView.visibility = View.GONE
         textTranslationImageView.visibility = View.GONE
         segmentationImageView.visibility = View.GONE
-        
-        // Hide all overlay rows
+        depthFieldImageView.visibility = View.GONE
+        hdImageView.visibility = View.GONE
         binding.nightVisionOverlayRow.visibility = View.GONE
         binding.imgOverlayRow.visibility = View.GONE
         binding.robOverlayRow.visibility = View.GONE
+        // If this mode has sliders, auto-expand the slider panel so they are visible
+        if (m.hasSlider) {
+            visionState.isSliderExpanded = true
+            binding.sliderArrow.setImageResource(R.drawable.ic_arrow_up)
+        }
+        // Highlight active category and show active overlay/slider
+        when (m) {
+            VisionMode.NONE -> { }
+            VisionMode.NIGHT_VISION -> {
+                binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_green_light)
+                binding.nightVisionButton.strokeWidth = 3
+                nightVisionImageView.visibility = View.VISIBLE
+                showActiveSlider()
+            }
+            VisionMode.ML_NIGHT_VISION -> {
+                binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_blue_light)
+                binding.nightVisionButton.strokeWidth = 3
+                nightVisionImageView.visibility = View.VISIBLE
+                showActiveSlider()
+            }
+            VisionMode.EDGE_DETECTION -> {
+                binding.imgButton.setStrokeColorResource(android.R.color.holo_orange_light)
+                binding.imgButton.strokeWidth = 3
+                edgeDetectionImageView.visibility = View.VISIBLE
+                showActiveSlider()
+            }
+            VisionMode.COLOR_ADJUSTMENT -> {
+                binding.imgButton.setStrokeColorResource(android.R.color.holo_blue_light)
+                binding.imgButton.strokeWidth = 3
+                colorAdjustmentImageView.visibility = View.VISIBLE
+                showActiveSlider()
+            }
+            VisionMode.HD -> {
+                binding.imgButton.setStrokeColorResource(android.R.color.holo_green_light)
+                binding.imgButton.strokeWidth = 3
+                hdImageView.visibility = View.VISIBLE
+                binding.hdSlider.progress = visionState.params.hdScaleSliderValue
+                val p = visionState.params.hdScaleSliderValue
+                binding.hdScaleValueText.text = "Scale: " + when {
+                    p < 50 -> String.format("%.2fx", 1f - (50 - p) * 0.0198f)
+                    p > 50 -> String.format("%.1fx", 1f + (p - 50) * 0.06f)
+                    else -> "1.0x"
+                }
+                showActiveSlider()
+            }
+            VisionMode.OPTICAL_FLOW -> {
+                binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
+                binding.robButton.strokeWidth = 3
+                opticalFlowImageView.visibility = View.VISIBLE
+                opticalFlowProcessor.clear()
+            }
+            VisionMode.SEGMENTATION -> {
+                binding.robButton.setStrokeColorResource(android.R.color.holo_purple)
+                binding.robButton.strokeWidth = 3
+                segmentationImageView.visibility = View.VISIBLE
+                binding.segmentationClustersSlider.progress = (visionState.params.segmentationNumClusters - 3).coerceIn(0, 7)
+                binding.segmentationClustersValueText.text = "${visionState.params.segmentationNumClusters}"
+                binding.segmentationIterationsSlider.progress = (visionState.params.segmentationIterations - 3).coerceIn(0, 12)
+                binding.segmentationIterationsValueText.text = "${visionState.params.segmentationIterations}"
+                showActiveSlider()
+            }
+            VisionMode.DEPTH_FIELD -> {
+                binding.robButton.setStrokeColorResource(android.R.color.holo_blue_dark)
+                binding.robButton.strokeWidth = 3
+                depthFieldImageView.visibility = View.VISIBLE
+                binding.depthFieldFocusSlider.progress = (visionState.params.depthFieldFocus * 100).toInt().coerceIn(0, 100)
+                binding.depthFieldFocusValueText.text = "${(visionState.params.depthFieldFocus * 100).toInt()}%"
+                showActiveSlider()
+            }
+            VisionMode.OBJECT_DETECTION -> {
+                binding.robButton.setStrokeColorResource(android.R.color.holo_red_light)
+                binding.robButton.strokeWidth = 3
+                objectDetectionOverlay.visibility = View.VISIBLE
+            }
+            VisionMode.TEXT_TRANSLATION -> {
+                binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
+                binding.robButton.strokeWidth = 3
+                textTranslationImageView.visibility = View.VISIBLE
+                showActiveSlider()
+            }
+        }
+        bringHudToFront()
     }
 
     private fun showActiveSlider() {
-        if (isSliderExpanded) {
-            // Hide all sliders first
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.colorSliderContainer.visibility = View.GONE
-            
-            // Show only the active slider
-            when {
-                isNightVisionEnabled -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
-                isMLNightVisionEnabled -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
-                isEdgeDetectionEnabled -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
-                isColorAdjustmentEnabled -> binding.colorSliderContainer.visibility = View.VISIBLE
-            }
+        if (!visionState.isSliderExpanded) return
+        when (visionState.mode) {
+            VisionMode.NIGHT_VISION -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
+            VisionMode.ML_NIGHT_VISION -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
+            VisionMode.EDGE_DETECTION -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
+            VisionMode.COLOR_ADJUSTMENT -> binding.colorSliderContainer.visibility = View.VISIBLE
+            VisionMode.HD -> binding.hdSliderContainer.visibility = View.VISIBLE
+            VisionMode.SEGMENTATION -> binding.segmentationSliderContainer.visibility = View.VISIBLE
+            VisionMode.DEPTH_FIELD -> binding.depthFieldSliderContainer.visibility = View.VISIBLE
+            VisionMode.TEXT_TRANSLATION -> binding.translationOptionsContainer.visibility = View.VISIBLE
+            else -> { }
         }
     }
 
-    private fun toggleNightVisionOverlay() {
-        val isOverlayVisible = binding.nightVisionOverlayRow.visibility == View.VISIBLE
-        if (isOverlayVisible) {
-            // Hide overlay
-            binding.nightVisionOverlayRow.visibility = View.GONE
-        } else {
-            // Show overlay
-            binding.nightVisionOverlayRow.visibility = View.VISIBLE
-            // Hide overlay after 3 seconds if no selection is made
+    private fun bringHudToFront() {
+        binding.controlsContainer.bringToFront()
+        histogramView.bringToFront()
+        fpsView.bringToFront()
+    }
+
+    private fun toggleCategoryOverlay(category: VisionMode.Category) {
+        val row = when (category) {
+            VisionMode.Category.NV -> binding.nightVisionOverlayRow
+            VisionMode.Category.IMG -> binding.imgOverlayRow
+            VisionMode.Category.ROB -> binding.robOverlayRow
+            VisionMode.Category.NONE -> return
+        }
+        val visible = row.visibility == View.VISIBLE
+        if (visible) row.visibility = View.GONE
+        else {
+            row.visibility = View.VISIBLE
             Handler(Looper.getMainLooper()).postDelayed({
-                if (binding.nightVisionOverlayRow.visibility == View.VISIBLE) {
-                    binding.nightVisionOverlayRow.visibility = View.GONE
-                }
-            }, 3000)
-        }
-    }
-
-    private fun selectRegularNightVision() {
-        // Hide overlay
-        binding.nightVisionOverlayRow.visibility = View.GONE
-        
-        // Toggle regular night vision
-        isNightVisionEnabled = !isNightVisionEnabled
-        if (isNightVisionEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable night vision
-            isNightVisionEnabled = true
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_green_light)
-            binding.nightVisionButton.strokeWidth = 3
-            binding.nightVisionSliderContainer.visibility = View.VISIBLE
-            binding.viewFinder.visibility = View.VISIBLE
-            nightVisionImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.viewFinder.visibility = View.VISIBLE
-            nightVisionImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Night Vision Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun selectMLNightVision() {
-        // Hide overlay
-        binding.nightVisionOverlayRow.visibility = View.GONE
-        
-        // Toggle ML night vision
-        isMLNightVisionEnabled = !isMLNightVisionEnabled
-        if (isMLNightVisionEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable ML night vision
-            isMLNightVisionEnabled = true
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_blue_light)
-            binding.nightVisionButton.strokeWidth = 3
-            binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
-            binding.viewFinder.visibility = View.VISIBLE
-            nightVisionImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "ML Night Vision Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-            binding.nightVisionButton.strokeWidth = 1
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
-            binding.viewFinder.visibility = View.VISIBLE
-            nightVisionImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "ML Night Vision Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun toggleIMGOverlay() {
-        val isOverlayVisible = binding.imgOverlayRow.visibility == View.VISIBLE
-        if (isOverlayVisible) {
-            // Hide overlay
-            binding.imgOverlayRow.visibility = View.GONE
-        } else {
-            // Show overlay
-            binding.imgOverlayRow.visibility = View.VISIBLE
-            // Hide overlay after 3 seconds if no selection is made
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (binding.imgOverlayRow.visibility == View.VISIBLE) {
-                    binding.imgOverlayRow.visibility = View.GONE
-                }
-            }, 3000)
-        }
-    }
-
-    private fun toggleROBOverlay() {
-        val isOverlayVisible = binding.robOverlayRow.visibility == View.VISIBLE
-        if (isOverlayVisible) {
-            // Hide overlay
-            binding.robOverlayRow.visibility = View.GONE
-        } else {
-            // Show overlay
-            binding.robOverlayRow.visibility = View.VISIBLE
-            // Hide overlay after 3 seconds if no selection is made
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (binding.robOverlayRow.visibility == View.VISIBLE) {
-                    binding.robOverlayRow.visibility = View.GONE
-                }
-            }, 3000)
-        }
-    }
-
-    private fun disableAllNightVision() {
-        // Disable all night vision modes
-        isNightVisionEnabled = false
-        isMLNightVisionEnabled = false
-        
-        // Reset button state
-        binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-        binding.nightVisionButton.strokeWidth = 1
-        binding.nightVisionButton.text = "NV"
-        
-        // Hide overlays and sliders
-        binding.nightVisionOverlayRow.visibility = View.GONE
-        binding.nightVisionSliderContainer.visibility = View.GONE
-        binding.mlNightVisionSliderContainer.visibility = View.GONE
-        nightVisionImageView.visibility = View.GONE
-        
-        // Show normal camera view
-        binding.viewFinder.visibility = View.VISIBLE
-        
-        Log.d(TAG, "All night vision modes disabled")
-    }
-
-    private fun disableAllIMG() {
-        // Disable all IMG modes
-        isEdgeDetectionEnabled = false
-        isColorAdjustmentEnabled = false
-        
-        // Reset button state
-        binding.imgButton.setStrokeColorResource(android.R.color.white)
-        binding.imgButton.strokeWidth = 1
-        binding.imgButton.text = "IMG"
-        
-        // Hide overlays and sliders
-        binding.imgOverlayRow.visibility = View.GONE
-        binding.edgeDetectionSliderContainer.visibility = View.GONE
-        binding.colorSliderContainer.visibility = View.GONE
-        edgeDetectionImageView.visibility = View.GONE
-        colorAdjustmentImageView.visibility = View.GONE
-        
-        // Show normal camera view
-        binding.viewFinder.visibility = View.VISIBLE
-        
-        Log.d(TAG, "All IMG modes disabled")
-    }
-
-    private fun disableAllROB() {
-        // Disable all ROB modes
-        isOpticalFlowEnabled = false
-        isSegmentationEnabled = false
-        
-        // Reset button state
-        binding.robButton.setStrokeColorResource(android.R.color.white)
-        binding.robButton.strokeWidth = 1
-        binding.robButton.text = "ROB"
-        
-        // Hide overlays
-        binding.robOverlayRow.visibility = View.GONE
-        opticalFlowImageView.visibility = View.GONE
-        segmentationImageView.visibility = View.GONE
-        
-        // Show normal camera view
-        binding.viewFinder.visibility = View.VISIBLE
-        
-        Log.d(TAG, "All ROB modes disabled")
-    }
-
-    private fun selectOpticalFlow() {
-        // Hide overlay
-        binding.robOverlayRow.visibility = View.GONE
-        
-        // Toggle Optical Flow
-        isOpticalFlowEnabled = !isOpticalFlowEnabled
-        if (isOpticalFlowEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable Optical Flow
-            isOpticalFlowEnabled = true
-            binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
-            binding.robButton.strokeWidth = 3
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.viewFinder.visibility = View.VISIBLE
-            opticalFlowImageView.visibility = View.VISIBLE
-            
-            // Clear previous frame to start fresh
-            opticalFlowProcessor.clear()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Optical Flow Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.strokeWidth = 1
-            binding.viewFinder.visibility = View.VISIBLE
-            opticalFlowImageView.visibility = View.GONE
-            
-            // Clear optical flow processor
-            opticalFlowProcessor.clear()
-            
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Optical Flow Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-
-
-    private fun selectEdgeDetection() {
-        // Hide overlay
-        binding.imgOverlayRow.visibility = View.GONE
-        
-        // Toggle edge detection
-        isEdgeDetectionEnabled = !isEdgeDetectionEnabled
-        if (isEdgeDetectionEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable edge detection
-            isEdgeDetectionEnabled = true
-            binding.imgButton.setStrokeColorResource(android.R.color.holo_orange_light)
-            binding.imgButton.strokeWidth = 3
-            binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
-            binding.viewFinder.visibility = View.VISIBLE
-            edgeDetectionImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Edge Detection Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.viewFinder.visibility = View.VISIBLE
-            edgeDetectionImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Edge Detection Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun selectColorAdjustment() {
-        // Hide overlay
-        binding.imgOverlayRow.visibility = View.GONE
-        
-        // Toggle color adjustment
-        isColorAdjustmentEnabled = !isColorAdjustmentEnabled
-        if (isColorAdjustmentEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable color adjustment
-            isColorAdjustmentEnabled = true
-            binding.imgButton.setStrokeColorResource(android.R.color.holo_blue_light)
-            binding.imgButton.strokeWidth = 3
-            binding.colorSliderContainer.visibility = View.VISIBLE
-            binding.viewFinder.visibility = View.VISIBLE
-            colorAdjustmentImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Color Adjustment Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.colorSliderContainer.visibility = View.GONE
-            binding.viewFinder.visibility = View.VISIBLE
-            colorAdjustmentImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Color Adjustment Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun selectSegmentation() {
-        // Hide overlay
-        binding.robOverlayRow.visibility = View.GONE
-        
-        // Toggle segmentation
-        isSegmentationEnabled = !isSegmentationEnabled
-        if (isSegmentationEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable segmentation
-            isSegmentationEnabled = true
-            binding.robButton.setStrokeColorResource(android.R.color.holo_purple)
-            binding.robButton.strokeWidth = 3
-            binding.imgButton.setStrokeColorResource(android.R.color.white)
-            binding.imgButton.strokeWidth = 1
-            binding.viewFinder.visibility = View.VISIBLE
-            segmentationImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Image Segmentation Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.strokeWidth = 1
-            binding.viewFinder.visibility = View.VISIBLE
-            segmentationImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Image Segmentation Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun selectObjectDetection() {
-        // Hide overlay
-        binding.robOverlayRow.visibility = View.GONE
-        
-        // Toggle object detection
-        isObjectDetectionEnabled = !isObjectDetectionEnabled
-        if (isObjectDetectionEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable object detection
-            isObjectDetectionEnabled = true
-            binding.robButton.setStrokeColorResource(android.R.color.holo_red_light)
-            binding.robButton.strokeWidth = 3
-            binding.viewFinder.visibility = View.VISIBLE
-            objectDetectionOverlay.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Object Detection Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.strokeWidth = 1
-            binding.viewFinder.visibility = View.VISIBLE
-            objectDetectionOverlay.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Object Detection Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun selectTextTranslation() {
-        // Hide overlay
-        binding.robOverlayRow.visibility = View.GONE
-        
-        // Toggle text translation
-        isTextTranslationEnabled = !isTextTranslationEnabled
-        if (isTextTranslationEnabled) {
-            // Disable all other algorithms
-            disableAllAlgorithms()
-            
-            // Enable text translation
-            isTextTranslationEnabled = true
-            binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
-            binding.robButton.strokeWidth = 3
-            binding.viewFinder.visibility = View.VISIBLE
-            textTranslationImageView.visibility = View.VISIBLE
-            
-            // Show active slider if expanded
-            showActiveSlider()
-            
-            // Ensure all UI elements remain visible and on top
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            binding.controlsContainer.bringToFront()
-            histogramView.bringToFront()
-            fpsView.bringToFront()
-            Toast.makeText(this, "Text Translation Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.robButton.setStrokeColorResource(android.R.color.white)
-            binding.robButton.strokeWidth = 1
-            binding.viewFinder.visibility = View.VISIBLE
-            textTranslationImageView.visibility = View.GONE
-            // Ensure all UI elements remain visible
-            histogramView.visibility = View.VISIBLE
-            fpsView.visibility = View.VISIBLE
-            binding.controlsContainer.visibility = View.VISIBLE
-            Toast.makeText(this, "Text Translation Disabled", Toast.LENGTH_SHORT).show()
+                if (row.visibility == View.VISIBLE) row.visibility = View.GONE
+            }, Constants.OVERLAY_AUTO_HIDE_MS)
         }
     }
 
     private fun setMode(photo: Boolean) {
         isPhotoMode = photo
+        val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy_green))
+        val redBg = ColorStateList.valueOf(Color.RED)
+        val whiteIcon = ColorStateList.valueOf(Color.WHITE)
         if (photo) {
-            binding.photoButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.RED))
-            binding.videoButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.WHITE))
+            binding.photoButton.setBackgroundTintList(redBg)
+            binding.photoButton.imageTintList = whiteIcon
+            binding.videoButton.setBackgroundTintList(greenBg)
+            binding.videoButton.imageTintList = whiteIcon
             binding.recordButton.setImageResource(R.drawable.ic_record)
         } else {
-            binding.photoButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.WHITE))
-            binding.videoButton.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.RED))
+            binding.photoButton.setBackgroundTintList(greenBg)
+            binding.photoButton.imageTintList = whiteIcon
+            binding.videoButton.setBackgroundTintList(redBg)
+            binding.videoButton.imageTintList = whiteIcon
             binding.recordButton.setImageResource(R.drawable.ic_record)
         }
     }
 
     private fun takePhoto() {
-        // Capture the current screen content (including any active filters)
+        // When a vision overlay is active, capture that bitmap. Otherwise use ImageCapture (real camera capture).
         val processedBitmap = captureCurrentScreenContent()
-        
         if (processedBitmap != null) {
-            // Save the processed bitmap to gallery
             saveProcessedBitmapToGallery(processedBitmap)
         } else {
-            // Fallback to original camera capture
-            takeOriginalPhoto()
+            // No overlay or preview can't be captured (e.g. no filters) -> use ImageCapture for a real photo
+            takeProcessedPhoto()
         }
     }
 
     private fun captureCurrentScreenContent(): Bitmap? {
         try {
-            // Get the current processed image based on active filters
-            val processedBitmap = when {
-                isEdgeDetectionEnabled -> {
-                    // Get the edge detection image
+            val processedBitmap = when (visionState.mode) {
+                VisionMode.EDGE_DETECTION -> {
                     val drawable = edgeDetectionImageView.drawable
-                    if (drawable is BitmapDrawable) {
-                        val bitmap = drawable.bitmap
-                        Log.d(TAG, "Capturing edge detection image: ${bitmap.width}x${bitmap.height}")
-                        bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-                    } else null
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
-                isOpticalFlowEnabled -> {
-                    // Get the Optical Flow processed image
+                VisionMode.OPTICAL_FLOW -> {
                     val drawable = opticalFlowImageView.drawable
-                    if (drawable is BitmapDrawable) {
-                        val bitmap = drawable.bitmap
-                        Log.d(TAG, "Capturing Optical Flow image: ${bitmap.width}x${bitmap.height}")
-                        bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-                    } else null
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
-                isNightVisionEnabled || isMLNightVisionEnabled -> {
-                    // Get the night vision image
+                VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> {
                     val drawable = nightVisionImageView.drawable
-                    if (drawable is BitmapDrawable) {
-                        val bitmap = drawable.bitmap
-                        Log.d(TAG, "Capturing night vision image: ${bitmap.width}x${bitmap.height}")
-                        bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-                    } else null
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
+                }
+                VisionMode.COLOR_ADJUSTMENT -> {
+                    val drawable = colorAdjustmentImageView.drawable
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
+                }
+                VisionMode.SEGMENTATION -> {
+                    val drawable = segmentationImageView.drawable
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
+                }
+                VisionMode.DEPTH_FIELD -> {
+                    val drawable = depthFieldImageView.drawable
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
+                }
+                VisionMode.TEXT_TRANSLATION -> {
+                    val drawable = textTranslationImageView.drawable
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
+                }
+                VisionMode.HD -> {
+                    val drawable = hdImageView.drawable
+                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
                 else -> {
-                    // No filters active, capture the camera preview
-                    val previewView = binding.viewFinder
-                    if (previewView.width > 0 && previewView.height > 0) {
-                        val bitmap = Bitmap.createBitmap(
-                            previewView.width,
-                            previewView.height,
-                            Bitmap.Config.ARGB_8888
-                        )
-                        val canvas = Canvas(bitmap)
-                        previewView.draw(canvas)
-                        Log.d(TAG, "Capturing camera preview: ${bitmap.width}x${bitmap.height}")
-                        bitmap
-                    } else null
+                    // No filters active: PreviewView draws camera to a Surface, not to Canvas, so draw(canvas) would be black.
+                    // Caller will use ImageCapture (takeProcessedPhoto) for a real photo instead.
+                    null
                 }
             }
             
@@ -1147,12 +977,12 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveProcessedBitmapToGallery(bitmap: Bitmap) {
         try {
-            val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+            val name = Constants.MEDIA_FILENAME_PREFIX + SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".jpg"
             val contentValues = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                 put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
                 if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                    put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Constants.GALLERY_IMAGE_RELATIVE_PATH)
                 }
             }
 
@@ -1167,10 +997,8 @@ class MainActivity : AppCompatActivity() {
                 contentResolver.openOutputStream(savedUri)?.use { stream ->
                     stream.write(imageBytes)
                 }
-                
-                // Notify media scanner
+                SavedMediaTracker.addImage(this, savedUri)
                 sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, savedUri))
-                
                 val msg = "Photo saved to gallery"
                 Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
                 Log.d(TAG, "Processed photo saved: $savedUri")
@@ -1192,12 +1020,12 @@ class MainActivity : AppCompatActivity() {
     
     private fun takeRawPhoto() {
         val imageCapture = imageCapture ?: return
-        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val name = Constants.MEDIA_FILENAME_PREFIX + SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".jpg"
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
             if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Constants.GALLERY_IMAGE_RELATIVE_PATH)
             }
         }
         val outputOptions = ImageCapture.OutputFileOptions.Builder(
@@ -1216,9 +1044,8 @@ class MainActivity : AppCompatActivity() {
                     val msg = "Raw photo saved to gallery"
                     Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
                     Log.d(TAG, "Raw photo capture succeeded: ${output.savedUri}")
-                    
-                    // Notify media scanner to update gallery
                     output.savedUri?.let { uri ->
+                        SavedMediaTracker.addImage(this@MainActivity, uri)
                         sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
                     }
                 }
@@ -1228,12 +1055,12 @@ class MainActivity : AppCompatActivity() {
     
     private fun takeProcessedPhoto() {
         val imageCapture = imageCapture ?: return
-        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val name = Constants.MEDIA_FILENAME_PREFIX + SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".jpg"
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
             if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/CameraX-Image")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Constants.GALLERY_IMAGE_RELATIVE_PATH)
             }
         }
         val outputOptions = ImageCapture.OutputFileOptions.Builder(
@@ -1252,9 +1079,8 @@ class MainActivity : AppCompatActivity() {
                     val msg = "Processed photo saved to gallery"
                     Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
                     Log.d(TAG, "Processed photo capture succeeded: ${output.savedUri}")
-                    
-                    // Notify media scanner to update gallery
                     output.savedUri?.let { uri ->
+                        SavedMediaTracker.addImage(this@MainActivity, uri)
                         sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
                     }
                 }
@@ -1263,326 +1089,114 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun startRecording() {
-        val videoCapture = videoCapture ?: return
-        val name = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+        val name = Constants.MEDIA_FILENAME_PREFIX + SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".mp4"
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
             if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/CameraX-Video")
+                put(MediaStore.Video.Media.RELATIVE_PATH, Constants.GALLERY_VIDEO_RELATIVE_PATH)
             }
         }
-        val mediaStoreOutputOptions = MediaStoreOutputOptions.Builder(
-            contentResolver,
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-        ).setContentValues(contentValues).build()
-        isRecording = true
-        binding.recordButton.setImageResource(android.R.drawable.ic_media_pause)
-        activeRecording = videoCapture.output
-            .prepareRecording(this, mediaStoreOutputOptions)
-            .apply {
-                if (androidx.core.content.PermissionChecker.checkSelfPermission(
-                        this@MainActivity,
-                        Manifest.permission.RECORD_AUDIO
-                    ) == androidx.core.content.PermissionChecker.PERMISSION_GRANTED
-                ) {
-                    withAudioEnabled()
-                }
-            }
-            .start(ContextCompat.getMainExecutor(this)) { event ->
-                when (event) {
-                    is VideoRecordEvent.Start -> {
-                        Log.d(TAG, "Video recording started")
+        val recordWithFilter = visionState.mode != VisionMode.NONE && visionState.mode != VisionMode.OBJECT_DETECTION
+        if (recordWithFilter) {
+            // Record processed frames to temp file, then copy to MediaStore. Set isRecording only when encoder is ready.
+            val moviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
+                ?: cacheDir
+            if (!moviesDir.exists()) moviesDir.mkdirs()
+            val tempFile = File(moviesDir, "visiontechai_rec_${System.currentTimeMillis()}.mp4")
+            val recorder = ProcessedVideoRecorder(
+                contentResolver = contentResolver,
+                contentValues = contentValues,
+                width = PROCESSED_VIDEO_WIDTH,
+                height = PROCESSED_VIDEO_HEIGHT,
+                tempFile = tempFile
+            )
+            processedVideoRecorder = recorder
+            recorder.start(
+                onReady = {
+                    runOnUiThread {
+                        isRecording = true
+                        binding.recordButton.setImageResource(android.R.drawable.ic_media_pause)
+                        Log.d(TAG, "Processed video recording started")
                     }
-                    is VideoRecordEvent.Finalize -> {
-                        if (event.hasError()) {
-                            Log.e(TAG, "Video capture ends with error: ${event.error}")
-                        } else {
-                            val msg = "Video saved to gallery"
-                            Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
-                            Log.d(TAG, "Video capture succeeded: ${event.outputResults.outputUri}")
-                            
-                            // Notify media scanner to update gallery
-                            event.outputResults.outputUri?.let { uri ->
-                                sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
-                            }
-                        }
-                        isRecording = false
+                },
+                onFailed = {
+                    runOnUiThread {
+                        processedVideoRecorder = null
                         binding.recordButton.setImageResource(R.drawable.ic_record)
-                        activeRecording = null
+                        Toast.makeText(this, "Recording failed to start", Toast.LENGTH_LONG).show()
                     }
                 }
-            }
+            )
+        } else {
+            // No filter: use camera VideoCapture (raw stream, with audio)
+            val videoCapture = videoCapture ?: return
+            val mediaStoreOutputOptions = MediaStoreOutputOptions.Builder(
+                contentResolver,
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+            ).setContentValues(contentValues).build()
+            isRecording = true
+            binding.recordButton.setImageResource(android.R.drawable.ic_media_pause)
+            activeRecording = videoCapture.output
+                .prepareRecording(this, mediaStoreOutputOptions)
+                .apply {
+                    if (androidx.core.content.PermissionChecker.checkSelfPermission(
+                            this@MainActivity,
+                            Manifest.permission.RECORD_AUDIO
+                        ) == androidx.core.content.PermissionChecker.PERMISSION_GRANTED
+                    ) {
+                        withAudioEnabled()
+                    }
+                }
+                .start(ContextCompat.getMainExecutor(this)) { event ->
+                    when (event) {
+                        is VideoRecordEvent.Start -> {
+                            Log.d(TAG, "Video recording started")
+                        }
+                        is VideoRecordEvent.Finalize -> {
+                            if (event.hasError()) {
+                                Log.e(TAG, "Video capture ends with error: ${event.error}")
+                            } else {
+                                val msg = "Video saved to gallery"
+                                Toast.makeText(baseContext, msg, Toast.LENGTH_SHORT).show()
+                                Log.d(TAG, "Video capture succeeded: ${event.outputResults.outputUri}")
+                                event.outputResults.outputUri?.let { uri ->
+                                    SavedMediaTracker.addVideo(this@MainActivity, uri)
+                                    sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                                }
+                            }
+                            isRecording = false
+                            binding.recordButton.setImageResource(R.drawable.ic_record)
+                            activeRecording = null
+                        }
+                    }
+                }
+        }
     }
 
     private fun stopRecording() {
-        activeRecording?.stop()
-        isRecording = false
-        binding.recordButton.setImageResource(R.drawable.ic_record)
-    }
-
-    private fun toggleDualCamera() {
-        isDualCameraMode = !isDualCameraMode
-        if (isDualCameraMode) {
-
-            binding.viewFinder.visibility = View.GONE
-            binding.splitScreenContainer.visibility = View.VISIBLE
-            
-            // Clear any existing images
-            binding.backCameraImageView.setImageBitmap(null)
-            binding.frontCameraImageView.setImageBitmap(null)
-            
-            startSplitScreenDualCamera()
-            Toast.makeText(this, "Dual Camera Split-Screen Enabled", Toast.LENGTH_SHORT).show()
-        } else {
-            binding.splitScreenContainer.visibility = View.GONE
-            binding.viewFinder.visibility = View.VISIBLE
-            stopSplitScreenDualCamera()
-            
-            // Restart single camera
-            startCamera()
-            Toast.makeText(this, "Dual Camera Mode Disabled", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun startSplitScreenDualCamera() {
-        splitScreenCapturing = true
-        splitScreenHandler = Handler(Looper.getMainLooper())
-        
-        // Initialize separate camera provider for split screen
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            splitScreenCameraProvider = cameraProviderFuture.get()
-            
-            // Check dual camera support with the initialized provider
-            checkDualCameraSupportWithProvider(splitScreenCameraProvider!!)
-            
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun checkDualCameraSupportWithProvider(cameraProvider: ProcessCameraProvider) {
-        try {
-            // Check if both cameras are available
-            val hasBackCamera = cameraProvider.hasCamera(CameraSelector.DEFAULT_BACK_CAMERA)
-            val hasFrontCamera = cameraProvider.hasCamera(CameraSelector.DEFAULT_FRONT_CAMERA)
-            
-            if (hasBackCamera && hasFrontCamera) {
-                // Both cameras exist, now test if we can bind them simultaneously
-                supportsTrueDualCamera = testSimultaneousCameraBinding(cameraProvider)
-                Log.d(TAG, "Dual camera support: $supportsTrueDualCamera")
-            } else {
-                supportsTrueDualCamera = false
-                Log.d(TAG, "One or both cameras not available (Back: $hasBackCamera, Front: $hasFrontCamera)")
-            }
-            
-            // Start the appropriate capture mode
-            if (supportsTrueDualCamera) {
-                startTrueDualCameraCapture()
-                Log.d(TAG, "Split-screen dual camera started (true dual mode)")
-            } else {
-                // Fall back to sequential mode
-                splitScreenActiveCamera = CameraSelector.DEFAULT_BACK_CAMERA
-                startSequentialCameraCapture()
-                Log.d(TAG, "Split-screen dual camera started (sequential mode)")
-            }
-            
-        } catch (e: Exception) {
-            supportsTrueDualCamera = false
-            Log.e(TAG, "Error checking dual camera support: ${e.message}")
-            // Fall back to sequential mode
-            splitScreenActiveCamera = CameraSelector.DEFAULT_BACK_CAMERA
-            startSequentialCameraCapture()
-        }
-    }
-
-    private fun stopSplitScreenDualCamera() {
-        splitScreenCapturing = false
-        splitScreenHandler?.removeCallbacksAndMessages(null)
-        splitScreenHandler = null
-        splitScreenRunnable = null
-        
-        // Clean up camera provider
-        splitScreenCameraProvider?.unbindAll()
-        splitScreenCameraProvider = null
-    }
-
-    private fun startSequentialCameraCapture() {
-        splitScreenRunnable = object : Runnable {
-            override fun run() {
-                if (!splitScreenCapturing) return
-                
-                captureCurrentCameraFrame()
-                
-                // Switch to other camera after a short delay
-                splitScreenHandler?.postDelayed({
-                    if (splitScreenCapturing) {
-                        splitScreenActiveCamera = if (splitScreenActiveCamera == CameraSelector.DEFAULT_BACK_CAMERA) {
-                            CameraSelector.DEFAULT_FRONT_CAMERA
-                        } else {
-                            CameraSelector.DEFAULT_BACK_CAMERA
-                        }
-                        captureCurrentCameraFrame()
-                        
-                        // Schedule next capture
-                        splitScreenHandler?.postDelayed(this, 200) // Switch every 200ms
+        val processed = processedVideoRecorder
+        if (processed != null) {
+            processedVideoRecorder = null
+            processed.stop { uri ->
+                runOnUiThread {
+                    isRecording = false
+                    binding.recordButton.setImageResource(R.drawable.ic_record)
+                    if (uri != null) {
+                        Toast.makeText(baseContext, "Video saved to gallery", Toast.LENGTH_SHORT).show()
+                        SavedMediaTracker.addVideo(this@MainActivity, uri)
+                        sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                    } else {
+                        Toast.makeText(baseContext, "Video not saved (no frames or error). Try again.", Toast.LENGTH_LONG).show()
                     }
-                }, 100)
+                }
             }
+        } else {
+            activeRecording?.stop()
+            isRecording = false
+            binding.recordButton.setImageResource(R.drawable.ic_record)
         }
-        splitScreenRunnable?.run()
-    }
-
-
-
-    private fun testSimultaneousCameraBinding(cameraProvider: ProcessCameraProvider): Boolean {
-        return try {
-            // Create dummy use cases to test binding
-            val backAnalyzer = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-            
-            val frontAnalyzer = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build()
-            
-            // Try to bind both simultaneously
-            cameraProvider.bindToLifecycle(
-                this, CameraSelector.DEFAULT_BACK_CAMERA, backAnalyzer
-            )
-            cameraProvider.bindToLifecycle(
-                this, CameraSelector.DEFAULT_FRONT_CAMERA, frontAnalyzer
-            )
-            
-            // If we get here, it worked
-            cameraProvider.unbindAll()
-            true
-        } catch (e: Exception) {
-            Log.d(TAG, "Simultaneous camera binding failed: ${e.message}")
-            cameraProvider.unbindAll()
-            false
-        }
-    }
-
-    private fun startTrueDualCameraCapture() {
-        val cameraProvider = splitScreenCameraProvider ?: return
-        
-        try {
-            // Create analyzers for both cameras
-            val backAnalyzer = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build().also {
-                    it.setAnalyzer(cameraExecutor, object : ImageAnalysis.Analyzer {
-                        override fun analyze(image: ImageProxy) {
-                            if (!splitScreenCapturing) {
-                                image.close()
-                                return
-                            }
-                            
-                            val bitmap = yuvToBitmap(image)
-                            image.close()
-                            
-                            if (bitmap != null) {
-                                runOnUiThread {
-                                    splitScreenBackBitmap = bitmap
-                                    binding.backCameraImageView.setImageBitmap(bitmap)
-                                    Log.d(TAG, "Updated back camera frame (true dual)")
-                                }
-                            }
-                        }
-                    })
-                }
-            
-            val frontAnalyzer = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build().also {
-                    it.setAnalyzer(cameraExecutor, object : ImageAnalysis.Analyzer {
-                        override fun analyze(image: ImageProxy) {
-                            if (!splitScreenCapturing) {
-                                image.close()
-                                return
-                            }
-                            
-                            val bitmap = yuvToBitmap(image)
-                            image.close()
-                            
-                            if (bitmap != null) {
-                                runOnUiThread {
-                                    splitScreenFrontBitmap = bitmap
-                                    binding.frontCameraImageView.setImageBitmap(bitmap)
-                                    Log.d(TAG, "Updated front camera frame (true dual)")
-                                }
-                            }
-                        }
-                    })
-                }
-            
-            // Bind both cameras simultaneously
-            cameraProvider.bindToLifecycle(
-                this, CameraSelector.DEFAULT_BACK_CAMERA, backAnalyzer
-            )
-            cameraProvider.bindToLifecycle(
-                this, CameraSelector.DEFAULT_FRONT_CAMERA, frontAnalyzer
-            )
-            
-            Log.d(TAG, "True dual camera capture started")
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "True dual camera capture error: ${e.message}")
-            // Fall back to sequential mode
-            supportsTrueDualCamera = false
-            splitScreenActiveCamera = CameraSelector.DEFAULT_BACK_CAMERA
-            startSequentialCameraCapture()
-        }
-    }
-
-    private fun captureCurrentCameraFrame() {
-        val cameraProvider = splitScreenCameraProvider ?: return
-        
-        try {
-            // Unbind previous use cases to switch cameras
-            cameraProvider.unbindAll()
-            
-            val imageAnalyzer = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build().also {
-                    it.setAnalyzer(cameraExecutor, object : ImageAnalysis.Analyzer {
-                        override fun analyze(image: ImageProxy) {
-                            if (!splitScreenCapturing) {
-                                image.close()
-                                return
-                            }
-                            
-                            val bitmap = yuvToBitmap(image)
-                            image.close()
-                            
-                            if (bitmap != null) {
-                                runOnUiThread {
-                                    if (splitScreenActiveCamera == CameraSelector.DEFAULT_BACK_CAMERA) {
-                                        splitScreenBackBitmap = bitmap
-                                        binding.backCameraImageView.setImageBitmap(bitmap)
-                                        Log.d(TAG, "Updated back camera frame")
-                                    } else {
-                                        splitScreenFrontBitmap = bitmap
-                                        binding.frontCameraImageView.setImageBitmap(bitmap)
-                                        Log.d(TAG, "Updated front camera frame")
-                                    }
-                                }
-                            }
-                        }
-                    })
-                }
-            
-            // Bind to lifecycle
-            cameraProvider.bindToLifecycle(
-                this, splitScreenActiveCamera, imageAnalyzer
-            )
-            
-            Log.d(TAG, "Capturing from camera: ${if (splitScreenActiveCamera == CameraSelector.DEFAULT_BACK_CAMERA) "BACK" else "FRONT"}")
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Camera capture error: ${e.message}")
-            // Continue with next camera even if this one fails
-        }
+        activeRecording = null
     }
 
     private fun toggleInfoPanel() {
@@ -1611,176 +1225,27 @@ class MainActivity : AppCompatActivity() {
         binding.infoPanel.visibility = View.GONE
     }
 
-    private fun switchCamera() {
-        if (!isDualCameraMode) {
-            cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-                CameraSelector.DEFAULT_FRONT_CAMERA
-            } else {
-                CameraSelector.DEFAULT_BACK_CAMERA
-            }
-            startCamera()
+    private fun openContactEmail() {
+        // To: inqueapps@gmail.com; Subject only. From is the user's email (not set).
+        val uri = Uri.parse("mailto:inqueapps@gmail.com").buildUpon()
+            .appendQueryParameter("subject", "VisionTechAI feedback")
+            .build()
+        val intent = Intent(Intent.ACTION_SENDTO).apply { data = uri }
+        try {
+            startActivity(Intent.createChooser(intent, getString(R.string.contact_us_chooser)))
+        } catch (e: Exception) {
+            Toast.makeText(this, "No email app available", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private fun startDualCamera() {
-        // Software-based dual camera using Picture-in-Picture mode
-        // This works on any device by showing main camera + small overlay of other camera
-        
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-            
-            try {
-                cameraProvider.unbindAll()
-                
-                // Main camera (current selection)
-                val mainPreview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
-                }
-                
-                // Secondary camera (other camera) as small overlay
-                val secondaryPreview = Preview.Builder()
-                    .setTargetResolution(Size(320, 240)) // Small resolution for overlay
-                    .build().also {
-                        it.setSurfaceProvider(frontCameraView.surfaceProvider)
-                    }
-                
-                // Determine which camera is main and which is secondary
-                val mainCameraSelector = cameraSelector
-                val secondaryCameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-                    CameraSelector.DEFAULT_FRONT_CAMERA
-                } else {
-                    CameraSelector.DEFAULT_BACK_CAMERA
-                }
-                
-                // Create image analyzer for main camera
-                val imageAnalyzer = ImageAnalysis.Builder()
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build().also {
-                        it.setAnalyzer(cameraExecutor, NightVisionAnalyzer { luma ->
-                            Log.d(TAG, "Average luminosity: $luma")
-                        })
-                    }
-                
-                // Bind main camera with full functionality
-                cameraProvider.bindToLifecycle(
-                    this, mainCameraSelector, mainPreview, imageCapture, videoCapture, imageAnalyzer
-                )
-                
-                // Bind secondary camera with just preview
-                cameraProvider.bindToLifecycle(
-                    this, secondaryCameraSelector, secondaryPreview
-                )
-                
-                // Show the dual camera layout
-                binding.viewFinder.visibility = View.VISIBLE
-                dualCameraContainer.visibility = View.VISIBLE
-                
-                // Position the secondary camera view as a small overlay
-                val overlayWidth = (binding.viewFinder.width * 0.25).toInt() // 25% of main view width
-                val overlayHeight = (binding.viewFinder.height * 0.15).toInt() // 15% of main view height
-                
-                frontCameraView.layoutParams = LinearLayout.LayoutParams(
-                    overlayWidth, overlayHeight
-                ).apply {
-                    gravity = android.view.Gravity.TOP or android.view.Gravity.END
-                    setMargins(0, 100, 20, 0) // Top-right corner with margins
-                }
-                
-                // Add a close button for the secondary camera
-                addSecondaryCameraCloseButton()
-                
-                // Make secondary camera view draggable
-                setupDraggableSecondaryCamera()
-                
-                Log.d(TAG, "Software dual camera mode enabled successfully")
-                
-            } catch (exc: Exception) {
-                Log.e(TAG, "Software dual camera failed, falling back to single camera", exc)
-                Toast.makeText(this, "Dual camera mode not available, using single camera", Toast.LENGTH_SHORT).show()
-                // Fallback to single camera
-                isDualCameraMode = false
-                binding.viewFinder.visibility = View.VISIBLE
-                dualCameraContainer.visibility = View.GONE
-                startCamera()
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-    
-    private fun setupDraggableSecondaryCamera() {
-        // Make the secondary camera view draggable
-        frontCameraView.setOnTouchListener { view, event ->
-            when (event.action) {
-                android.view.MotionEvent.ACTION_DOWN -> {
-                    // Store initial touch position
-                    view.tag = Pair(event.rawX, event.rawY)
-                    true
-                }
-                android.view.MotionEvent.ACTION_MOVE -> {
-                    // Move the view based on touch movement
-                    val initialPos = view.tag as? Pair<Float, Float>
-                    if (initialPos != null) {
-                        val deltaX = event.rawX - initialPos.first
-                        val deltaY = event.rawY - initialPos.second
-                        
-                        view.translationX += deltaX
-                        view.translationY += deltaY
-                        
-                        // Update stored position
-                        view.tag = Pair(event.rawX, event.rawY)
-                    }
-                    true
-                }
-                android.view.MotionEvent.ACTION_UP -> {
-                    // Snap to screen bounds
-                    val parent = view.parent as? android.view.ViewGroup
-                    if (parent != null) {
-                        val maxX = parent.width - view.width
-                        val maxY = parent.height - view.height
-                        
-                        view.translationX = view.translationX.coerceIn(0f, maxX.toFloat())
-                        view.translationY = view.translationY.coerceIn(0f, maxY.toFloat())
-                    }
-                    true
-                }
-                else -> false
-            }
+    private fun switchCamera() {
+        if (isRecording) stopRecording()
+        cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
+            CameraSelector.DEFAULT_FRONT_CAMERA
+        } else {
+            CameraSelector.DEFAULT_BACK_CAMERA
         }
-    }
-    
-    private fun addSecondaryCameraCloseButton() {
-        // Create a close button for the secondary camera
-        val closeButton = TextView(this).apply {
-            text = "×"
-            textSize = 20f
-            setTextColor(Color.WHITE)
-            setBackgroundColor(Color.RED)
-            gravity = android.view.Gravity.CENTER
-            setPadding(8, 4, 8, 4)
-            
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply {
-                gravity = android.view.Gravity.TOP or android.view.Gravity.END
-                setMargins(0, 0, 0, 0)
-            }
-            
-            setOnClickListener {
-                // Hide secondary camera and return to single camera mode
-                frontCameraView.visibility = View.GONE
-                this.visibility = View.GONE
-                isDualCameraMode = false
-                startCamera()
-                Toast.makeText(this@MainActivity, "Dual camera mode disabled", Toast.LENGTH_SHORT).show()
-            }
-        }
-        
-        // Add close button to the dual camera container
-        dualCameraContainer.addView(closeButton)
-        
-        // Position it on top of the secondary camera view
-        closeButton.bringToFront()
+        startCamera()
     }
 
     private fun startCamera() {
@@ -1801,11 +1266,43 @@ class MainActivity : AppCompatActivity() {
                 .build()
             videoCapture = VideoCapture.withOutput(recorder)
             
+            // No setTargetResolution: use same FOV as preview so effects match normal view (not zoomed)
             val imageAnalyzer = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .build().also {
-                    it.setAnalyzer(cameraExecutor, NightVisionAnalyzer { luma ->
-                        Log.d(TAG, "Average luminosity: $luma")
+                    it.setAnalyzer(cameraExecutor, visionPipeline.createAnalyzer { result ->
+                        runOnUiThread {
+                            result.fps?.let { fps -> fpsView.text = "FPS: %.1f".format(fps) }
+                            result.histograms?.let { (r, g, b) -> histogramView.updateHistograms(r, g, b) }
+                            result.detections?.let { dets ->
+                                objectDetectionOverlay.setResults(dets, result.imageHeight, result.imageWidth)
+                            }
+                            if (visionState.mode == VisionMode.SEGMENTATION && result.processedBitmap == null) {
+                                if (segmentationNullLogCounter++ % 45 == 0) {
+                                    Log.w(TAG, "Segmentation: no bitmap from pipeline (native may have failed or lib not loaded)")
+                                }
+                            }
+                            result.processedBitmap?.let { bmp ->
+                                when (visionState.mode) {
+                                    VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
+                                    VisionMode.EDGE_DETECTION -> edgeDetectionImageView.setImageBitmap(bmp)
+                                    VisionMode.OPTICAL_FLOW -> opticalFlowImageView.setImageBitmap(bmp)
+                                    VisionMode.COLOR_ADJUSTMENT -> colorAdjustmentImageView.setImageBitmap(bmp)
+                                    VisionMode.HD -> hdImageView.setImageBitmap(bmp)
+                                    VisionMode.TEXT_TRANSLATION -> textTranslationImageView.setImageBitmap(bmp)
+                                    VisionMode.SEGMENTATION -> {
+                                        segmentationImageView.setImageBitmap(bmp)
+                                        segmentationImageView.bringToFront()
+                                    }
+                                    VisionMode.DEPTH_FIELD -> {
+                                        depthFieldImageView.setImageBitmap(bmp)
+                                        depthFieldImageView.bringToFront()
+                                    }
+                                    else -> { }
+                                }
+                                if (isRecording) processedVideoRecorder?.addFrame(bmp)
+                            }
+                        }
                     })
                 }
             try {
@@ -1936,6 +1433,8 @@ class MainActivity : AppCompatActivity() {
     companion object {
         private const val TAG = "CameraXApp"
         private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
+        private const val PROCESSED_VIDEO_WIDTH = 1280
+        private const val PROCESSED_VIDEO_HEIGHT = 720
         private const val USE_SIMPLE_YUV_CONVERSION = true // Set to false to use complex conversion
         private val REQUIRED_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             arrayOf(
@@ -1950,660 +1449,6 @@ class MainActivity : AppCompatActivity() {
                 Manifest.permission.RECORD_AUDIO,
                 Manifest.permission.WRITE_EXTERNAL_STORAGE
             )
-        }
-    }
-
-    // Robust YUV to Bitmap conversion with multiple fallback methods
-    private fun yuvToBitmap(image: ImageProxy): Bitmap? {
-        try {
-            val width = image.width
-            val height = image.height
-            val rotation = image.imageInfo.rotationDegrees
-            
-            // Try multiple YUV formats since different cameras use different formats
-            val formats = listOf(ImageFormat.NV21, ImageFormat.YV12, ImageFormat.YUV_420_888)
-            
-            for (format in formats) {
-                try {
-                    // Create YuvImage with current format
-                    val yuvImage = YuvImage(
-                        image.planes[0].buffer.array(),
-                        format,
-                        width,
-                        height,
-                        null
-                    )
-                    
-                    // Convert to JPEG with high quality
-                    val out = ByteArrayOutputStream()
-                    yuvImage.compressToJpeg(Rect(0, 0, width, height), 100, out)
-                    val imageBytes = out.toByteArray()
-                    
-                    // Convert JPEG to Bitmap
-                    val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-                    
-                    if (bitmap != null) {
-                        Log.d(TAG, "Successfully converted YUV using format: $format")
-                        
-                        // Apply rotation if needed
-                        return if (rotation != 0) {
-                            val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                            Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
-                        } else {
-                            bitmap
-                        }
-                    }
-                } catch (e: Exception) {
-                    Log.d(TAG, "Format $format failed: ${e.message}")
-                    continue
-                }
-            }
-            
-            // If all YuvImage formats fail, try manual conversion
-            Log.w(TAG, "All YuvImage formats failed, trying manual conversion")
-            return tryManualYuvConversion(image)
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Error converting YUV to bitmap: ${e.message}")
-            e.printStackTrace()
-            
-            // Last resort: try manual conversion
-            return tryManualYuvConversion(image)
-        }
-    }
-    
-    // Manual YUV conversion as fallback with better error handling
-    private fun tryManualYuvConversion(image: ImageProxy): Bitmap? {
-        try {
-            val width = image.width
-            val height = image.height
-            val rotation = image.imageInfo.rotationDegrees
-            
-            Log.d(TAG, "Starting manual YUV conversion for ${width}x${height}")
-            
-            // Get YUV planes
-            val yPlane = image.planes[0]
-            val uPlane = image.planes[1]
-            val vPlane = image.planes[2]
-            
-            // Get plane info for debugging
-            val yStride = yPlane.rowStride
-            val uStride = uPlane.rowStride
-            val vStride = vPlane.rowStride
-            val uPixelStride = uPlane.pixelStride
-            val vPixelStride = vPlane.pixelStride
-            
-            Log.d(TAG, "YUV plane info - Y stride: $yStride, U stride: $uStride, V stride: $vStride")
-            Log.d(TAG, "UV pixel stride - U: $uPixelStride, V: $vPixelStride")
-            
-            // Create bitmap
-            val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            val pixels = IntArray(width * height)
-            
-            // Get Y values (luminance)
-            val yBuffer = yPlane.buffer
-            yBuffer.rewind()
-            val yValues = ByteArray(yBuffer.remaining())
-            yBuffer.get(yValues)
-            
-            Log.d(TAG, "Y buffer size: ${yValues.size}, expected: ${width * height}")
-            
-            // Get U and V values (chrominance)
-            val uBuffer = uPlane.buffer
-            val vBuffer = vPlane.buffer
-            uBuffer.rewind()
-            vBuffer.rewind()
-            val uValues = ByteArray(uBuffer.remaining())
-            val vValues = ByteArray(vBuffer.remaining())
-            uBuffer.get(uValues)
-            vBuffer.get(vValues)
-            
-            Log.d(TAG, "U buffer size: ${uValues.size}, V buffer size: ${vValues.size}")
-            
-            // Manual YUV to RGB conversion with proper UV sampling
-            var pixelIndex = 0
-            for (y in 0 until height) {
-                for (x in 0 until width) {
-                    // Get Y value
-                    val yIndex = y * width + x
-                    val yValue = if (yIndex < yValues.size) yValues[yIndex].toInt() and 0xFF else 0
-                    
-                    // Get U and V values with proper stride handling
-                    val uvRow = y / 2
-                    val uvCol = x / 2
-                    
-                    // Calculate UV indices with proper stride
-                    val uIndex = uvRow * uStride + uvCol * uPixelStride
-                    val vIndex = uvRow * vStride + uvCol * vPixelStride
-                    
-                    val uValue = if (uIndex < uValues.size) uValues[uIndex].toInt() and 0xFF else 128
-                    val vValue = if (vIndex < vValues.size) vValues[vIndex].toInt() and 0xFF else 128
-                    
-                    // YUV to RGB conversion (BT.601)
-                    val r = yValue + 1.402 * (vValue - 128)
-                    val g = yValue - 0.344 * (uValue - 128) - 0.714 * (vValue - 128)
-                    val b = yValue + 1.772 * (uValue - 128)
-                    
-                    val red = r.coerceIn(0.0, 255.0).toInt()
-                    val green = g.coerceIn(0.0, 255.0).toInt()
-                    val blue = b.coerceIn(0.0, 255.0).toInt()
-                    
-                    pixels[pixelIndex++] = Color.rgb(red, green, blue)
-                }
-            }
-            
-            Log.d(TAG, "Manual conversion completed, setting pixels")
-            bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            
-            // Apply rotation if needed
-            return if (rotation != 0) {
-                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
-            } else {
-                bitmap
-            }
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Manual YUV conversion failed: ${e.message}")
-            e.printStackTrace()
-            return null
-        }
-    }
-    
-
-
-    private inner class NightVisionAnalyzer(private val listener: (Double) -> Unit) : ImageAnalysis.Analyzer {
-        override fun analyze(image: ImageProxy) {
-            val buffer = image.planes[0].buffer
-            val data = ByteArray(buffer.remaining())
-            buffer.get(data)
-            val pixels = data.map { it.toInt() and 0xFF }
-            val luma = pixels.average()
-            listener(luma)
-
-            // Update FPS counter
-            frameCount++
-            val currentTime = System.currentTimeMillis()
-            if (currentTime - lastFpsTime >= 1000) {
-                currentFps = frameCount * 1000f / (currentTime - lastFpsTime)
-                frameCount = 0
-                lastFpsTime = currentTime
-                
-                runOnUiThread {
-                    fpsView.text = "FPS: %.1f".format(currentFps)
-                }
-            }
-
-            // Always calculate and display histograms
-            val bitmap = yuvToBitmap(image)
-            if (bitmap != null) {
-                val (redHistogram, greenHistogram, blueHistogram) = calculateHistograms(bitmap)
-                
-                // Debug: Log histogram differences to verify color channels are distinct
-                val redMax = redHistogram.maxOrNull() ?: 0
-                val greenMax = greenHistogram.maxOrNull() ?: 0
-                val blueMax = blueHistogram.maxOrNull() ?: 0
-                
-                if (frameCount % 30 == 0) { // Log every 30 frames to avoid spam
-                    Log.d(TAG, "Histogram max values - Red: $redMax, Green: $greenMax, Blue: $blueMax")
-                    
-                    // Check if histograms are identical (which would indicate a problem)
-                    val redSum = redHistogram.sum()
-                    val greenSum = greenHistogram.sum()
-                    val blueSum = blueHistogram.sum()
-                    
-                    if (redSum == greenSum && greenSum == blueSum) {
-                        Log.w(TAG, "Warning: All histogram sums are identical - color conversion may not be working properly")
-                    }
-                    
-                    // Sample a few pixels to verify color conversion
-                    val pixels = IntArray(bitmap.width * bitmap.height)
-                    bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-                    
-                    if (pixels.isNotEmpty()) {
-                        val samplePixel = pixels[pixels.size / 2] // Sample middle pixel
-                        val r = Color.red(samplePixel)
-                        val g = Color.green(samplePixel)
-                        val b = Color.blue(samplePixel)
-                        Log.d(TAG, "Sample pixel RGB: R=$r, G=$g, B=$b")
-                        
-                        // Check if all channels are the same (indicating grayscale)
-                        if (r == g && g == b) {
-                            Log.w(TAG, "Warning: Sample pixel is grayscale - color conversion may not be working")
-                        }
-                    }
-                }
-                
-                runOnUiThread {
-                    histogramView.updateHistograms(redHistogram, greenHistogram, blueHistogram)
-                }
-                
-                // Run object detection if enabled
-                if (isObjectDetectionEnabled) {
-                    val detections = objectDetectionProcessor.detectObjects(bitmap)
-                    runOnUiThread {
-                        objectDetectionOverlay.setResults(detections, bitmap.height, bitmap.width)
-                    }
-                }
-            }
-
-            if (isNightVisionEnabled || isMLNightVisionEnabled) {
-                val enhancedBitmap = if (isMLNightVisionEnabled) {
-                    // Apply ML-based night vision processing
-                    val inputBitmap = yuvToBitmap(image)
-                    if (inputBitmap != null) {
-                        mlNightVisionProcessor.processMLNightVision(inputBitmap, mlNightVisionSensitivity)
-                    } else {
-                        null
-                    }
-                } else {
-                    // Apply regular histogram equalization for night vision with intensity control
-                    applyHistogramEqualization(image)
-                }
-                
-                if (enhancedBitmap != null) {
-                    // Update the night vision overlay with enhanced image
-                    runOnUiThread {
-                        nightVisionImageView.setImageBitmap(applyCameraFlip(enhancedBitmap))
-                    }
-                } else {
-                    Log.w(TAG, "Night vision processing failed, showing original preview")
-                    // Fallback: show original preview if processing fails
-                    runOnUiThread {
-                        binding.viewFinder.visibility = View.VISIBLE
-                        nightVisionImageView.visibility = View.GONE
-                    }
-                }
-            }
-
-            if (isEdgeDetectionEnabled) {
-                val inputBitmap = yuvToBitmap(image)
-                if (inputBitmap != null) {
-                    val edgeBitmap = edgeDetectionProcessor.detectEdges(inputBitmap, edgeDetectionSensitivity)
-                    runOnUiThread {
-                        edgeDetectionImageView.setImageBitmap(applyCameraFlip(edgeBitmap))
-                    }
-                } else {
-                    Log.w(TAG, "Edge detection processing failed")
-                    runOnUiThread {
-                        binding.viewFinder.visibility = View.VISIBLE
-                        edgeDetectionImageView.visibility = View.GONE
-                    }
-                }
-            }
-
-            if (isOpticalFlowEnabled) {
-                val inputBitmap = yuvToBitmap(image)
-                if (inputBitmap != null) {
-                    val opticalFlowBitmap = opticalFlowProcessor.processOpticalFlow(inputBitmap)
-                    runOnUiThread {
-                        opticalFlowImageView.setImageBitmap(applyCameraFlip(opticalFlowBitmap))
-                    }
-                } else {
-                    Log.w(TAG, "Optical flow processing failed")
-                }
-            }
-
-            if (isColorAdjustmentEnabled) {
-                val inputBitmap = yuvToBitmap(image)
-                if (inputBitmap != null) {
-                    val colorAdjustedBitmap = applyColorAdjustment(inputBitmap)
-                    runOnUiThread {
-                        colorAdjustmentImageView.setImageBitmap(applyCameraFlip(colorAdjustedBitmap))
-                    }
-                } else {
-                    Log.w(TAG, "Color adjustment processing failed")
-                }
-            }
-
-            if (isTextTranslationEnabled) {
-                val inputBitmap = yuvToBitmap(image)
-                if (inputBitmap != null) {
-                    val translatedBitmap = processTextTranslation(inputBitmap)
-                    runOnUiThread {
-                        textTranslationImageView.setImageBitmap(applyCameraFlip(translatedBitmap))
-                    }
-                } else {
-                    Log.w(TAG, "Text translation processing failed")
-                }
-            }
-
-            if (isSegmentationEnabled) {
-                val inputBitmap = yuvToBitmap(image)
-                if (inputBitmap != null) {
-                    // Log the preview dimensions
-                    val previewWidth = binding.viewFinder.width
-                    val previewHeight = binding.viewFinder.height
-                    Log.d(TAG, "Preview dimensions: ${previewWidth}x${previewHeight}")
-                    Log.d(TAG, "Input bitmap dimensions: ${inputBitmap.width}x${inputBitmap.height}")
-                    
-                    val segmentationOverlay = imageSegmentationProcessor.segmentImage(inputBitmap)
-                    if (segmentationOverlay != null) {
-                        runOnUiThread {
-                            segmentationImageView.setImageBitmap(applyCameraFlip(segmentationOverlay))
-                        }
-                    } else {
-                        Log.w(TAG, "Segmentation processing failed")
-                    }
-                } else {
-                    Log.w(TAG, "Segmentation processing failed - could not convert YUV to bitmap")
-                }
-            }
-
-            image.close()
-        }
-
-        private fun calculateHistograms(bitmap: Bitmap): Triple<IntArray, IntArray, IntArray> {
-            val width = bitmap.width
-            val height = bitmap.height
-            val pixels = IntArray(width * height)
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-
-            // Separate RGB channels
-            val redChannel = IntArray(pixels.size)
-            val greenChannel = IntArray(pixels.size)
-            val blueChannel = IntArray(pixels.size)
-            
-            for (i in pixels.indices) {
-                redChannel[i] = Color.red(pixels[i])
-                greenChannel[i] = Color.green(pixels[i])
-                blueChannel[i] = Color.blue(pixels[i])
-            }
-            
-            // Calculate histograms for each channel
-            val redHistogram = calculateHistogram(redChannel)
-            val greenHistogram = calculateHistogram(greenChannel)
-            val blueHistogram = calculateHistogram(blueChannel)
-            
-            return Triple(redHistogram, greenHistogram, blueHistogram)
-        }
-
-        private fun applyHistogramEqualization(image: ImageProxy): Bitmap? {
-            try {
-                // Convert YUV to RGB bitmap using proper conversion
-                val bitmap = yuvToBitmap(image)
-                if (bitmap == null) {
-                    Log.e(TAG, "Failed to convert YUV to bitmap")
-                    return null
-                }
-                
-                Log.d(TAG, "Successfully converted YUV to bitmap: ${bitmap.width}x${bitmap.height}")
-                
-                // Apply histogram equalization to the bitmap
-                val enhancedBitmap = histogramEqualizationRGB(bitmap)
-                
-                Log.d(TAG, "Night vision enhancement applied with intensity: $nightVisionIntensity")
-                return enhancedBitmap
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Error applying histogram equalization: ${e.message}")
-                e.printStackTrace()
-                return null
-            }
-        }
-
-        private fun histogramEqualizationRGB(bitmap: Bitmap): Bitmap {
-            val width = bitmap.width
-            val height = bitmap.height
-            val pixels = IntArray(width * height)
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-
-            // Get histograms using the shared function
-            val (redHistogram, greenHistogram, blueHistogram) = calculateHistograms(bitmap)
-            
-            // Calculate CDF for each channel
-            val redCdf = calculateCDF(redHistogram)
-            val greenCdf = calculateCDF(greenHistogram)
-            val blueCdf = calculateCDF(blueHistogram)
-            
-            // Apply histogram equalization with intensity control
-            val equalizedPixels = IntArray(pixels.size)
-            for (i in pixels.indices) {
-                val originalRed = Color.red(pixels[i])
-                val originalGreen = Color.green(pixels[i])
-                val originalBlue = Color.blue(pixels[i])
-                
-                // Apply equalization with intensity control
-                val equalizedRed = applyEqualizationWithIntensity(originalRed, redCdf, redHistogram)
-                val equalizedGreen = applyEqualizationWithIntensity(originalGreen, greenCdf, greenHistogram)
-                val equalizedBlue = applyEqualizationWithIntensity(originalBlue, blueCdf, blueHistogram)
-                
-                equalizedPixels[i] = Color.rgb(equalizedRed, equalizedGreen, equalizedBlue)
-            }
-            
-            val enhancedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            enhancedBitmap.setPixels(equalizedPixels, 0, width, 0, 0, width, height)
-            return enhancedBitmap
-        }
-
-        private fun calculateHistogram(channel: IntArray): IntArray {
-            val histogram = IntArray(256)
-            for (value in channel) {
-                histogram[value]++
-            }
-            return histogram
-        }
-
-        private fun calculateCDF(histogram: IntArray): FloatArray {
-            val cdf = FloatArray(256)
-            cdf[0] = histogram[0].toFloat()
-            for (i in 1 until 256) {
-                cdf[i] = cdf[i - 1] + histogram[i]
-            }
-            return cdf
-        }
-
-        private fun applyEqualizationWithIntensity(originalValue: Int, cdf: FloatArray, histogram: IntArray): Int {
-            val totalPixels = histogram.sum()
-            if (totalPixels == 0) return originalValue
-            
-            // Find non-zero minimum for better equalization
-            val cdfMin = cdf.first { it > 0 }
-            
-            // Calculate normalized CDF
-            val normalizedCdf = if (totalPixels - cdfMin > 0) {
-                (cdf[originalValue] - cdfMin) / (totalPixels - cdfMin)
-            } else {
-                0f
-            }
-            
-            // Apply intensity control: blend between original and equalized values
-            val equalizedValue = (normalizedCdf * 255).toInt()
-            val blendedValue = (originalValue * (1 - nightVisionIntensity) + equalizedValue * nightVisionIntensity).toInt()
-            
-            return blendedValue.coerceIn(0, 255)
-        }
-
-        private fun applyColorAdjustment(bitmap: Bitmap): Bitmap {
-            val width = bitmap.width
-            val height = bitmap.height
-            val pixels = IntArray(width * height)
-            bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-
-            // Apply color adjustments
-            val adjustedPixels = IntArray(pixels.size)
-            for (i in pixels.indices) {
-                val originalRed = Color.red(pixels[i])
-                val originalGreen = Color.green(pixels[i])
-                val originalBlue = Color.blue(pixels[i])
-                val originalAlpha = Color.alpha(pixels[i])
-
-                // Apply color adjustments (0.0 = no color, 2.0 = double intensity)
-                val adjustedRed = (originalRed * redAdjustment).toInt().coerceIn(0, 255)
-                val adjustedGreen = (originalGreen * greenAdjustment).toInt().coerceIn(0, 255)
-                val adjustedBlue = (originalBlue * blueAdjustment).toInt().coerceIn(0, 255)
-
-                adjustedPixels[i] = Color.argb(originalAlpha, adjustedRed, adjustedGreen, adjustedBlue)
-            }
-
-            val adjustedBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-            adjustedBitmap.setPixels(adjustedPixels, 0, width, 0, 0, width, height)
-            return adjustedBitmap
-        }
-
-        private fun processTextTranslation(bitmap: Bitmap): Bitmap {
-            // For now, implement a simple text detection and translation simulation
-            // In a real implementation, you would use ML models for OCR and translation
-            
-            try {
-                // Create a copy of the original bitmap
-                val resultBitmap = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-                val canvas = Canvas(resultBitmap)
-                val paint = Paint().apply {
-                    color = Color.RED
-                    textSize = 40f
-                    isAntiAlias = true
-                    style = Paint.Style.FILL
-                    setShadowLayer(3f, 1f, 1f, Color.BLACK)
-                }
-
-                // Simulate text detection and translation
-                // In a real implementation, this would use OCR to detect text
-                // and then translate it using a translation model
-                
-                // For demonstration, we'll add some sample translated text overlays
-                val sampleTexts = listOf(
-                    "Hello → Hola",
-                    "Good morning → Buenos días",
-                    "Thank you → Gracias",
-                    "你好 (Hello)",
-                    "早上好 (Good morning)",
-                    "谢谢 (Thank you)"
-                )
-                
-                var yPosition = 100f
-                for (text in sampleTexts) {
-                    canvas.drawText(text, 50f, yPosition, paint)
-                    yPosition += 60f
-                }
-                
-                // Add a note about the feature
-                paint.textSize = 30f
-                paint.color = Color.YELLOW
-                canvas.drawText("Text Translation Active - Detecting and translating text...", 50f, yPosition + 40f, paint)
-                
-                return resultBitmap
-                
-            } catch (e: Exception) {
-                Log.e(TAG, "Text translation processing failed: ${e.message}")
-                return bitmap // Return original if processing fails
-            }
-        }
-    }
-
-    // Utility function to flip a Bitmap horizontally (right to left)
-    private fun flipBitmapHorizontally(src: Bitmap): Bitmap {
-        val matrix = Matrix()
-        matrix.preScale(-1f, 1f)  // This flips horizontally (right to left)
-        return Bitmap.createBitmap(src, 0, 0, src.width, src.height, matrix, true)
-    }
-
-    // Check if current camera is front camera
-    private fun isFrontCamera(): Boolean {
-        return cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
-    }
-
-    // Apply appropriate flip based on camera type
-    private fun applyCameraFlip(bitmap: Bitmap): Bitmap {
-        return if (isFrontCamera()) {
-            flipBitmapHorizontally(bitmap)
-        } else {
-            bitmap
-        }
-    }
-
-    // Custom view for displaying histogram
-    inner class HistogramView(context: android.content.Context) : View(context) {
-        private var redHistogram: IntArray = IntArray(256)
-        private var greenHistogram: IntArray = IntArray(256)
-        private var blueHistogram: IntArray = IntArray(256)
-        private val paint = Paint().apply {
-            isAntiAlias = true
-            style = Paint.Style.FILL
-        }
-        private val textPaint = Paint().apply {
-            isAntiAlias = true
-            color = Color.WHITE
-            textSize = 10f
-            textAlign = Paint.Align.LEFT
-        }
-
-        fun updateHistograms(red: IntArray, green: IntArray, blue: IntArray) {
-            redHistogram = red
-            greenHistogram = green
-            blueHistogram = blue
-            invalidate()
-        }
-
-        override fun onDraw(canvas: Canvas) {
-            super.onDraw(canvas)
-            
-            val width = width.toFloat()
-            val height = height.toFloat()
-            val histogramHeight = height / 3f - 20f // Divide into 3 sections with spacing
-            
-            // Draw background with border
-            paint.color = Color.BLACK
-            canvas.drawRect(0f, 0f, width, height, paint)
-            
-            // Draw border
-            paint.color = Color.WHITE
-            paint.style = Paint.Style.STROKE
-            paint.strokeWidth = 2f
-            canvas.drawRect(0f, 0f, width, height, paint)
-            paint.style = Paint.Style.FILL
-            
-            // Find max values for each channel
-            val maxRed = redHistogram.maxOrNull() ?: 1
-            val maxGreen = greenHistogram.maxOrNull() ?: 1
-            val maxBlue = blueHistogram.maxOrNull() ?: 1
-            
-            val barWidth = width / 256f
-            
-            // Draw Red histogram
-            paint.color = Color.RED
-            paint.alpha = 255
-            for (i in 0 until 256) {
-                val barHeight = (redHistogram[i] / maxRed.toFloat()) * histogramHeight
-                canvas.drawRect(
-                    i * barWidth,
-                    histogramHeight - barHeight + 10f,
-                    (i + 1) * barWidth,
-                    histogramHeight + 10f,
-                    paint
-                )
-            }
-            canvas.drawText("Red", 5f, histogramHeight + 25f, textPaint)
-            
-            // Draw Green histogram
-            paint.color = Color.GREEN
-            paint.alpha = 255
-            for (i in 0 until 256) {
-                val barHeight = (greenHistogram[i] / maxGreen.toFloat()) * histogramHeight
-                canvas.drawRect(
-                    i * barWidth,
-                    2 * histogramHeight - barHeight + 30f,
-                    (i + 1) * barWidth,
-                    2 * histogramHeight + 30f,
-                    paint
-                )
-            }
-            canvas.drawText("Green", 5f, 2 * histogramHeight + 45f, textPaint)
-            
-            // Draw Blue histogram
-            paint.color = Color.BLUE
-            paint.alpha = 255
-            for (i in 0 until 256) {
-                val barHeight = (blueHistogram[i] / maxBlue.toFloat()) * histogramHeight
-                canvas.drawRect(
-                    i * barWidth,
-                    3 * histogramHeight - barHeight + 50f,
-                    (i + 1) * barWidth,
-                    3 * histogramHeight + 50f,
-                    paint
-                )
-            }
-            canvas.drawText("Blue", 5f, 3 * histogramHeight + 65f, textPaint)
         }
     }
 }
