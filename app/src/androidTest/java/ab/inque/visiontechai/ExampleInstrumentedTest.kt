@@ -19,6 +19,6 @@ class ExampleInstrumentedTest {
     fun useAppContext() {
         // Context of the app under test.
         val appContext = InstrumentationRegistry.getInstrumentation().targetContext
-        assertEquals("ab.inque.visiontechai", appContext.packageName)
+        assertEquals("ab.inque.prismai", appContext.packageName)
     }
 }

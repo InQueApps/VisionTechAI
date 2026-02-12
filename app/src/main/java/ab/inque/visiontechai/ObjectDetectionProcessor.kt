@@ -68,8 +68,8 @@ class ObjectDetectionProcessor(
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load class labels from $CLASS_LABELS_FILE: ${e.message}")
-            Log.e(TAG, "Stack trace: ${e.stackTraceToString()}")
-            throw RuntimeException("Failed to load class labels", e)
+            classLabels = emptyList()
+            // Do not throw: allow app to run without labels (object detection will still work but show empty labels)
         }
     }
 
@@ -112,7 +112,8 @@ class ObjectDetectionProcessor(
             Log.e(TAG, "Failed to initialize YOLO11n detector: ${e.message}")
             Log.e(TAG, "Stack trace: ${e.stackTraceToString()}")
             isYolo11nInitialized = false
-            throw RuntimeException("Failed to initialize YOLO11n model", e)
+            yolo11nInterpreter = null
+            // Do not throw: allow app to run without object detection (e.g. if yolo11n_float16.tflite is missing from assets)
         }
     }
 

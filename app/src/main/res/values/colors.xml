@@ -1,10 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- Base -->
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- Legacy (kept for compatibility) -->
     <color name="purple_200">#FFBB86FC</color>
     <color name="purple_500">#FF6200EE</color>
     <color name="purple_700">#FF3700B3</color>
     <color name="teal_200">#FF03DAC5</color>
     <color name="teal_700">#FF018786</color>
-    <color name="black">#FF000000</color>
-    <color name="white">#FFFFFFFF</color>
+
+    <!-- Semantic / theme: black + dark green -->
+    <color name="primary">#FF163020</color>
+    <color name="primary_dark">#FF000000</color>
+    <color name="surface_overlay">#CC163020</color>
+    <color name="text_primary">#FFFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
+
+    <!-- Glassy green overlays (semi-transparent dark green) -->
+    <color name="glassy_green">#CC163020</color>
+    <color name="glassy_green_panel">#99163424</color>
+    <color name="glassy_green_border">#662A4A3A</color>
+
+    <!-- Mode accents (active state for NV / IMG / ROB) -->
+    <color name="accent_nv">#FF4CAF50</color>
+    <color name="accent_ml">#FF2196F3</color>
+    <color name="accent_edge">#FFFF9800</color>
+    <color name="accent_color">#FF2196F3</color>
+    <color name="accent_flow">#FF4CAF50</color>
+    <color name="accent_seg">#FF9C27B0</color>
+    <color name="accent_detection">#FFF44336</color>
+    <color name="accent_translation">#FF4CAF50</color>
 </resources>
