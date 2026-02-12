@@ -20,11 +20,18 @@
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
         android:fullBackupContent="@xml/backup_rules"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@drawable/ic_launcher_playstore"
         android:label="@string/app_name"
+        android:roundIcon="@drawable/ic_launcher_playstore"
         android:supportsRtl="true"
         android:theme="@style/Theme.NightVisionCamera"
         tools:targetApi="31">
+        
+        <!-- Declare 16 KB page size support for Android 15+ -->
+        <property
+            android:name="android.app.16kb_page_size.enabled"
+            android:value="true" />
+        
         <activity
             android:name=".MainActivity"
             android:exported="true"
