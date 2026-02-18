@@ -17,7 +17,7 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Info Button -->
+    <!-- Info Button (overlays the info panel; toggles between ℹ and ✕) -->
     <TextView
         android:id="@+id/infoButton"
         android:layout_width="40dp"
@@ -31,7 +31,7 @@
         android:textColor="@android:color/white"
         android:textSize="18sp"
         android:textStyle="bold"
-        android:elevation="8dp"
+        android:elevation="1000dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/controlsContainer" />
 
@@ -185,6 +185,34 @@
 
                 </LinearLayout>
 
+                <!-- SPHERE Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="360 – Sphere Panorama"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Captures a 360-degree sphere panorama using IMU orientation data. In photo mode, tap to add frames one at a time. In video mode, hold record to continuously capture. The live equirectangular preview updates as you scan the environment. When done, view the result in an interactive pan-and-zoom viewer and save as an equirectangular JPEG recognized by 360 photo viewers."
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
                 <!-- Camera Controls Info -->
                 <TextView
                     android:layout_width="match_parent"
@@ -241,6 +269,104 @@
             android:textSize="15sp" />
 
     </LinearLayout>
+
+    <!-- Sphere Capture Overlay (live equirect preview + coverage + done) -->
+    <FrameLayout
+        android:id="@+id/sphereCaptureOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        android:background="#CC000000"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ImageView
+            android:id="@+id/spherePreviewImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitCenter"
+            android:contentDescription="Sphere equirectangular preview" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:background="#80000000">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereDoneButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="DONE"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/sphereCoverageText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Coverage: 0%"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- Sphere Viewer Overlay (interactive 360 viewer) -->
+    <FrameLayout
+        android:id="@+id/sphereViewerOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        android:background="@android:color/black"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ab.inque.visiontechai.SphereViewerView
+            android:id="@+id/sphereViewerView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:background="#80000000">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereSaveButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="SAVE"
+                android:textSize="12sp" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereCloseButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="CLOSE"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+        </LinearLayout>
+
+    </FrameLayout>
 
     <!-- Camera Controls Container -->
     <LinearLayout
@@ -966,7 +1092,7 @@
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
+                android:layout_marginEnd="2dp"
                 android:contentDescription="NV - Night Vision modes"
                 android:text="NV"
                 android:textSize="12sp"
@@ -1018,18 +1144,19 @@
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
 
-            <!-- Hide/Show Button - Pushed to the right -->
-            <View
+            <!-- SPHERE Button (360 Panorama) -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
                 android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
-
-            <ImageView
-                android:id="@+id/sliderArrow"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_arrow_up"
-                app:tint="@android:color/white" />
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:contentDescription="SPHERE - 360 degree panorama capture"
+                android:text="360"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
 
         </LinearLayout>
 
@@ -1098,6 +1225,18 @@
                 android:contentDescription="Video mode"
                 android:src="@drawable/ic_video"
                 app:backgroundTint="@color/glassy"
+                app:tint="@android:color/white" />
+
+            <!-- Slider expand/collapse arrow -->
+            <ImageView
+                android:id="@+id/sliderArrow"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_toEndOf="@id/videoButton"
+                android:layout_marginStart="12dp"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_arrow_up"
+                android:contentDescription="Expand or collapse sliders"
                 app:tint="@android:color/white" />
 
         </RelativeLayout>

@@ -50,3 +50,11 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
   target_link_options(vision_resample PRIVATE "LINKER:-z,max-page-size=16384")
 endif()
 target_link_libraries(vision_resample ${log-lib})
+
+# Sphere panorama: equirectangular stitching with quaternion projection
+add_library(vision_sphere SHARED sphere_jni.cpp)
+target_compile_options(vision_sphere PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_sphere PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_sphere ${log-lib} -lm)

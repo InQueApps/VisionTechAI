@@ -4,14 +4,22 @@ import android.Manifest
 import android.content.ContentUris
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.os.ParcelFileDescriptor
 import android.os.Handler
 import android.os.Looper
+import android.os.ParcelFileDescriptor
 import android.provider.MediaStore
+import android.view.GestureDetector
 import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.Surface
+import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.Window
@@ -20,8 +28,6 @@ import android.widget.ImageView
 import android.widget.SeekBar
 import android.widget.Toast
 import android.media.MediaPlayer
-import android.view.SurfaceHolder
-import android.view.SurfaceView
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AppCompatDialog
 import androidx.core.content.ContextCompat
@@ -30,11 +36,8 @@ import androidx.recyclerview.widget.RecyclerView
 import ab.inque.visiontechai.databinding.ActivitySavedMediaBinding
 import ab.inque.visiontechai.databinding.ItemSavedMediaBinding
 import androidx.activity.result.contract.ActivityResultContracts
+import kotlin.math.min
 
-/**
- * Displays photos and videos saved by the app (Pictures/VisionTechAI and Movies/VisionTechAI).
- * Back button returns to the main camera view.
- */
 class SavedMediaActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivitySavedMediaBinding
@@ -66,7 +69,6 @@ class SavedMediaActivity : AppCompatActivity() {
 
         binding.recyclerView.layoutManager = GridLayoutManager(this, 3)
 
-        // Always load and show content (tracker doesn't need permission); avoids black screen
         refreshMediaList()
     }
 
@@ -111,23 +113,19 @@ class SavedMediaActivity : AppCompatActivity() {
     }
 
     private fun loadSavedMedia(): List<MediaItem> {
-        // 1) Tracker: URIs saved this install (survives until app uninstall)
         val fromTracker = SavedMediaTracker.getAll(this).mapIndexed { index, (isVideo, uri) ->
-            MediaItem(index.toLong(), uri, isVideo, Long.MAX_VALUE) // high date so they sort first
+            MediaItem(index.toLong(), uri, isVideo, Long.MAX_VALUE)
         }
         val trackerUris = fromTracker.map { it.uri.toString() }.toSet()
 
-        // 2) MediaStore search by filename prefix: finds our media in device gallery (works after reinstall)
         val fromMediaStore = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             loadFromMediaStoreByNamePrefix()
         } else emptyList()
 
-        // Merge: tracker first, then MediaStore items not already in tracker (dedupe), sort by date desc
         val combined = fromTracker + fromMediaStore.filter { it.uri.toString() !in trackerUris }
         return combined.sortedByDescending { it.dateAdded }
     }
 
-    /** Query MediaStore for images/videos whose DISPLAY_NAME starts with VisionTechAI_ (findable after reinstall). */
     private fun loadFromMediaStoreByNamePrefix(): List<MediaItem> {
         val list = mutableListOf<MediaItem>()
         val imageProjection = arrayOf(
@@ -179,10 +177,30 @@ class SavedMediaActivity : AppCompatActivity() {
         showMediaViewerDialog(item)
     }
 
+    // ── Detect 360 photos by checking filename for "SPHERE" ──
+
+    private fun is360Photo(item: MediaItem): Boolean {
+        if (item.isVideo) return false
+        return try {
+            contentResolver.query(
+                item.uri,
+                arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    cursor.getString(0)?.contains("SPHERE") == true
+                } else false
+            } ?: false
+        } catch (_: Exception) { false }
+    }
+
+    // ── Media viewer dialog ─────────────────────────────────
+
     private fun showMediaViewerDialog(item: MediaItem) {
         val dialogView = layoutInflater.inflate(R.layout.dialog_media_viewer, null)
         val photoView = dialogView.findViewById<ImageView>(R.id.photoView)
-        val videoSurface = dialogView.findViewById<SurfaceView>(R.id.videoSurface)
+        val videoTextureView = dialogView.findViewById<TextureView>(R.id.videoTextureView)
+        val sphereViewer = dialogView.findViewById<SphereViewerView>(R.id.sphereViewer)
         val closeButton = dialogView.findViewById<View>(R.id.closeButton)
 
         val dialog = AppCompatDialog(this, R.style.MediaViewerDialogTheme).apply {
@@ -199,113 +217,308 @@ class SavedMediaActivity : AppCompatActivity() {
 
         closeButton.setOnClickListener { dialog.dismiss() }
 
-        if (item.isVideo) {
-            photoView.visibility = View.GONE
-            val videoControls = dialogView.findViewById<View>(R.id.videoControls)
-            val videoSeekBar = dialogView.findViewById<SeekBar>(R.id.videoSeekBar)
-            videoControls.visibility = View.VISIBLE
-            videoSurface.visibility = View.VISIBLE
-
-            var mediaPlayer: MediaPlayer? = null
-            var creatingPlayer: MediaPlayer? = null
-            var videoPfd: ParcelFileDescriptor? = null
-            var isPlaying = true
-            var userSeeking = false
-            val handler = Handler(Looper.getMainLooper())
-
-            val updateSeekBar = object : Runnable {
-                override fun run() {
-                    val mp = mediaPlayer ?: return
-                    if (!userSeeking && mp.duration > 0) {
-                        videoSeekBar.progress = (1000 * mp.currentPosition) / mp.duration
-                    }
-                    handler.postDelayed(this, 200)
-                }
-            }
-
-            fun releasePlayer() {
-                (mediaPlayer ?: creatingPlayer)?.apply {
-                    try { release() } catch (_: Exception) { }
-                }
-                mediaPlayer = null
-                creatingPlayer = null
-                handler.removeCallbacks(updateSeekBar)
-            }
-
-            videoSurface.holder.addCallback(object : SurfaceHolder.Callback {
-                override fun surfaceCreated(holder: SurfaceHolder) {
-                    val mp = MediaPlayer().apply {
-                        setDisplay(holder)
-                        setOnErrorListener { _, what, extra ->
-                            Toast.makeText(this@SavedMediaActivity, "Can't play video (err: $what, $extra)", Toast.LENGTH_LONG).show()
-                            true
-                        }
-                        setOnPreparedListener { m ->
-                            creatingPlayer = null
-                            mediaPlayer = m
-                            videoSeekBar.max = 1000
-                            videoSeekBar.progress = 0
-                            m.start()
-                            isPlaying = true
-                            handler.post(updateSeekBar)
-                        }
-                        setOnCompletionListener { m ->
-                            m.seekTo(0)
-                            videoSeekBar.progress = 0
-                            isPlaying = false
-                        }
-                    }
-                    creatingPlayer = mp
-                    try {
-                        val pfd = contentResolver.openFileDescriptor(item.uri, "r")
-                            ?: throw IllegalStateException("Could not open video URI")
-                        videoPfd = pfd
-                        mp.setDataSource(pfd.fileDescriptor)
-                        mp.prepareAsync()
-                    } catch (e: Exception) {
-                        Toast.makeText(this@SavedMediaActivity, "Can't open video: ${e.message}", Toast.LENGTH_LONG).show()
-                        releasePlayer()
-                    }
-                }
-                override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
-                override fun surfaceDestroyed(holder: SurfaceHolder) {
-                    releasePlayer()
-                }
-            })
-
-            videoSurface.setOnClickListener {
-                val mp = mediaPlayer ?: return@setOnClickListener
-                if (isPlaying) {
-                    mp.pause()
-                    isPlaying = false
-                } else {
-                    mp.start()
-                    isPlaying = true
-                }
-            }
-
-            videoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onStartTrackingTouch(seekBar: SeekBar?) { userSeeking = true }
-                override fun onStopTrackingTouch(seekBar: SeekBar?) { userSeeking = false }
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    val mp = mediaPlayer ?: return
-                    if (fromUser && mp.duration > 0) {
-                        val pos = (progress * mp.duration) / 1000
-                        mp.seekTo(pos)
-                    }
-                }
-            })
-
-            dialog.setOnDismissListener { releasePlayer() }
-        } else {
-            dialogView.findViewById<View>(R.id.videoControls).visibility = View.GONE
-            photoView.visibility = View.VISIBLE
-            videoSurface.visibility = View.GONE
-            photoView.setImageURI(item.uri)
+        when {
+            item.isVideo -> setupVideoViewer(dialogView, videoTextureView, item, dialog)
+            is360Photo(item) -> setup360Viewer(sphereViewer, item, dialog)
+            else -> setupPhotoViewer(dialogView, photoView, item)
         }
 
         dialog.show()
     }
+
+    // ── Photo viewer with pinch-to-zoom and pan ──
+
+    private fun setupPhotoViewer(dialogView: View, photoView: ImageView, item: MediaItem) {
+        dialogView.findViewById<View>(R.id.videoControls).visibility = View.GONE
+        photoView.visibility = View.VISIBLE
+        photoView.setImageURI(item.uri)
+
+        val displayMatrix = Matrix()
+        val baseMatrix = Matrix()
+        var currentScale = 1f
+
+        photoView.post {
+            val drawable = photoView.drawable ?: return@post
+            val iw = drawable.intrinsicWidth.toFloat()
+            val ih = drawable.intrinsicHeight.toFloat()
+            val vw = photoView.width.toFloat()
+            val vh = photoView.height.toFloat()
+            if (iw == 0f || ih == 0f) return@post
+            val scale = min(vw / iw, vh / ih)
+            baseMatrix.setScale(scale, scale)
+            baseMatrix.postTranslate((vw - iw * scale) / 2f, (vh - ih * scale) / 2f)
+            displayMatrix.set(baseMatrix)
+            photoView.imageMatrix = displayMatrix
+        }
+
+        val scaleDetector = ScaleGestureDetector(this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    var sf = detector.scaleFactor
+                    val newScale = (currentScale * sf).coerceIn(1f, 8f)
+                    sf = newScale / currentScale
+                    currentScale = newScale
+                    displayMatrix.postScale(sf, sf, detector.focusX, detector.focusY)
+                    photoView.imageMatrix = displayMatrix
+                    return true
+                }
+            })
+
+        val gestureDetector = GestureDetector(this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
+                    if (scaleDetector.isInProgress) return false
+                    displayMatrix.postTranslate(-dx, -dy)
+                    photoView.imageMatrix = displayMatrix
+                    return true
+                }
+
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    if (currentScale > 1.5f) {
+                        displayMatrix.set(baseMatrix)
+                        currentScale = 1f
+                    } else {
+                        val sf = 3f / currentScale
+                        currentScale = 3f
+                        displayMatrix.postScale(sf, sf, e.x, e.y)
+                    }
+                    photoView.imageMatrix = displayMatrix
+                    return true
+                }
+            })
+
+        photoView.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            gestureDetector.onTouchEvent(event)
+            true
+        }
+    }
+
+    // ── Video viewer with TextureView + pinch-to-zoom ──
+
+    private fun setupVideoViewer(
+        dialogView: View,
+        textureView: TextureView,
+        item: MediaItem,
+        dialog: AppCompatDialog
+    ) {
+        val videoControls = dialogView.findViewById<View>(R.id.videoControls)
+        val videoSeekBar = dialogView.findViewById<SeekBar>(R.id.videoSeekBar)
+        videoControls.visibility = View.VISIBLE
+        textureView.visibility = View.VISIBLE
+
+        var mediaPlayer: MediaPlayer? = null
+        var creatingPlayer: MediaPlayer? = null
+        var videoPfd: ParcelFileDescriptor? = null
+        var isPlaying = true
+        var userSeeking = false
+        val handler = Handler(Looper.getMainLooper())
+
+        val displayMatrix = Matrix()
+        val baseMatrix = Matrix()
+        var currentScale = 1f
+
+        val updateSeekBar = object : Runnable {
+            override fun run() {
+                val mp = mediaPlayer ?: return
+                if (!userSeeking && mp.duration > 0) {
+                    videoSeekBar.progress = (1000 * mp.currentPosition) / mp.duration
+                }
+                handler.postDelayed(this, 200)
+            }
+        }
+
+        fun releasePlayer() {
+            (mediaPlayer ?: creatingPlayer)?.apply {
+                try { release() } catch (_: Exception) { }
+            }
+            mediaPlayer = null
+            creatingPlayer = null
+            handler.removeCallbacks(updateSeekBar)
+            try { videoPfd?.close() } catch (_: Exception) { }
+            videoPfd = null
+        }
+
+        textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+            override fun onSurfaceTextureAvailable(
+                surfaceTexture: SurfaceTexture, width: Int, height: Int
+            ) {
+                val surface = Surface(surfaceTexture)
+                val mp = MediaPlayer().apply {
+                    setSurface(surface)
+                    setOnErrorListener { _, what, extra ->
+                        Toast.makeText(
+                            this@SavedMediaActivity,
+                            "Can't play video (err: $what, $extra)",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        true
+                    }
+                    setOnPreparedListener { m ->
+                        creatingPlayer = null
+                        mediaPlayer = m
+                        videoSeekBar.max = 1000
+                        videoSeekBar.progress = 0
+                        m.start()
+                        isPlaying = true
+                        handler.post(updateSeekBar)
+
+                        val vw = textureView.width.toFloat()
+                        val vh = textureView.height.toFloat()
+                        val videoW = m.videoWidth.toFloat()
+                        val videoH = m.videoHeight.toFloat()
+                        if (vw > 0 && vh > 0 && videoW > 0 && videoH > 0) {
+                            val sx = vw / videoW
+                            val sy = vh / videoH
+                            val fitScale = min(sx, sy)
+                            val cx = fitScale / sx
+                            val cy = fitScale / sy
+                            baseMatrix.setScale(cx, cy)
+                            baseMatrix.postTranslate(
+                                vw * (1 - cx) / 2f,
+                                vh * (1 - cy) / 2f
+                            )
+                            displayMatrix.set(baseMatrix)
+                            textureView.setTransform(displayMatrix)
+                        }
+                    }
+                    setOnCompletionListener { m ->
+                        m.seekTo(0)
+                        videoSeekBar.progress = 0
+                        isPlaying = false
+                    }
+                }
+                creatingPlayer = mp
+                try {
+                    val pfd = contentResolver.openFileDescriptor(item.uri, "r")
+                        ?: throw IllegalStateException("Could not open video URI")
+                    videoPfd = pfd
+                    mp.setDataSource(pfd.fileDescriptor)
+                    mp.prepareAsync()
+                } catch (e: Exception) {
+                    Toast.makeText(
+                        this@SavedMediaActivity,
+                        "Can't open video: ${e.message}",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    releasePlayer()
+                }
+            }
+
+            override fun onSurfaceTextureSizeChanged(
+                surfaceTexture: SurfaceTexture, width: Int, height: Int
+            ) {}
+
+            override fun onSurfaceTextureDestroyed(surfaceTexture: SurfaceTexture): Boolean {
+                releasePlayer()
+                return true
+            }
+
+            override fun onSurfaceTextureUpdated(surfaceTexture: SurfaceTexture) {}
+        }
+
+        val scaleDetector = ScaleGestureDetector(this,
+            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                    var sf = detector.scaleFactor
+                    val newScale = (currentScale * sf).coerceIn(1f, 5f)
+                    sf = newScale / currentScale
+                    currentScale = newScale
+                    displayMatrix.postScale(sf, sf, detector.focusX, detector.focusY)
+                    textureView.setTransform(displayMatrix)
+                    return true
+                }
+            })
+
+        val gestureDetector = GestureDetector(this,
+            object : GestureDetector.SimpleOnGestureListener() {
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    val mp = mediaPlayer ?: return false
+                    if (isPlaying) { mp.pause(); isPlaying = false }
+                    else { mp.start(); isPlaying = true }
+                    return true
+                }
+
+                override fun onScroll(
+                    e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float
+                ): Boolean {
+                    if (scaleDetector.isInProgress) return false
+                    if (currentScale > 1.01f) {
+                        displayMatrix.postTranslate(-dx, -dy)
+                        textureView.setTransform(displayMatrix)
+                        return true
+                    }
+                    return false
+                }
+
+                override fun onDoubleTap(e: MotionEvent): Boolean {
+                    if (currentScale > 1.5f) {
+                        displayMatrix.set(baseMatrix)
+                        currentScale = 1f
+                    } else {
+                        val sf = 2.5f / currentScale
+                        currentScale = 2.5f
+                        displayMatrix.postScale(sf, sf, e.x, e.y)
+                    }
+                    textureView.setTransform(displayMatrix)
+                    return true
+                }
+            })
+
+        textureView.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            gestureDetector.onTouchEvent(event)
+            true
+        }
+
+        videoSeekBar.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onStartTrackingTouch(seekBar: SeekBar?) { userSeeking = true }
+            override fun onStopTrackingTouch(seekBar: SeekBar?) { userSeeking = false }
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val mp = mediaPlayer ?: return
+                if (fromUser && mp.duration > 0) {
+                    val pos = (progress * mp.duration) / 1000
+                    mp.seekTo(pos)
+                }
+            }
+        })
+
+        dialog.setOnDismissListener { releasePlayer() }
+    }
+
+    // ── 360 Sphere viewer ──
+
+    private fun setup360Viewer(
+        sphereViewer: SphereViewerView,
+        item: MediaItem,
+        dialog: AppCompatDialog
+    ) {
+        sphereViewer.visibility = View.VISIBLE
+
+        Thread {
+            val bitmap = try {
+                contentResolver.openInputStream(item.uri)?.use { stream ->
+                    BitmapFactory.decodeStream(stream)
+                }
+            } catch (_: Exception) { null }
+
+            if (bitmap != null && SphereNative.isAvailable()) {
+                SphereNative.loadEquirect(bitmap)
+                bitmap.recycle()
+                runOnUiThread { sphereViewer.setLookDirection(0f, 0f, 90f) }
+            } else {
+                runOnUiThread {
+                    Toast.makeText(this, "Cannot load 360 photo", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }.start()
+
+        dialog.setOnDismissListener {
+            sphereViewer.cleanup()
+        }
+    }
+
+    // ── Adapter ─────────────────────────────────────────────
 
     private class SavedMediaAdapter(
         private val items: List<MediaItem>,

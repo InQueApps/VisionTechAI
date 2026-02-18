@@ -90,6 +90,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var histogramView: HistogramView
     private lateinit var fpsView: TextView
     private var segmentationNullLogCounter = 0
+    private lateinit var orientationTracker: OrientationTracker
+    private var sphereController: SphereCaptureController? = null
+    private var cameraFovH = 65f
+    private var cameraFovV = 50f
+    @Volatile private var sphereCaptureNextFrame = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -384,6 +389,22 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Text Translation Enabled", Toast.LENGTH_SHORT).show()
             }
         }
+        binding.sphereButton.setOnClickListener {
+            if (visionState.mode == VisionMode.SPHERE) {
+                exitSphereMode()
+            } else {
+                enterSphereMode()
+            }
+        }
+        binding.sphereDoneButton.setOnClickListener {
+            sphereController?.finishCapture()
+        }
+        binding.sphereSaveButton.setOnClickListener {
+            saveSphereImage()
+        }
+        binding.sphereCloseButton.setOnClickListener {
+            exitSphereMode()
+        }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
         }
@@ -400,6 +421,10 @@ class MainActivity : AppCompatActivity() {
             openContactEmail()
         }
         binding.recordButton.setOnClickListener {
+            if (visionState.mode == VisionMode.SPHERE) {
+                handleSphereRecordButton()
+                return@setOnClickListener
+            }
             if (isPhotoMode) {
                 takePhoto()
             } else {
@@ -777,6 +802,8 @@ class MainActivity : AppCompatActivity() {
         // HD up/downsampling for IMG modes (Edge, Color)
         hdImageProcessor = HDImageProcessor(this)
 
+        orientationTracker = OrientationTracker(this)
+
         visionPipeline = VisionAnalysisPipeline(
             getState = { visionState },
             processors = frameProcessors,
@@ -828,10 +855,12 @@ class MainActivity : AppCompatActivity() {
         binding.imgButton.setStrokeColorResource(android.R.color.white)
         binding.robButton.setStrokeColorResource(android.R.color.white)
         binding.txtButton.setStrokeColorResource(android.R.color.white)
+        binding.sphereButton.setStrokeColorResource(android.R.color.white)
         binding.nightVisionButton.strokeWidth = 1
         binding.imgButton.strokeWidth = 1
         binding.robButton.strokeWidth = 1
         binding.txtButton.strokeWidth = 1
+        binding.sphereButton.strokeWidth = 1
         // Hide all sliders and overlays
         binding.nightVisionSliderContainer.visibility = View.GONE
         binding.edgeDetectionSliderContainer.visibility = View.GONE
@@ -931,6 +960,10 @@ class MainActivity : AppCompatActivity() {
                 textTranslationImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
+            VisionMode.SPHERE -> {
+                binding.sphereButton.setStrokeColorResource(R.color.accent)
+                binding.sphereButton.strokeWidth = 3
+            }
         }
         bringHudToFront()
     }
@@ -962,6 +995,7 @@ class MainActivity : AppCompatActivity() {
             VisionMode.Category.IMG -> binding.imgOverlayRow
             VisionMode.Category.ROB -> binding.robOverlayRow
             VisionMode.Category.TXT -> return
+            VisionMode.Category.SPHERE -> return
             VisionMode.Category.NONE -> return
         }
         val visible = row.visibility == View.VISIBLE
@@ -1040,6 +1074,7 @@ class MainActivity : AppCompatActivity() {
                     val drawable = hdImageView.drawable
                     if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
+                VisionMode.SPHERE -> null // Sphere mode handles its own save flow
                 else -> {
                     // No filters active: PreviewView draws camera to a Surface, not to Canvas, so draw(canvas) would be black.
                     // Caller will use ImageCapture (takeProcessedPhoto) for a real photo instead.
@@ -1292,18 +1327,19 @@ class MainActivity : AppCompatActivity() {
     private fun showInfoPanel() {
         binding.infoPanel.visibility = View.VISIBLE
         binding.infoPanel.bringToFront()
-        // Ensure all UI elements remain visible
         histogramView.visibility = View.VISIBLE
         fpsView.visibility = View.VISIBLE
         binding.controlsContainer.visibility = View.VISIBLE
-        binding.infoButton.bringToFront() // Keep info button on top
+        binding.infoButton.bringToFront()
         histogramView.bringToFront()
         fpsView.bringToFront()
         binding.controlsContainer.bringToFront()
+        binding.infoButton.text = "✕"
     }
 
     private fun hideInfoPanel() {
         binding.infoPanel.visibility = View.GONE
+        binding.infoButton.text = "ℹ"
     }
 
     private fun openContactEmail() {
@@ -1363,6 +1399,20 @@ class MainActivity : AppCompatActivity() {
                                     Log.w(TAG, "Segmentation: no bitmap from pipeline (native may have failed or lib not loaded)")
                                 }
                             }
+                            if (visionState.mode == VisionMode.SPHERE && sphereController?.state == SphereCaptureController.State.CAPTURING) {
+                                result.rawBitmap?.let { raw ->
+                                    if (sphereCaptureNextFrame) {
+                                        sphereCaptureNextFrame = false
+                                        sphereController?.captureFrame(raw)
+                                    }
+                                    sphereController?.feedContinuousFrame(raw)
+                                    val coverage = SphereNative.getCoverage()
+                                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
+                                    sphereController?.getPreviewBitmap()?.let { preview ->
+                                        binding.spherePreviewImage.setImageBitmap(preview)
+                                    }
+                                }
+                            }
                             result.processedBitmap?.let { bmp ->
                                 when (visionState.mode) {
                                     VisionMode.NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
@@ -1388,9 +1438,24 @@ class MainActivity : AppCompatActivity() {
                 }
             try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
+                val camera = cameraProvider.bindToLifecycle(
                     this, cameraSelector, preview, imageCapture, videoCapture, imageAnalyzer
                 )
+                // Detect camera FOV for sphere projection via Camera2 API
+                try {
+                    val cameraManager = getSystemService(android.content.Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+                    val cameraId = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) "0" else "1"
+                    val chars = cameraManager.getCameraCharacteristics(cameraId)
+                    val focalLengths = chars.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    val sensorSize = chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                    if (focalLengths != null && focalLengths.isNotEmpty() && sensorSize != null) {
+                        cameraFovH = (2.0 * Math.toDegrees(kotlin.math.atan((sensorSize.width / (2.0 * focalLengths[0])).toDouble()))).toFloat()
+                        cameraFovV = (2.0 * Math.toDegrees(kotlin.math.atan((sensorSize.height / (2.0 * focalLengths[0])).toDouble()))).toFloat()
+                        Log.i(TAG, "Camera FOV: ${cameraFovH}° x ${cameraFovV}°")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not detect camera FOV, using defaults: ${e.message}")
+                }
             } catch (exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
             }
@@ -1506,9 +1571,159 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun enterSphereMode() {
+        setVisionMode(VisionMode.SPHERE)
+        orientationTracker.start()
+        sphereController = SphereCaptureController(
+            orientationTracker,
+            onCoverageUpdate = { coverage ->
+                runOnUiThread {
+                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
+                }
+            },
+            onPreviewReady = { equirect ->
+                runOnUiThread {
+                    binding.sphereCaptureOverlay.visibility = View.GONE
+                    binding.sphereViewerOverlay.visibility = View.VISIBLE
+                    binding.sphereViewerView.setLookDirection(0f, 0f, 90f)
+                }
+            }
+        )
+        // cameraFovH/V are computed from the sensor's physical width/height (landscape).
+        // When the phone is in portrait, the frame bitmap is rotated 90° so its horizontal
+        // axis corresponds to the sensor's HEIGHT dimension and vice versa — swap FOV values.
+        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        val effectiveFovH = if (isPortrait) cameraFovV else cameraFovH
+        val effectiveFovV = if (isPortrait) cameraFovH else cameraFovV
+        Log.i(TAG, "Sphere session: portrait=$isPortrait, effectiveFOV=${effectiveFovH}° x ${effectiveFovV}°")
+        sphereController?.startSession(effectiveFovH, effectiveFovV)
+        binding.sphereCaptureOverlay.visibility = View.VISIBLE
+        binding.sphereViewerOverlay.visibility = View.GONE
+        binding.sphereCoverageText.text = "Coverage: 0%"
+        Toast.makeText(this, "Sphere mode — scan your surroundings", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun exitSphereMode() {
+        sphereController?.resetSession()
+        sphereController = null
+        orientationTracker.stop()
+        binding.sphereCaptureOverlay.visibility = View.GONE
+        binding.sphereViewerOverlay.visibility = View.GONE
+        binding.sphereViewerView.cleanup()
+        setVisionMode(VisionMode.NONE)
+    }
+
+    private fun handleSphereRecordButton() {
+        val ctrl = sphereController ?: return
+        if (ctrl.state != SphereCaptureController.State.CAPTURING) return
+
+        if (isPhotoMode) {
+            sphereCaptureNextFrame = true
+            Toast.makeText(this, "Frame added to sphere", Toast.LENGTH_SHORT).show()
+        } else {
+            if (ctrl.isContinuousCapturing) {
+                ctrl.stopContinuousCapture()
+                binding.recordButton.setImageResource(R.drawable.ic_record)
+                Toast.makeText(this, "Continuous capture stopped", Toast.LENGTH_SHORT).show()
+            } else {
+                ctrl.startContinuousCapture()
+                binding.recordButton.setImageResource(R.drawable.ic_record)
+                Toast.makeText(this, "Continuous capture started — pan slowly", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun saveSphereImage() {
+        val equirect = sphereController?.getFullEquirect()
+        if (equirect == null) {
+            Toast.makeText(this, "No sphere data to save", Toast.LENGTH_SHORT).show()
+            return
+        }
+        saveSphereEquirectangular(equirect)
+    }
+
+    private fun saveSphereEquirectangular(bitmap: Bitmap) {
+        try {
+            val timestamp = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+            val name = "VisionTechAI_SPHERE_$timestamp.jpg"
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Constants.GALLERY_IMAGE_RELATIVE_PATH)
+                }
+            }
+
+            val jpegBytes = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, jpegBytes)
+            val imageData = jpegBytes.toByteArray()
+
+            // Inject XMP 360 metadata for Google Photos and other 360 viewers
+            val xmpData = buildXmpMetadata(bitmap.width, bitmap.height)
+            val finalData = injectXmpIntoJpeg(imageData, xmpData)
+
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            uri?.let { savedUri ->
+                contentResolver.openOutputStream(savedUri)?.use { stream ->
+                    stream.write(finalData)
+                }
+                SavedMediaTracker.addImage(this, savedUri)
+                sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, savedUri))
+                Toast.makeText(this, "360° photo saved", Toast.LENGTH_SHORT).show()
+                Log.d(TAG, "Sphere photo saved: $savedUri")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save sphere: ${e.message}")
+            Toast.makeText(this, "Failed to save sphere photo", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun buildXmpMetadata(width: Int, height: Int): ByteArray {
+        val xmp = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:GPano="http://ns.google.com/photos/1.0/panorama/"
+    GPano:UsePanoramaViewer="True"
+    GPano:ProjectionType="equirectangular"
+    GPano:FullPanoWidthPixels="$width"
+    GPano:FullPanoHeightPixels="$height"
+    GPano:CroppedAreaLeftPixels="0"
+    GPano:CroppedAreaTopPixels="0"
+    GPano:CroppedAreaImageWidthPixels="$width"
+    GPano:CroppedAreaImageHeightPixels="$height"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"""
+        return xmp.toByteArray(Charsets.UTF_8)
+    }
+
+    private fun injectXmpIntoJpeg(jpegData: ByteArray, xmpData: ByteArray): ByteArray {
+        // XMP is stored in an APP1 segment: FF E1 [length] "http://ns.adobe.com/xap/1.0/\0" + xmp
+        val namespace = "http://ns.adobe.com/xap/1.0/\u0000".toByteArray(Charsets.US_ASCII)
+        val payloadLen = namespace.size + xmpData.size
+        val segmentLen = payloadLen + 2 // +2 for the length field itself
+
+        val result = ByteArrayOutputStream(jpegData.size + segmentLen + 4)
+        // Write SOI marker (first 2 bytes of JPEG: FF D8)
+        result.write(jpegData, 0, 2)
+        // Write APP1 marker
+        result.write(0xFF)
+        result.write(0xE1)
+        result.write((segmentLen shr 8) and 0xFF)
+        result.write(segmentLen and 0xFF)
+        result.write(namespace)
+        result.write(xmpData)
+        // Write rest of JPEG
+        result.write(jpegData, 2, jpegData.size - 2)
+        return result.toByteArray()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
+        orientationTracker.stop()
+        sphereController?.release()
     }
 
     companion object {

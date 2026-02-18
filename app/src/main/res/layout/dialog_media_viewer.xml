@@ -10,12 +10,18 @@
         android:id="@+id/photoView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:scaleType="centerCrop"
+        android:scaleType="matrix"
         android:contentDescription="Photo"
         android:visibility="gone" />
 
-    <SurfaceView
-        android:id="@+id/videoSurface"
+    <TextureView
+        android:id="@+id/videoTextureView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <ab.inque.visiontechai.SphereViewerView
+        android:id="@+id/sphereViewer"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone" />

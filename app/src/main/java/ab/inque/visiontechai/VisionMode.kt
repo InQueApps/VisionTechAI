@@ -13,7 +13,8 @@ enum class VisionMode {
     SEGMENTATION,
     DEPTH_FIELD,
     OBJECT_DETECTION,
-    TEXT_TRANSLATION;
+    TEXT_TRANSLATION,
+    SPHERE;
 
     val category: Category
         get() = when (this) {
@@ -21,6 +22,7 @@ enum class VisionMode {
             EDGE_DETECTION, COLOR_ADJUSTMENT, HD -> Category.IMG
             OPTICAL_FLOW, SEGMENTATION, DEPTH_FIELD, OBJECT_DETECTION -> Category.ROB
             TEXT_TRANSLATION -> Category.TXT
+            SPHERE -> Category.SPHERE
             NONE -> Category.NONE
         }
 
@@ -30,5 +32,5 @@ enum class VisionMode {
             else -> false
         }
 
-    enum class Category { NONE, NV, IMG, ROB, TXT }
+    enum class Category { NONE, NV, IMG, ROB, TXT, SPHERE }
 }

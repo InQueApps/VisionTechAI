@@ -11,6 +11,7 @@ data class PipelineResult(
     val fps: Float?,
     val histograms: Triple<IntArray, IntArray, IntArray>?,
     val processedBitmap: Bitmap?,
+    val rawBitmap: Bitmap? = null,
     val detections: List<DetectionResult>?,
     val imageHeight: Int = 0,
     val imageWidth: Int = 0
@@ -66,12 +67,14 @@ class VisionAnalysisPipeline(
                 processors[state.mode]
             } else null
             val processedBitmap = processor?.process(bitmap, state.params)?.let { applyFlip(it) }
+            val rawForSphere = if (state.mode == VisionMode.SPHERE) applyFlip(bitmap) else null
 
             callback(
                 PipelineResult(
                     fps = currentFps,
                     histograms = histograms,
                     processedBitmap = processedBitmap,
+                    rawBitmap = rawForSphere,
                     detections = detections,
                     imageHeight = bitmap.height,
                     imageWidth = bitmap.width
