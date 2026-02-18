@@ -104,6 +104,17 @@ class ImageSegmentationProcessor(private val context: Context) {
         }
     }
 
+    fun clear() {
+        if (nativeLoaded) {
+            try {
+                nativeReset()
+                Log.i(TAG, "Temporal segmentation state cleared")
+            } catch (e: Exception) {
+                Log.w(TAG, "nativeReset failed: ${e.message}")
+            }
+        }
+    }
+
     private fun blendOverlay(original: Bitmap, overlay: Bitmap): Bitmap {
         val w = original.width
         val h = original.height
@@ -139,4 +150,6 @@ class ImageSegmentationProcessor(private val context: Context) {
         numClusters: Int,
         iterations: Int
     ): Boolean
+
+    private external fun nativeReset()
 }

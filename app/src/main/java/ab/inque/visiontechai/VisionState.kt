@@ -9,7 +9,6 @@ data class VisionState(
     var isSliderExpanded: Boolean = false
 ) {
     val nightVisionIntensity: Float get() = params.nightVisionIntensity
-    val mlNightVisionSensitivity: Float get() = params.mlNightVisionSensitivity
     val edgeDetectionSensitivity: Float get() = params.edgeDetectionSensitivity
     val redAdjustment: Float get() = params.redAdjustment
     val greenAdjustment: Float get() = params.greenAdjustment

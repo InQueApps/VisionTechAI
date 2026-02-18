@@ -13,7 +13,6 @@ import com.google.mlkit.vision.text.Text
 import com.google.mlkit.vision.text.TextRecognition
 import com.google.mlkit.vision.text.TextRecognizer
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions
-import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.Translation
 import com.google.mlkit.nl.translate.Translator
 import com.google.mlkit.nl.translate.TranslatorOptions
@@ -39,11 +38,7 @@ class TextTranslationFrameProcessor(private val context: Context) : FrameProcess
     }
 
     private fun languageCodeToMlKit(code: String): String? =
-        when (code.lowercase()) {
-            "en" -> TranslateLanguage.ENGLISH
-            "es" -> TranslateLanguage.SPANISH
-            else -> null
-        }
+        TranslationLanguages.mlKitCode(code)
 
     private fun getTranslator(sourceLanguageCode: String, targetLanguageCode: String): Translator? {
         val src = languageCodeToMlKit(sourceLanguageCode) ?: return null

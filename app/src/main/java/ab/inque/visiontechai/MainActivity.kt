@@ -54,11 +54,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import android.util.Size
 import com.google.mlkit.common.model.RemoteModelManager
-import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.TranslateRemoteModel
-import com.google.mlkit.nl.translate.Translation
-import com.google.mlkit.nl.translate.Translator
-import com.google.mlkit.nl.translate.TranslatorOptions
 import androidx.appcompat.app.AlertDialog
 
 class MainActivity : AppCompatActivity() {
@@ -73,7 +69,6 @@ class MainActivity : AppCompatActivity() {
     private val visionState = VisionState()
     private lateinit var visionPipeline: VisionAnalysisPipeline
     private val frameProcessors: Map<VisionMode, FrameProcessor> by lazy { buildFrameProcessors() }
-    private lateinit var mlNightVisionProcessor: MLNightVisionProcessor
     private lateinit var objectDetectionProcessor: ObjectDetectionProcessor
     private lateinit var edgeDetectionProcessor: EdgeDetectionProcessor
     private lateinit var opticalFlowProcessor: OpticalFlowProcessor
@@ -273,8 +268,8 @@ class MainActivity : AppCompatActivity() {
             }
             setTextColor(Color.WHITE)
             setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
-            setBackgroundColor(Color.BLACK)
-            setPadding(8, 4, 8, 4)
+            setBackgroundResource(R.drawable.button_info_background)
+            setPadding(16, 8, 16, 8)
             text = "FPS: 0"
             visibility = View.VISIBLE // Always visible
         }
@@ -330,20 +325,12 @@ class MainActivity : AppCompatActivity() {
             setMode(false)
         }
         binding.nightVisionButton.setOnClickListener {
-            when (visionState.mode) {
-                VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> setVisionMode(VisionMode.NONE)
-                else -> toggleCategoryOverlay(VisionMode.Category.NV)
+            if (visionState.mode == VisionMode.NIGHT_VISION) {
+                setVisionMode(VisionMode.NONE)
+            } else {
+                setVisionMode(VisionMode.NIGHT_VISION)
+                Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
             }
-        }
-        binding.nvRegularButton.setOnClickListener {
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            setVisionMode(VisionMode.NIGHT_VISION)
-            Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
-        }
-        binding.nvMLButton.setOnClickListener {
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            setVisionMode(VisionMode.ML_NIGHT_VISION)
-            Toast.makeText(this, "ML Night Vision Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.imgButton.setOnClickListener {
             when (visionState.mode) {
@@ -368,7 +355,7 @@ class MainActivity : AppCompatActivity() {
         }
         binding.robButton.setOnClickListener {
             when (visionState.mode) {
-                VisionMode.OPTICAL_FLOW, VisionMode.SEGMENTATION, VisionMode.DEPTH_FIELD, VisionMode.OBJECT_DETECTION, VisionMode.TEXT_TRANSLATION -> setVisionMode(VisionMode.NONE)
+                VisionMode.OPTICAL_FLOW, VisionMode.SEGMENTATION, VisionMode.DEPTH_FIELD, VisionMode.OBJECT_DETECTION -> setVisionMode(VisionMode.NONE)
                 else -> toggleCategoryOverlay(VisionMode.Category.ROB)
             }
         }
@@ -381,6 +368,7 @@ class MainActivity : AppCompatActivity() {
         binding.robSEGButton.setOnClickListener {
             binding.robOverlayRow.visibility = View.GONE
             setVisionMode(VisionMode.SEGMENTATION)
+            imageSegmentationProcessor.clear()
             Toast.makeText(this, "Image Segmentation Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.robDFButton.setOnClickListener {
@@ -388,10 +376,13 @@ class MainActivity : AppCompatActivity() {
             setVisionMode(VisionMode.DEPTH_FIELD)
             Toast.makeText(this, "Depth Field Enabled", Toast.LENGTH_SHORT).show()
         }
-        binding.robTxtButton.setOnClickListener {
-            binding.robOverlayRow.visibility = View.GONE
-            setVisionMode(VisionMode.TEXT_TRANSLATION)
-            Toast.makeText(this, "Text translation enabled", Toast.LENGTH_SHORT).show()
+        binding.txtButton.setOnClickListener {
+            if (visionState.mode == VisionMode.TEXT_TRANSLATION) {
+                setVisionMode(VisionMode.NONE)
+            } else {
+                setVisionMode(VisionMode.TEXT_TRANSLATION)
+                Toast.makeText(this, "Text Translation Enabled", Toast.LENGTH_SHORT).show()
+            }
         }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
@@ -424,13 +415,6 @@ class MainActivity : AppCompatActivity() {
         binding.nightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 if (fromUser) visionState.params = visionState.params.copy(nightVisionIntensity = progress / 100f)
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-        binding.mlNightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) visionState.params = visionState.params.copy(mlNightVisionSensitivity = progress / 100f)
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -522,67 +506,68 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-        // Translation: language From/To (currently English/Spanish)
-        val translationLangAdapter = android.widget.ArrayAdapter.createFromResource(
-            this, R.array.translation_languages, android.R.layout.simple_spinner_item
-        ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        binding.translationFromSpinner.adapter = translationLangAdapter
-        binding.translationToSpinner.adapter = translationLangAdapter
-
-        // Default: English → Spanish
-        binding.translationFromSpinner.setSelection(0, false)
-        binding.translationToSpinner.setSelection(1, false)
-
-        val languageCodeToDisplayName: (String) -> String = { code ->
-            when (code) { "en" -> "English"; "es" -> "Spanish"; else -> code }
-        }
-
-        val targetLanguageToMlKit = { code: String? ->
-            when (code) { "en" -> TranslateLanguage.ENGLISH; "es" -> TranslateLanguage.SPANISH; else -> null }
-        }
-
-        fun refreshTranslationDownloadSection() {
-            val fromPos = binding.translationFromSpinner.selectedItemPosition
-            val toPos = binding.translationToSpinner.selectedItemPosition
-            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            if (toCode == null || fromCode == null || fromCode == toCode) {
-                binding.translationDownloadSection.visibility = View.GONE
-                return
+        // Optical flow: pixelation 2–16 (progress 0–14)
+        binding.opticalFlowPixelationSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val px = (progress + 2).coerceIn(2, 16)
+                    visionState.params = visionState.params.copy(opticalFlowPixelation = px)
+                    binding.opticalFlowPixelationValueText.text = "$px"
+                }
             }
-            // English is built-in; only show download for target languages that are downloaded on demand (e.g. Spanish)
-            if (toCode == "en") {
-                binding.translationDownloadSection.visibility = View.GONE
-                return
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        // Optical flow: intensity 0–100%
+        binding.opticalFlowIntensitySlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(opticalFlowIntensity = progress / 100f)
+                    binding.opticalFlowIntensityValueText.text = "$progress%"
+                }
             }
-            val remoteModel = TranslateRemoteModel.Builder(targetLanguageToMlKit(toCode)!!).build()
-            RemoteModelManager.getInstance().isModelDownloaded(remoteModel)
-                .addOnSuccessListener { downloaded ->
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        // Translation: spinners show only downloaded language packs
+        var downloadedLangs = listOf<TranslationLang>()
+
+        fun refreshTranslationSpinners() {
+            RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
+                .addOnSuccessListener { models ->
                     runOnUiThread {
-                        if (downloaded) {
-                            binding.translationDownloadSection.visibility = View.GONE
-                        } else {
-                            binding.translationDownloadSection.visibility = View.VISIBLE
-                            binding.translationDownloadPairButton.text = "Download ${languageCodeToDisplayName(fromCode)} → ${languageCodeToDisplayName(toCode)}"
-                        }
+                        val codes = models.mapNotNull { it.language }.toSet()
+                        downloadedLangs = TranslationLanguages.ALL.filter { it.mlKitCode in codes }
+                        val names = if (downloadedLangs.isEmpty()) listOf("(no packs installed)")
+                                    else downloadedLangs.map { it.displayName }
+                        val adapter = android.widget.ArrayAdapter(
+                            this, android.R.layout.simple_spinner_item, names
+                        ).apply { setDropDownViewResource(R.layout.spinner_dropdown_item) }
+                        val prevFrom = visionState.params.translationSourceLanguageCode
+                        val prevTo = visionState.params.translationTargetLanguageCode
+                        binding.translationFromSpinner.adapter = adapter
+                        binding.translationToSpinner.adapter = adapter
+                        val fromIdx = downloadedLangs.indexOfFirst { it.code == prevFrom }.coerceAtLeast(0)
+                        val toIdx = downloadedLangs.indexOfFirst { it.code == prevTo }.let { if (it < 0 && downloadedLangs.size > 1) 1 else it.coerceAtLeast(0) }
+                        binding.translationFromSpinner.setSelection(fromIdx, false)
+                        binding.translationToSpinner.setSelection(toIdx, false)
                     }
                 }
-                .addOnFailureListener {
-                    runOnUiThread { binding.translationDownloadSection.visibility = View.GONE }
-                }
+        }
+
+        fun selectedLangCode(spinner: android.widget.Spinner): String? {
+            val pos = spinner.selectedItemPosition
+            return downloadedLangs.getOrNull(pos)?.code
         }
 
         val updateTranslationParams = {
-            val fromPos = binding.translationFromSpinner.selectedItemPosition
-            val toPos = binding.translationToSpinner.selectedItemPosition
-            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            val fromCode = selectedLangCode(binding.translationFromSpinner)
+            val toCode = selectedLangCode(binding.translationToSpinner)
             val effectiveTarget = if (fromCode != null && toCode != null && fromCode != toCode) toCode else null
             visionState.params = visionState.params.copy(
                 translationSourceLanguageCode = fromCode,
                 translationTargetLanguageCode = effectiveTarget
             )
-            refreshTranslationDownloadSection()
         }
 
         val translationListener = object : android.widget.AdapterView.OnItemSelectedListener {
@@ -595,72 +580,172 @@ class MainActivity : AppCompatActivity() {
         binding.translationFromSpinner.onItemSelectedListener = translationListener
         binding.translationToSpinner.onItemSelectedListener = translationListener
 
-        // Download button shown below dropdowns when selected pair is not yet downloaded
-        binding.translationDownloadPairButton.setOnClickListener {
-            val fromPos = binding.translationFromSpinner.selectedItemPosition
-            val toPos = binding.translationToSpinner.selectedItemPosition
-            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            if (fromCode == null || toCode == null || fromCode == toCode) return@setOnClickListener
-            val src = targetLanguageToMlKit(fromCode) ?: return@setOnClickListener
-            val tgt = targetLanguageToMlKit(toCode) ?: return@setOnClickListener
-            binding.translationDownloadPairButton.isEnabled = false
-            binding.translationDownloadPairButton.text = "Downloading…"
-            val translator = Translation.getClient(TranslatorOptions.Builder().setSourceLanguage(src).setTargetLanguage(tgt).build())
-            translator.downloadModelIfNeeded()
-                .addOnSuccessListener {
-                    translator.close()
-                    runOnUiThread {
-                        binding.translationDownloadPairButton.isEnabled = true
-                        refreshTranslationDownloadSection()
-                        Toast.makeText(this, "Model ready for offline use", Toast.LENGTH_SHORT).show()
+        refreshTranslationSpinners()
+
+        var downloadProgressTimer: java.util.Timer? = null
+        var activeDownloadModel: TranslateRemoteModel? = null
+        var downloadCancelled = false
+
+        fun showDownloadProgress(langName: String) {
+            downloadCancelled = false
+            binding.translationDownloadProgressContainer.visibility = View.VISIBLE
+            binding.translationDownloadCancelButton.visibility = View.VISIBLE
+            binding.translationDownloadStatusText.text = "Downloading $langName…"
+            binding.translationDownloadProgressBar.isIndeterminate = false
+            binding.translationDownloadProgressBar.max = 100
+            binding.translationDownloadProgressBar.progress = 0
+            downloadProgressTimer?.cancel()
+            downloadProgressTimer = java.util.Timer().apply {
+                var simulated = 0
+                scheduleAtFixedRate(object : java.util.TimerTask() {
+                    override fun run() {
+                        simulated += when {
+                            simulated < 30 -> 4
+                            simulated < 60 -> 3
+                            simulated < 80 -> 2
+                            simulated < 90 -> 1
+                            else -> 0
+                        }
+                        simulated = simulated.coerceAtMost(92)
+                        runOnUiThread {
+                            binding.translationDownloadProgressBar.progress = simulated
+                            binding.translationDownloadStatusText.text = "Downloading $langName… $simulated%"
+                        }
                     }
-                }
-                .addOnFailureListener { e ->
-                    translator.close()
-                    runOnUiThread {
-                        binding.translationDownloadPairButton.isEnabled = true
-                        binding.translationDownloadPairButton.text = "Download ${languageCodeToDisplayName(fromCode)} → ${languageCodeToDisplayName(toCode)}"
-                        Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
-                    }
-                }
+                }, 300, 400)
+            }
         }
 
-        // View available (downloaded) translators and remove from device
+        fun finishDownloadProgress(langName: String, success: Boolean) {
+            downloadProgressTimer?.cancel()
+            downloadProgressTimer = null
+            activeDownloadModel = null
+            binding.translationDownloadCancelButton.visibility = View.GONE
+            binding.translationDownloadProgressBar.progress = if (success) 100 else 0
+            binding.translationDownloadStatusText.text = if (success) "$langName — done" else "$langName — failed"
+            val delay = if (success) 1500L else 2500L
+            binding.translationDownloadProgressBar.postDelayed({
+                binding.translationDownloadProgressContainer.visibility = View.GONE
+            }, delay)
+        }
+
+        binding.translationDownloadCancelButton.setOnClickListener {
+            downloadCancelled = true
+            downloadProgressTimer?.cancel()
+            downloadProgressTimer = null
+            val model = activeDownloadModel
+            activeDownloadModel = null
+            binding.translationDownloadCancelButton.visibility = View.GONE
+            binding.translationDownloadStatusText.text = "Cancelling…"
+            if (model != null) {
+                RemoteModelManager.getInstance().deleteDownloadedModel(model)
+                    .addOnCompleteListener {
+                        runOnUiThread {
+                            binding.translationDownloadProgressContainer.visibility = View.GONE
+                            Toast.makeText(this, "Download cancelled", Toast.LENGTH_SHORT).show()
+                            refreshTranslationSpinners()
+                        }
+                    }
+            } else {
+                binding.translationDownloadProgressContainer.visibility = View.GONE
+            }
+        }
+
         binding.translationViewAvailableButton.setOnClickListener {
-            RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
+            val manager = RemoteModelManager.getInstance()
+            manager.getDownloadedModels(TranslateRemoteModel::class.java)
                 .addOnSuccessListener { models ->
                     runOnUiThread {
-                        val modelList = models.sortedBy { it.language }
-                        if (modelList.isEmpty()) {
-                            Toast.makeText(this, "No downloaded translation models", Toast.LENGTH_SHORT).show()
-                            return@runOnUiThread
+                        val downloadedCodes = models.mapNotNull { it.language }.toSet()
+                        val allLangs = TranslationLanguages.ALL
+                        val accentColor = resources.getColor(R.color.accent_bright, theme)
+                        val mutedColor = resources.getColor(R.color.text_secondary, theme)
+                        val accentBg = android.graphics.drawable.GradientDrawable().apply {
+                            setColor(resources.getColor(R.color.glassy, theme))
+                            cornerRadius = 16f
+                            setStroke(1, accentColor)
                         }
-                        val items = modelList.map { m ->
-                            val code = m.language
-                            val name = languageCodeToDisplayName(if (code is String) code else "?")
-                            "$name  \u00D7" to m  // × for remove
+                        val mutedBg = android.graphics.drawable.GradientDrawable().apply {
+                            setColor(android.graphics.Color.TRANSPARENT)
+                            cornerRadius = 16f
+                            setStroke(1, mutedColor)
                         }
-                        val adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1, items.map { it.first })
-                        val dialog = AlertDialog.Builder(this)
-                            .setTitle("Downloaded translators (tap to remove)")
-                            .setAdapter(adapter) { d, which ->
-                                val model = items[which].second
-                                RemoteModelManager.getInstance().deleteDownloadedModel(model)
-                                    .addOnSuccessListener {
-                                        runOnUiThread {
-                                            d.dismiss()
-                                            Toast.makeText(this, "Model removed", Toast.LENGTH_SHORT).show()
-                                            refreshTranslationDownloadSection()
-                                        }
-                                    }
-                                    .addOnFailureListener { e ->
-                                        runOnUiThread { Toast.makeText(this, "Remove failed: ${e.message}", Toast.LENGTH_SHORT).show() }
-                                    }
+
+                        val listAdapter = object : android.widget.BaseAdapter() {
+                            override fun getCount() = allLangs.size
+                            override fun getItem(pos: Int) = allLangs[pos]
+                            override fun getItemId(pos: Int) = pos.toLong()
+                            override fun getView(pos: Int, convertView: View?, parent: android.view.ViewGroup): View {
+                                val row = convertView ?: layoutInflater.inflate(R.layout.item_language_pack, parent, false)
+                                val lang = allLangs[pos]
+                                val isDl = lang.mlKitCode in downloadedCodes
+                                row.findViewById<android.widget.TextView>(R.id.langStatusIcon).text = if (isDl) "✓" else ""
+                                row.findViewById<android.widget.TextView>(R.id.langName).text = lang.displayName
+                                val action = row.findViewById<android.widget.TextView>(R.id.langAction)
+                                if (isDl) {
+                                    action.text = "DELETE"
+                                    action.setTextColor(mutedColor)
+                                    action.background = mutedBg.constantState?.newDrawable()?.mutate()
+                                } else {
+                                    action.text = "GET"
+                                    action.setTextColor(accentColor)
+                                    action.background = accentBg.constantState?.newDrawable()?.mutate()
+                                }
+                                return row
                             }
-                            .setNegativeButton(android.R.string.cancel, null)
-                            .create()
-                        dialog.show()
+                        }
+
+                        AlertDialog.Builder(this, R.style.DarkDialogTheme)
+                            .setTitle("Language Packs")
+                            .setAdapter(listAdapter) { _, which ->
+                                val lang = allLangs[which]
+                                if (lang.mlKitCode in downloadedCodes) {
+                                    AlertDialog.Builder(this, R.style.DarkDialogTheme)
+                                        .setTitle("Delete ${lang.displayName}?")
+                                        .setMessage("Remove this language pack from your device. You can re-download it anytime.")
+                                        .setPositiveButton("Delete") { _, _ ->
+                                            val model = TranslateRemoteModel.Builder(lang.mlKitCode).build()
+                                            manager.deleteDownloadedModel(model)
+                                                .addOnSuccessListener {
+                                                    runOnUiThread {
+                                                        Toast.makeText(this, "${lang.displayName} removed", Toast.LENGTH_SHORT).show()
+                                                        refreshTranslationSpinners()
+                                                    }
+                                                }
+                                                .addOnFailureListener { e ->
+                                                    runOnUiThread {
+                                                        Toast.makeText(this, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                }
+                                        }
+                                        .setNegativeButton("Cancel", null)
+                                        .show()
+                                } else {
+                                    val model = TranslateRemoteModel.Builder(lang.mlKitCode).build()
+                                    activeDownloadModel = model
+                                    showDownloadProgress(lang.displayName)
+                                    val conditions = com.google.mlkit.common.model.DownloadConditions.Builder().build()
+                                    manager.download(model, conditions)
+                                        .addOnSuccessListener {
+                                            runOnUiThread {
+                                                if (!downloadCancelled) {
+                                                    finishDownloadProgress(lang.displayName, true)
+                                                    refreshTranslationSpinners()
+                                                }
+                                            }
+                                        }
+                                        .addOnFailureListener { e ->
+                                            runOnUiThread {
+                                                if (!downloadCancelled) {
+                                                    finishDownloadProgress(lang.displayName, false)
+                                                    Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                                }
+                                            }
+                                        }
+                                }
+                            }
+                            .setNegativeButton("Close", null)
+                            .show()
                     }
                 }
                 .addOnFailureListener { e ->
@@ -673,9 +758,6 @@ class MainActivity : AppCompatActivity() {
 
         setMode(true)
         cameraExecutor = Executors.newSingleThreadExecutor()
-
-        // Initialize ML Night Vision processor
-        mlNightVisionProcessor = MLNightVisionProcessor()
 
         // Initialize Object Detection processor
         objectDetectionProcessor = ObjectDetectionProcessor(this)
@@ -708,7 +790,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildFrameProcessors(): Map<VisionMode, FrameProcessor> = mapOf(
         VisionMode.NIGHT_VISION to NightVisionFrameProcessor(),
-        VisionMode.ML_NIGHT_VISION to MLNightVisionFrameProcessor(mlNightVisionProcessor),
         VisionMode.EDGE_DETECTION to EdgeDetectionFrameProcessor(edgeDetectionProcessor),
         VisionMode.COLOR_ADJUSTMENT to ColorAdjustmentFrameProcessor(),
         VisionMode.HD to HDFrameProcessor(hdImageProcessor),
@@ -726,7 +807,6 @@ class MainActivity : AppCompatActivity() {
         } else {
             binding.sliderArrow.setImageResource(R.drawable.ic_arrow_down)
             binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
             binding.edgeDetectionSliderContainer.visibility = View.GONE
             binding.colorSliderContainer.visibility = View.GONE
             binding.hdSliderContainer.visibility = View.GONE
@@ -747,17 +827,19 @@ class MainActivity : AppCompatActivity() {
         binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
         binding.imgButton.setStrokeColorResource(android.R.color.white)
         binding.robButton.setStrokeColorResource(android.R.color.white)
+        binding.txtButton.setStrokeColorResource(android.R.color.white)
         binding.nightVisionButton.strokeWidth = 1
         binding.imgButton.strokeWidth = 1
         binding.robButton.strokeWidth = 1
+        binding.txtButton.strokeWidth = 1
         // Hide all sliders and overlays
         binding.nightVisionSliderContainer.visibility = View.GONE
-        binding.mlNightVisionSliderContainer.visibility = View.GONE
         binding.edgeDetectionSliderContainer.visibility = View.GONE
         binding.colorSliderContainer.visibility = View.GONE
         binding.hdSliderContainer.visibility = View.GONE
         binding.segmentationSliderContainer.visibility = View.GONE
         binding.depthFieldSliderContainer.visibility = View.GONE
+        binding.opticalFlowSliderContainer.visibility = View.GONE
         binding.translationOptionsContainer.visibility = View.GONE
         objectDetectionOverlay.visibility = View.GONE
         nightVisionImageView.visibility = View.GONE
@@ -768,7 +850,6 @@ class MainActivity : AppCompatActivity() {
         segmentationImageView.visibility = View.GONE
         depthFieldImageView.visibility = View.GONE
         hdImageView.visibility = View.GONE
-        binding.nightVisionOverlayRow.visibility = View.GONE
         binding.imgOverlayRow.visibility = View.GONE
         binding.robOverlayRow.visibility = View.GONE
         // If this mode has sliders, auto-expand the slider panel so they are visible
@@ -780,31 +861,25 @@ class MainActivity : AppCompatActivity() {
         when (m) {
             VisionMode.NONE -> { }
             VisionMode.NIGHT_VISION -> {
-                binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_green_light)
-                binding.nightVisionButton.strokeWidth = 3
-                nightVisionImageView.visibility = View.VISIBLE
-                showActiveSlider()
-            }
-            VisionMode.ML_NIGHT_VISION -> {
-                binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_blue_light)
+                binding.nightVisionButton.setStrokeColorResource(R.color.accent)
                 binding.nightVisionButton.strokeWidth = 3
                 nightVisionImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
             VisionMode.EDGE_DETECTION -> {
-                binding.imgButton.setStrokeColorResource(android.R.color.holo_orange_light)
+                binding.imgButton.setStrokeColorResource(R.color.accent)
                 binding.imgButton.strokeWidth = 3
                 edgeDetectionImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
             VisionMode.COLOR_ADJUSTMENT -> {
-                binding.imgButton.setStrokeColorResource(android.R.color.holo_blue_light)
+                binding.imgButton.setStrokeColorResource(R.color.accent_bright)
                 binding.imgButton.strokeWidth = 3
                 colorAdjustmentImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
             VisionMode.HD -> {
-                binding.imgButton.setStrokeColorResource(android.R.color.holo_green_light)
+                binding.imgButton.setStrokeColorResource(R.color.accent)
                 binding.imgButton.strokeWidth = 3
                 hdImageView.visibility = View.VISIBLE
                 binding.hdSlider.progress = visionState.params.hdScaleSliderValue
@@ -817,13 +892,18 @@ class MainActivity : AppCompatActivity() {
                 showActiveSlider()
             }
             VisionMode.OPTICAL_FLOW -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
+                binding.robButton.setStrokeColorResource(R.color.accent)
                 binding.robButton.strokeWidth = 3
                 opticalFlowImageView.visibility = View.VISIBLE
                 opticalFlowProcessor.clear()
+                binding.opticalFlowPixelationSlider.progress = (visionState.params.opticalFlowPixelation - 2).coerceIn(0, 14)
+                binding.opticalFlowPixelationValueText.text = "${visionState.params.opticalFlowPixelation}"
+                binding.opticalFlowIntensitySlider.progress = (visionState.params.opticalFlowIntensity * 100).toInt().coerceIn(0, 100)
+                binding.opticalFlowIntensityValueText.text = "${(visionState.params.opticalFlowIntensity * 100).toInt()}%"
+                showActiveSlider()
             }
             VisionMode.SEGMENTATION -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_purple)
+                binding.robButton.setStrokeColorResource(R.color.accent_bright)
                 binding.robButton.strokeWidth = 3
                 segmentationImageView.visibility = View.VISIBLE
                 binding.segmentationClustersSlider.progress = (visionState.params.segmentationNumClusters - 3).coerceIn(0, 7)
@@ -833,7 +913,7 @@ class MainActivity : AppCompatActivity() {
                 showActiveSlider()
             }
             VisionMode.DEPTH_FIELD -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_blue_dark)
+                binding.robButton.setStrokeColorResource(R.color.accent)
                 binding.robButton.strokeWidth = 3
                 depthFieldImageView.visibility = View.VISIBLE
                 binding.depthFieldFocusSlider.progress = (visionState.params.depthFieldFocus * 100).toInt().coerceIn(0, 100)
@@ -841,13 +921,13 @@ class MainActivity : AppCompatActivity() {
                 showActiveSlider()
             }
             VisionMode.OBJECT_DETECTION -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_red_light)
+                binding.robButton.setStrokeColorResource(R.color.accent)
                 binding.robButton.strokeWidth = 3
                 objectDetectionOverlay.visibility = View.VISIBLE
             }
             VisionMode.TEXT_TRANSLATION -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
-                binding.robButton.strokeWidth = 3
+                binding.txtButton.setStrokeColorResource(R.color.accent)
+                binding.txtButton.strokeWidth = 3
                 textTranslationImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
@@ -859,10 +939,10 @@ class MainActivity : AppCompatActivity() {
         if (!visionState.isSliderExpanded) return
         when (visionState.mode) {
             VisionMode.NIGHT_VISION -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
-            VisionMode.ML_NIGHT_VISION -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
             VisionMode.EDGE_DETECTION -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
             VisionMode.COLOR_ADJUSTMENT -> binding.colorSliderContainer.visibility = View.VISIBLE
             VisionMode.HD -> binding.hdSliderContainer.visibility = View.VISIBLE
+            VisionMode.OPTICAL_FLOW -> binding.opticalFlowSliderContainer.visibility = View.VISIBLE
             VisionMode.SEGMENTATION -> binding.segmentationSliderContainer.visibility = View.VISIBLE
             VisionMode.DEPTH_FIELD -> binding.depthFieldSliderContainer.visibility = View.VISIBLE
             VisionMode.TEXT_TRANSLATION -> binding.translationOptionsContainer.visibility = View.VISIBLE
@@ -878,9 +958,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleCategoryOverlay(category: VisionMode.Category) {
         val row = when (category) {
-            VisionMode.Category.NV -> binding.nightVisionOverlayRow
+            VisionMode.Category.NV -> return
             VisionMode.Category.IMG -> binding.imgOverlayRow
             VisionMode.Category.ROB -> binding.robOverlayRow
+            VisionMode.Category.TXT -> return
             VisionMode.Category.NONE -> return
         }
         val visible = row.visibility == View.VISIBLE
@@ -895,7 +976,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun setMode(photo: Boolean) {
         isPhotoMode = photo
-        val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy_green))
+        val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy))
         val redBg = ColorStateList.valueOf(Color.RED)
         val whiteIcon = ColorStateList.valueOf(Color.WHITE)
         if (photo) {
@@ -935,7 +1016,7 @@ class MainActivity : AppCompatActivity() {
                     val drawable = opticalFlowImageView.drawable
                     if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
-                VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> {
+                VisionMode.NIGHT_VISION -> {
                     val drawable = nightVisionImageView.drawable
                     if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
@@ -1284,7 +1365,7 @@ class MainActivity : AppCompatActivity() {
                             }
                             result.processedBitmap?.let { bmp ->
                                 when (visionState.mode) {
-                                    VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
+                                    VisionMode.NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
                                     VisionMode.EDGE_DETECTION -> edgeDetectionImageView.setImageBitmap(bmp)
                                     VisionMode.OPTICAL_FLOW -> opticalFlowImageView.setImageBitmap(bmp)
                                     VisionMode.COLOR_ADJUSTMENT -> colorAdjustmentImageView.setImageBitmap(bmp)

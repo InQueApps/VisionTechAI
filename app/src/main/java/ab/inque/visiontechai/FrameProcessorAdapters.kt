@@ -4,25 +4,14 @@ import android.content.Context
 import android.graphics.*
 import android.util.Log
 
-/** FrameProcessor for regular (histogram equalization) night vision. */
+/** Night vision: native adaptive low-light enhancement with Kotlin fallback. */
 class NightVisionFrameProcessor : FrameProcessor {
     override fun process(input: Bitmap, params: ProcessorParams): Bitmap? {
         return try {
-            ImageUtils.histogramEqualizationRGB(input, params.nightVisionIntensity)
+            NightVisionNative.enhance(input, params.nightVisionIntensity)
+                ?: ImageUtils.histogramEqualizationRGB(input, params.nightVisionIntensity)
         } catch (e: Exception) {
             Log.e("NightVisionFP", "Failed: ${e.message}")
-            null
-        }
-    }
-}
-
-/** Adapter for ML Night Vision. */
-class MLNightVisionFrameProcessor(private val processor: MLNightVisionProcessor) : FrameProcessor {
-    override fun process(input: Bitmap, params: ProcessorParams): Bitmap? {
-        return try {
-            processor.processMLNightVision(input, params.mlNightVisionSensitivity)
-        } catch (e: Exception) {
-            Log.e("MLNightVisionFP", "Failed: ${e.message}")
             null
         }
     }
@@ -44,7 +33,7 @@ class EdgeDetectionFrameProcessor(private val processor: EdgeDetectionProcessor)
 class OpticalFlowFrameProcessor(private val processor: OpticalFlowProcessor) : FrameProcessor {
     override fun process(input: Bitmap, params: ProcessorParams): Bitmap? {
         return try {
-            processor.processOpticalFlow(input)
+            processor.processOpticalFlow(input, params)
         } catch (e: Exception) {
             Log.e("OpticalFlowFP", "Failed: ${e.message}")
             null

@@ -8,12 +8,10 @@ import kotlin.math.*
 class OpticalFlowProcessor(private val context: Context) {
     companion object {
         private const val TAG = "OpticalFlowProcessor"
-        private const val DOWNSCALE_FACTOR = 8
         private const val MIN_FLOW_MAGNITUDE = 1.0f
         private const val MAX_FLOW_MAGNITUDE = 20.0f
         private const val MIN_GRADIENT_MAGNITUDE = 3.0f
         private const val MAX_FLOW_VELOCITY = 20.0f
-        private const val GREY_LEVEL = 128
         private const val SMALL_WINDOW_SIZE = 3
     }
 
@@ -21,14 +19,16 @@ class OpticalFlowProcessor(private val context: Context) {
     private var previousSmallW: Int = 0
     private var previousSmallH: Int = 0
 
-    fun processOpticalFlow(currentFrame: Bitmap): Bitmap {
+    fun processOpticalFlow(currentFrame: Bitmap, params: ProcessorParams): Bitmap {
         try {
             val w = currentFrame.width
             val h = currentFrame.height
-            Log.d(TAG, "Processing optical flow for ${w}x${h}")
+            val downscale = params.opticalFlowPixelation.coerceIn(2, 16)
+            val intensity = params.opticalFlowIntensity.coerceIn(0f, 1f)
+            Log.d(TAG, "Processing optical flow for ${w}x${h} (px=$downscale, int=${"%.0f".format(intensity * 100)}%)")
 
-            val smallW = (w / DOWNSCALE_FACTOR).coerceAtLeast(8)
-            val smallH = (h / DOWNSCALE_FACTOR).coerceAtLeast(8)
+            val smallW = (w / downscale).coerceAtLeast(8)
+            val smallH = (h / downscale).coerceAtLeast(8)
             val smallBitmap = Bitmap.createScaledBitmap(currentFrame, smallW, smallH, true)
             val currentGray = convertToGrayscale(smallBitmap)
             if (smallBitmap != currentFrame) smallBitmap.recycle()
@@ -44,15 +44,20 @@ class OpticalFlowProcessor(private val context: Context) {
             previousSmallW = smallW
             previousSmallH = smallH
 
-            return if (flowGrid != null) {
-                createSquaresBitmap(flowGrid, smallW, smallH, w, h)
-            } else {
-                createGreyBitmap(w, h)
+            val greyBase = toGreyscaleBitmap(currentFrame)
+
+            if (flowGrid != null && intensity > 0f) {
+                val overlay = createHSVFlowOverlay(flowGrid, smallW, smallH, w, h, intensity)
+                val canvas = Canvas(greyBase)
+                canvas.drawBitmap(overlay, 0f, 0f, null)
+                overlay.recycle()
             }
+
+            return greyBase
         } catch (e: Exception) {
             Log.e(TAG, "Optical flow processing failed: ${e.message}")
             e.printStackTrace()
-            return createGreyBitmap(currentFrame.width, currentFrame.height)
+            return toGreyscaleBitmap(currentFrame)
         }
     }
 
@@ -194,50 +199,64 @@ class OpticalFlowProcessor(private val context: Context) {
         return FlowVector(x.toFloat(), y.toFloat(), u.toFloat(), v.toFloat())
     }
 
-    /** Creates a solid grey bitmap (used when no previous frame or as base). */
-    private fun createGreyBitmap(width: Int, height: Int): Bitmap {
-        val grey = Color.rgb(GREY_LEVEL, GREY_LEVEL, GREY_LEVEL)
-        val bmp = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(bmp)
-        canvas.drawColor(grey)
-        return bmp
+    private fun toGreyscaleBitmap(source: Bitmap): Bitmap {
+        val result = Bitmap.createBitmap(source.width, source.height, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(result)
+        val paint = Paint()
+        val cm = ColorMatrix()
+        cm.setSaturation(0f)
+        paint.colorFilter = ColorMatrixColorFilter(cm)
+        canvas.drawBitmap(source, 0f, 0f, paint)
+        return result
     }
 
     /**
-     * Build low-res bitmap (one pixel per flow cell), then upscale to output size so flow shows as squares.
-     * Direction colors: red=left, blue=right, green=top, black=bottom; magnitude scales intensity.
+     * HSV color-wheel flow overlay: hue = direction angle, brightness/alpha = magnitude.
+     * Pixels with motion below the threshold are fully transparent so the greyscale
+     * camera image shows through. [intensity] (0–1) scales the overlay alpha.
      */
-    private fun createSquaresBitmap(
+    private fun createHSVFlowOverlay(
         flowGrid: Array<FloatArray>,
         smallW: Int,
         smallH: Int,
         outW: Int,
-        outH: Int
+        outH: Int,
+        intensity: Float
     ): Bitmap {
         val uFlat = flowGrid[0]
         val vFlat = flowGrid[1]
         val smallPixels = IntArray(smallW * smallH)
-        val strength = 90f
+        val hsv = floatArrayOf(0f, 1f, 1f)
+        val alphaMin = (100 * intensity).toInt()
+        val alphaMax = (255 * intensity).toInt()
+
         for (y in 0 until smallH) {
             for (x in 0 until smallW) {
                 val idx = y * smallW + x
                 val u = uFlat[idx]
                 val v = vFlat[idx]
                 val mag = sqrt(u * u + v * v)
-                val t = (mag / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f)
-                val leftContrib = if (u < 0) t * (-u / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
-                val rightContrib = if (u > 0) t * (u / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
-                val topContrib = if (v < 0) t * (-v / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
-                val bottomContrib = if (v > 0) t * (v / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f) else 0f
-                val r = (GREY_LEVEL + (leftContrib * strength).toInt() - (bottomContrib * strength).toInt()).coerceIn(0, 255)
-                val g = (GREY_LEVEL + (topContrib * strength).toInt() - (bottomContrib * strength).toInt()).coerceIn(0, 255)
-                val b = (GREY_LEVEL + (rightContrib * strength).toInt() - (bottomContrib * strength).toInt()).coerceIn(0, 255)
-                smallPixels[idx] = Color.rgb(r, g, b)
+
+                if (mag < MIN_FLOW_MAGNITUDE) {
+                    smallPixels[idx] = Color.TRANSPARENT
+                    continue
+                }
+
+                val normMag = (mag / MAX_FLOW_MAGNITUDE).coerceIn(0f, 1f)
+                val angle = atan2(v, u)
+                hsv[0] = ((Math.toDegrees(angle.toDouble()) + 360.0) % 360.0).toFloat()
+                hsv[1] = 0.85f + 0.15f * normMag
+                hsv[2] = 0.7f + 0.3f * normMag
+                val rgb = Color.HSVToColor(hsv)
+
+                val alpha = (alphaMin + (alphaMax - alphaMin) * normMag).toInt().coerceIn(0, 255)
+                smallPixels[idx] = Color.argb(alpha, Color.red(rgb), Color.green(rgb), Color.blue(rgb))
             }
         }
+
         val smallBmp = Bitmap.createBitmap(smallW, smallH, Bitmap.Config.ARGB_8888)
         smallBmp.setPixels(smallPixels, 0, smallW, 0, 0, smallW, smallH)
-        val outBmp = Bitmap.createScaledBitmap(smallBmp, outW, outH, false)
+        val outBmp = Bitmap.createScaledBitmap(smallBmp, outW, outH, true)
         if (smallBmp != outBmp) smallBmp.recycle()
         return outBmp
     }

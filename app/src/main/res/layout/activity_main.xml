@@ -94,7 +94,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Two modes: Regular NV (histogram equalization for low light) and ML NV (AI-enhanced). Use the sliders to adjust intensity or sensitivity."
+                        android:text="Adaptive low-light enhancement with gamma correction, contrast adjustment, and color correction. Use the slider to adjust intensity."
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -122,7 +122,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="• ED (Edge Detection): Highlights contours and edges\n• COL (Color Adjustment): Adjust red, green, and blue channels with sliders"
+                        android:text="• ED (Edge Detection): Highlights contours and edges using Sobel filters\n• COL (Color Adjustment): Adjust red, green, and blue channels independently with sliders\n• HD (Upscale): Bicubic upsampling with adaptive sharpening — scale from 0.01x down to 4x up"
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -150,7 +150,35 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="• OF (Optical Flow): Motion vectors as colored arrows\n• SEG (Segmentation): AI image segmentation\n• DEPTH: AI depth map (near = bright, far = dark); use Focus slider to emphasize a depth band\n• DET: Object detection with bounding boxes\n• TXT: Text detection and translation (choose English → Spanish in the Translation dropdown to overlay Spanish at text locations)"
+                        android:text="• OF (Optical Flow): Motion vectors visualized as HSV-colored overlay on greyscale camera feed; adjust pixelation and color intensity with sliders\n• SEG (Segmentation): AI image segmentation with temporal tracking for stable colors; adjust cluster count and iterations\n• DF (Depth Field): AI depth map using MiDaS model — near objects appear bright, far objects dark; use Focus slider to emphasize a depth band\n• DET (Detection): Real-time object detection with labeled bounding boxes"
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
+                <!-- TXT Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="TXT – Text Translation"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Detects text in the camera view and translates it in real time. Supports 60+ languages — download packs on-demand via Manage language packs. Select source and target languages from the dropdowns (only downloaded languages are shown). Translation works in both directions between any two downloaded packs."
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -164,7 +192,7 @@
                     android:layout_marginTop="8dp"
                     android:layout_marginBottom="8dp"
                     android:text="Camera controls"
-                    android:textColor="@android:color/holo_green_light"
+                    android:textColor="@color/accent"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -184,7 +212,7 @@
                     android:layout_marginTop="8dp"
                     android:layout_marginBottom="8dp"
                     android:text="Tips"
-                    android:textColor="@android:color/holo_blue_light"
+                    android:textColor="@color/accent"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -240,7 +268,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="center"
-                android:text="NV Intensity"
+                android:text="Night Vision"
                 android:textColor="@android:color/white"
                 android:textSize="14sp"
                 android:textStyle="bold"
@@ -252,39 +280,8 @@
                 android:layout_height="wrap_content"
                 android:max="100"
                 android:progress="50"
-                android:progressTint="@android:color/holo_green_light"
-                android:thumbTint="@android:color/holo_green_light" />
-
-        </LinearLayout>
-
-        <!-- ML Night Vision Slider (Above Controls) -->
-        <LinearLayout
-            android:id="@+id/mlNightVisionSliderContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/slider_background"
-            android:padding="12dp"
-            android:visibility="gone">
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:text="ML Sensitivity"
-                android:textColor="@android:color/white"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:layout_marginBottom="8dp" />
-
-            <SeekBar
-                android:id="@+id/mlNightVisionSlider"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:max="100"
-                android:progress="70"
-                android:progressTint="@android:color/holo_blue_light"
-                android:thumbTint="@android:color/holo_blue_light" />
+                android:progressTint="@color/accent"
+                android:thumbTint="@color/accent" />
 
         </LinearLayout>
 
@@ -314,8 +311,8 @@
                 android:layout_height="wrap_content"
                 android:max="100"
                 android:progress="50"
-                android:progressTint="@android:color/holo_orange_light"
-                android:thumbTint="@android:color/holo_orange_light" />
+                android:progressTint="@color/accent"
+                android:thumbTint="@color/accent" />
 
         </LinearLayout>
 
@@ -345,8 +342,8 @@
                 android:layout_height="wrap_content"
                 android:max="100"
                 android:progress="50"
-                android:progressTint="@android:color/holo_purple"
-                android:thumbTint="@android:color/holo_purple" />
+                android:progressTint="@color/accent"
+                android:thumbTint="@color/accent" />
 
             <TextView
                 android:id="@+id/hdScaleValueText"
@@ -473,8 +470,8 @@
                     android:layout_weight="1"
                     android:max="200"
                     android:progress="100"
-                    android:progressTint="@android:color/holo_blue_dark"
-                    android:thumbTint="@android:color/holo_blue_dark" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/blueValueText"
@@ -531,8 +528,8 @@
                     android:layout_weight="1"
                     android:max="7"
                     android:progress="1"
-                    android:progressTint="@android:color/holo_purple"
-                    android:thumbTint="@android:color/holo_purple" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/segmentationClustersValueText"
@@ -566,8 +563,8 @@
                     android:layout_weight="1"
                     android:max="12"
                     android:progress="3"
-                    android:progressTint="@android:color/holo_purple"
-                    android:thumbTint="@android:color/holo_purple" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/segmentationIterationsValueText"
@@ -624,14 +621,107 @@
                     android:layout_weight="1"
                     android:max="100"
                     android:progress="50"
-                    android:progressTint="@android:color/holo_blue_dark"
-                    android:thumbTint="@android:color/holo_blue_dark" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/depthFieldFocusValueText"
                     android:layout_width="36dp"
                     android:layout_height="wrap_content"
                     android:text="50%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Optical Flow Sliders (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/opticalFlowSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Optical Flow"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Pixelation:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/opticalFlowPixelationSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="14"
+                    android:progress="6"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/opticalFlowPixelationValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="8"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Intensity:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/opticalFlowIntensitySlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="70"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/opticalFlowIntensityValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="70%"
                     android:textColor="@android:color/white"
                     android:textSize="12sp"
                     android:gravity="end" />
@@ -697,72 +787,65 @@
 
             </LinearLayout>
 
-            <!-- Shown only when selected pair needs download -->
-            <LinearLayout
-                android:id="@+id/translationDownloadSection"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:visibility="gone"
-                android:layout_marginBottom="8dp">
-
-                <Button
-                    android:id="@+id/translationDownloadPairButton"
-                    android:layout_width="0dp"
-                    android:layout_height="36dp"
-                    android:layout_weight="1"
-                    android:text="Download English → Spanish"
-                    android:textSize="12sp"
-                    android:contentDescription="Download translation model for selected pair" />
-
-            </LinearLayout>
-
             <Button
                 android:id="@+id/translationViewAvailableButton"
                 android:layout_width="match_parent"
                 android:layout_height="36dp"
-                android:text="View available translators"
+                android:text="Manage language packs"
                 android:textSize="12sp"
-                android:contentDescription="List downloaded translation models and remove from device" />
+                android:contentDescription="View and delete downloaded language packs" />
 
-        </LinearLayout>
+            <!-- Download progress (hidden by default) -->
+            <LinearLayout
+                android:id="@+id/translationDownloadProgressContainer"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:visibility="gone"
+                android:layout_marginTop="8dp">
 
-        <!-- Night Vision Overlay Row -->
-        <LinearLayout
-            android:id="@+id/nightVisionOverlayRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:padding="8dp"
-            android:background="@color/glassy_green"
-            android:visibility="gone">
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal"
+                    android:gravity="center_vertical"
+                    android:layout_marginBottom="4dp">
 
-            <!-- Regular Night Vision Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/nvRegularButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginEnd="4dp"
-                android:text="Night Vision"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                    <TextView
+                        android:id="@+id/translationDownloadStatusText"
+                        android:layout_width="0dp"
+                        android:layout_height="wrap_content"
+                        android:layout_weight="1"
+                        android:text="Downloading…"
+                        android:textColor="@color/accent_bright"
+                        android:textSize="12sp"
+                        android:singleLine="true" />
 
-            <!-- Night Vision ML Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/nvMLButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginStart="4dp"
-                android:text="Night Vision ML"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                    <TextView
+                        android:id="@+id/translationDownloadCancelButton"
+                        android:layout_width="wrap_content"
+                        android:layout_height="28dp"
+                        android:gravity="center"
+                        android:paddingHorizontal="12dp"
+                        android:text="CANCEL"
+                        android:textColor="@color/text_secondary"
+                        android:textSize="11sp"
+                        android:textStyle="bold"
+                        android:background="?android:attr/selectableItemBackground" />
+
+                </LinearLayout>
+
+                <ProgressBar
+                    android:id="@+id/translationDownloadProgressBar"
+                    style="@android:style/Widget.ProgressBar.Horizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="8dp"
+                    android:max="100"
+                    android:progress="0"
+                    android:progressTint="@color/accent"
+                    android:progressBackgroundTint="@color/glassy_border" />
+
+            </LinearLayout>
 
         </LinearLayout>
 
@@ -773,7 +856,7 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:padding="8dp"
-            android:background="@color/glassy_green"
+            android:background="@color/glassy"
             android:visibility="gone">
 
             <!-- Edge Detection Button -->
@@ -824,7 +907,7 @@
             android:layout_height="wrap_content"
             android:orientation="horizontal"
             android:padding="8dp"
-            android:background="@color/glassy_green"
+            android:background="@color/glassy"
             android:visibility="gone">
 
             <!-- Optical Flow Button -->
@@ -862,20 +945,6 @@
                 android:layout_weight="1"
                 android:layout_marginStart="4dp"
                 android:text="DF"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
-
-            <!-- Text Translation Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/robTxtButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginStart="4dp"
-                android:contentDescription="TXT - Text detection and translation"
-                android:text="TXT"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
@@ -928,8 +997,23 @@
                 android:layout_weight="1"
                 android:layout_marginStart="2dp"
                 android:layout_marginEnd="2dp"
-                android:contentDescription="ROB - Optical Flow, Segmentation"
+                android:contentDescription="ROB - Optical Flow, Segmentation, Depth, Detection"
                 android:text="ROB"
+                android:textSize="12sp"
+                android:textColor="@android:color/white"
+                app:strokeColor="@android:color/white" />
+
+            <!-- TXT Button (Text Translation) -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/txtButton"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="2dp"
+                android:layout_marginEnd="2dp"
+                android:contentDescription="TXT - Text detection and translation"
+                android:text="TXT"
                 android:textSize="12sp"
                 android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
@@ -963,7 +1047,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="Switch between front and rear camera"
                 android:src="@drawable/ic_switch_camera"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
             <!-- Saved media / Gallery Button -->
@@ -976,7 +1060,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="View saved photos and videos"
                 android:src="@drawable/ic_gallery"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
             <!-- Record Button -->
@@ -1000,7 +1084,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="Photo mode"
                 android:src="@drawable/ic_photo"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
             <!-- Video Button -->
@@ -1013,7 +1097,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="Video mode"
                 android:src="@drawable/ic_video"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
         </RelativeLayout>

@@ -65,14 +65,13 @@ object ImageResampleUtils {
             for (jx in -1..2) {
                 val px = (cx + jx).coerceIn(0, width - 1)
                 val py = (cy + jy).coerceIn(0, height - 1)
-                val w = cubicWeight((x - px).toDouble()) * cubicWeight((y - py).toDouble())
-                if (w <= 0) continue
+                val w = cubicWeight((x - (cx + jx)).toDouble()) * cubicWeight((y - (cy + jy)).toDouble())
                 val p = pixels[py * width + px]
                 r += Color.red(p) * w; g += Color.green(p) * w; b += Color.blue(p) * w
                 wSum += w
             }
         }
-        if (wSum <= 0) return pixels[cy * width + cx]
+        if (abs(wSum) < 1e-9) return pixels[cy * width + cx]
         return Color.rgb(
             (r / wSum).toInt().coerceIn(0, 255),
             (g / wSum).toInt().coerceIn(0, 255),

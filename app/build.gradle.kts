@@ -12,8 +12,8 @@ android {
         applicationId = "ab.inque.prismai"
         minSdk = 27
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         signingConfig = signingConfigs.getByName("debug")
@@ -58,6 +58,9 @@ android {
     }
     buildFeatures {
         viewBinding = true
+    }
+    androidResources {
+        noCompress += listOf("tflite", "data", "lite")
     }
     // Workaround for third-party .so (e.g. TFLite/task-vision) not yet 16 KB aligned:
     // use legacy packaging so native libs are stored in a way that passes 16 KB compatibility check.

@@ -11,6 +11,14 @@ endif()
 find_library(log-lib log)
 target_link_libraries(vision_segmenter ${log-lib})
 
+# Night vision: adaptive low-light enhancement
+add_library(vision_nightvision SHARED nightvision_jni.cpp)
+target_compile_options(vision_nightvision PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_nightvision PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_nightvision ${log-lib})
+
 # Depth postprocess (normalize + render to greyscale)
 add_library(vision_depth SHARED depth_jni.cpp)
 target_compile_options(vision_depth PRIVATE -Wall -Wextra -O2)
