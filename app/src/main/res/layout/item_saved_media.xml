@@ -23,4 +23,41 @@
         android:visibility="gone"
         android:contentDescription="Video"
         app:tint="@android:color/white" />
+
+    <TextView
+        android:id="@+id/textIcon"
+        android:layout_width="match_parent"
+        android:layout_height="120dp"
+        android:gravity="center"
+        android:text="TXT"
+        android:textColor="@color/accent_bright"
+        android:textSize="20sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/deleteButton"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="2dp"
+        android:layout_marginEnd="2dp"
+        android:background="@drawable/delete_button_background"
+        android:gravity="center"
+        android:text="✕"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/dateLabel"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="#99000000"
+        android:gravity="center"
+        android:paddingVertical="2dp"
+        android:textColor="@android:color/white"
+        android:textSize="9sp"
+        android:singleLine="true" />
 </FrameLayout>

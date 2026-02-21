@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <external-path name="external_documents" path="Documents/PrismAI" />
+    <external-path name="external_pictures" path="Pictures/PrismAI" />
+    <external-path name="external_movies" path="Movies/PrismAI" />
+    <cache-path name="cache" path="." />
+</paths>

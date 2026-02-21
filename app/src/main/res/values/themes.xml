@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.NightVisionCamera" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.PrismAI" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="colorPrimary">@color/primary</item>
         <item name="colorPrimaryDark">@color/primary_dark</item>
         <item name="colorOnPrimary">@color/white</item>
@@ -30,7 +30,28 @@
         <item name="android:textColor">@color/accent_bright</item>
     </style>
 
-    <style name="MediaViewerDialogTheme" parent="Theme.NightVisionCamera">
+    <style name="PrismModeButton" parent="Widget.Material3.Button.TextButton">
+        <item name="android:background">@drawable/button_mode_background</item>
+        <item name="android:textColor">@color/white</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:letterSpacing">0.05</item>
+        <item name="android:textStyle">bold</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minHeight">36dp</item>
+    </style>
+
+    <style name="PrismActionButton" parent="Widget.Material3.Button.TextButton">
+        <item name="android:background">@drawable/button_action_background</item>
+        <item name="android:textColor">@color/white</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:letterSpacing">0.03</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:minHeight">36dp</item>
+    </style>
+
+    <style name="MediaViewerDialogTheme" parent="Theme.PrismAI">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsFloating">false</item>
         <item name="android:windowMinWidthMajor">100%</item>

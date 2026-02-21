@@ -20,16 +20,16 @@
     <!-- Info Button (overlays the info panel; toggles between ℹ and ✕) -->
     <TextView
         android:id="@+id/infoButton"
-        android:layout_width="40dp"
-        android:layout_height="40dp"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="16dp"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
         android:background="@drawable/info_button_background"
         android:contentDescription="Camera features guide"
         android:gravity="center"
         android:text="ℹ"
         android:textColor="@android:color/white"
-        android:textSize="18sp"
+        android:textSize="14sp"
         android:textStyle="bold"
         android:elevation="1000dp"
         app:layout_constraintEnd_toEndOf="parent"
@@ -178,7 +178,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Detects text in the camera view and translates it in real time. Supports 60+ languages — download packs on-demand via Manage language packs. Select source and target languages from the dropdowns (only downloaded languages are shown). Translation works in both directions between any two downloaded packs."
+                        android:text="Detects text in the camera view and translates it in real time. Supports 60+ languages — download packs on-demand via Language Settings. Select source and target languages from the dropdowns (only downloaded languages are shown). Translation works in both directions between any two downloaded packs."
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -270,6 +270,151 @@
 
     </LinearLayout>
 
+    <!-- Language Settings Panel (overlay similar to info panel) -->
+    <LinearLayout
+        android:id="@+id/langSettingsPanel"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_margin="16dp"
+        android:background="@drawable/info_panel_background"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:visibility="gone"
+        android:elevation="999dp"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingBottom="8dp"
+            android:text="Language Settings"
+            android:textColor="@android:color/white"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <!-- From / To row (above the list) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="From:"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginEnd="4dp" />
+
+            <Spinner
+                android:id="@+id/translationFromSpinner"
+                android:layout_width="0dp"
+                android:layout_height="32dp"
+                android:layout_weight="1"
+                android:background="@drawable/button_info_background"
+                android:popupBackground="@color/primary"
+                android:padding="4dp"
+                android:layout_marginEnd="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="To:"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginEnd="4dp" />
+
+            <Spinner
+                android:id="@+id/translationToSpinner"
+                android:layout_width="0dp"
+                android:layout_height="32dp"
+                android:layout_weight="1"
+                android:background="@drawable/button_info_background"
+                android:popupBackground="@color/primary"
+                android:padding="4dp" />
+
+        </LinearLayout>
+
+        <!-- Download progress (hidden by default) -->
+        <LinearLayout
+            android:id="@+id/translationDownloadProgressContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <TextView
+                    android:id="@+id/translationDownloadStatusText"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Downloading…"
+                    android:textColor="@color/accent_bright"
+                    android:textSize="12sp"
+                    android:singleLine="true" />
+
+                <TextView
+                    android:id="@+id/translationDownloadCancelButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:gravity="center"
+                    android:paddingHorizontal="12dp"
+                    android:text="CANCEL"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:background="?android:attr/selectableItemBackground" />
+
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/translationDownloadProgressBar"
+                style="@android:style/Widget.ProgressBar.Horizontal"
+                android:layout_width="match_parent"
+                android:layout_height="8dp"
+                android:max="100"
+                android:progress="0"
+                android:progressTint="@color/accent"
+                android:progressBackgroundTint="@color/glassy_border" />
+
+        </LinearLayout>
+
+        <!-- Separator -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/glassy_border"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Language packs list (fills remaining space) -->
+        <ListView
+            android:id="@+id/langPackListView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="0dp"
+            android:scrollbars="vertical" />
+
+    </LinearLayout>
+
     <!-- Sphere Capture Overlay (live equirect preview + coverage + done) -->
     <FrameLayout
         android:id="@+id/sphereCaptureOverlay"
@@ -348,20 +493,18 @@
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereSaveButton"
+                style="@style/PrismActionButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:layout_marginEnd="8dp"
-                android:text="SAVE"
-                android:textSize="12sp" />
+                android:text="SAVE" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereCloseButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/PrismModeButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:text="CLOSE"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
                 app:strokeColor="@android:color/white" />
 
         </LinearLayout>
@@ -866,7 +1009,46 @@
             android:padding="12dp"
             android:visibility="gone">
 
-            <!-- From / To row -->
+            <!-- Language Settings + Save to TXT + Save to PDF row -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginBottom="10dp">
+
+                <Button
+                    android:id="@+id/translationLangSettingsButton"
+                    style="@style/PrismActionButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:layout_marginEnd="4dp"
+                    android:text="Lang"
+                    android:contentDescription="Open language selection and pack management" />
+
+                <Button
+                    android:id="@+id/translationSaveTxtButton"
+                    style="@style/PrismActionButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:layout_marginHorizontal="4dp"
+                    android:text="Save TXT"
+                    android:contentDescription="Save translations to text file" />
+
+                <Button
+                    android:id="@+id/translationSavePdfButton"
+                    style="@style/PrismActionButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:text="Save PDF"
+                    android:contentDescription="Save translations to PDF file" />
+
+            </LinearLayout>
+
+            <!-- Text Size slider -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -877,101 +1059,140 @@
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="From:"
+                    android:text="Text size:"
                     android:textColor="@android:color/white"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    android:layout_marginEnd="8dp" />
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
 
-                <Spinner
-                    android:id="@+id/translationFromSpinner"
+                <SeekBar
+                    android:id="@+id/translationTextScaleSlider"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:background="@drawable/button_info_background"
-                    android:popupBackground="@color/primary"
-                    android:padding="8dp"
-                    android:layout_marginEnd="8dp" />
+                    android:max="100"
+                    android:progress="20"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationTextScaleValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="1.0x"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Background slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
 
                 <TextView
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="To:"
+                    android:text="Background:"
                     android:textColor="@android:color/white"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    android:layout_marginEnd="8dp" />
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
 
-                <Spinner
-                    android:id="@+id/translationToSpinner"
+                <SeekBar
+                    android:id="@+id/translationBgAlphaSlider"
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:background="@drawable/button_info_background"
-                    android:popupBackground="@color/primary"
-                    android:padding="8dp" />
+                    android:max="100"
+                    android:progress="100"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationBgAlphaValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="100%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
 
             </LinearLayout>
 
-            <Button
-                android:id="@+id/translationViewAvailableButton"
-                android:layout_width="match_parent"
-                android:layout_height="36dp"
-                android:text="Manage language packs"
-                android:textSize="12sp"
-                android:contentDescription="View and delete downloaded language packs" />
-
-            <!-- Download progress (hidden by default) -->
+            <!-- Confidence filter slider -->
             <LinearLayout
-                android:id="@+id/translationDownloadProgressContainer"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:visibility="gone"
-                android:layout_marginTop="8dp">
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
 
-                <LinearLayout
-                    android:layout_width="match_parent"
+                <TextView
+                    android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:orientation="horizontal"
-                    android:gravity="center_vertical"
-                    android:layout_marginBottom="4dp">
+                    android:text="Confidence:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
 
-                    <TextView
-                        android:id="@+id/translationDownloadStatusText"
-                        android:layout_width="0dp"
-                        android:layout_height="wrap_content"
-                        android:layout_weight="1"
-                        android:text="Downloading…"
-                        android:textColor="@color/accent_bright"
-                        android:textSize="12sp"
-                        android:singleLine="true" />
-
-                    <TextView
-                        android:id="@+id/translationDownloadCancelButton"
-                        android:layout_width="wrap_content"
-                        android:layout_height="28dp"
-                        android:gravity="center"
-                        android:paddingHorizontal="12dp"
-                        android:text="CANCEL"
-                        android:textColor="@color/text_secondary"
-                        android:textSize="11sp"
-                        android:textStyle="bold"
-                        android:background="?android:attr/selectableItemBackground" />
-
-                </LinearLayout>
-
-                <ProgressBar
-                    android:id="@+id/translationDownloadProgressBar"
-                    style="@android:style/Widget.ProgressBar.Horizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="8dp"
+                <SeekBar
+                    android:id="@+id/translationConfidenceSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
                     android:max="100"
                     android:progress="0"
                     android:progressTint="@color/accent"
-                    android:progressBackgroundTint="@color/glassy_border" />
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationConfidenceValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="0%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Min length filter slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Min Length:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/translationMinLengthSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="50"
+                    android:progress="0"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationMinLengthValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="0"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
 
             </LinearLayout>
 
@@ -983,48 +1204,42 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="8dp"
-            android:background="@color/glassy"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="2dp"
             android:visibility="gone">
 
-            <!-- Edge Detection Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgEDButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
+                android:layout_marginEnd="3dp"
                 android:text="ED"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- Color Adjustment Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgCOLButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginHorizontal="3dp"
                 android:text="COL"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- HD Button (scale only, separate from ED/COL) -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgHDButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginStart="3dp"
                 android:text="HD"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
         </LinearLayout>
 
@@ -1034,48 +1249,42 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="8dp"
-            android:background="@color/glassy"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="2dp"
             android:visibility="gone">
 
-            <!-- Optical Flow Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/robOFButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
+                android:layout_marginEnd="3dp"
                 android:text="OF"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- Segmentation Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/robSEGButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginHorizontal="3dp"
                 android:text="SEG"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- Depth Field Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/robDFButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginStart="3dp"
                 android:text="DF"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
         </LinearLayout>
 
@@ -1087,78 +1296,120 @@
             android:orientation="horizontal"
             android:paddingBottom="16dp">
 
-            <!-- Night Vision Button (NV) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/nightVisionButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginEnd="2dp"
-                android:contentDescription="NV - Night Vision modes"
-                android:text="NV"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginEnd="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/nightVisionButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="NV - Night Vision modes"
+                    android:text="NV" />
+                <View
+                    android:id="@+id/nvUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- IMG Button (Image processing) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/imgButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
-                android:contentDescription="IMG - Image effects (Edges, Color)"
-                android:text="IMG"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginHorizontal="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/imgButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="IMG - Image effects (Edges, Color)"
+                    android:text="IMG" />
+                <View
+                    android:id="@+id/imgUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- ROB Button (Robot vision) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/robButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
-                android:contentDescription="ROB - Optical Flow, Segmentation, Depth, Detection"
-                android:text="ROB"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginHorizontal="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/robButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="ROB - Optical Flow, Segmentation, Depth, Detection"
+                    android:text="ROB" />
+                <View
+                    android:id="@+id/robUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- TXT Button (Text Translation) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/txtButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
-                android:contentDescription="TXT - Text detection and translation"
-                android:text="TXT"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginHorizontal="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/txtButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="TXT - Text detection and translation"
+                    android:text="TXT" />
+                <View
+                    android:id="@+id/txtUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- SPHERE Button (360 Panorama) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/sphereButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:contentDescription="SPHERE - 360 degree panorama capture"
-                android:text="360"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginStart="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/sphereButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="SPHERE - 360 degree panorama capture"
+                    android:text="360" />
+                <View
+                    android:id="@+id/sphereUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
         </LinearLayout>
 

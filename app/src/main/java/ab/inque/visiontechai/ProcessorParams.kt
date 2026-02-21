@@ -24,5 +24,13 @@ data class ProcessorParams(
     /** Text translation: source language code (e.g. "en" for English). null = off. */
     val translationSourceLanguageCode: String? = null,
     /** Text translation: target language code (e.g. "es" for Spanish). null = off. */
-    val translationTargetLanguageCode: String? = null
+    val translationTargetLanguageCode: String? = null,
+    /** Text translation: overlay text scale multiplier (0.5–3.0). */
+    val translationTextScale: Float = 1.0f,
+    /** Text translation: background visibility (0.0 = black behind text, 1.0 = full camera feed). */
+    val translationBackgroundAlpha: Float = 1.0f,
+    /** Text translation: minimum OCR confidence to display (0.0–1.0). Words below this are hidden. */
+    val translationMinConfidence: Float = 0.0f,
+    /** Text translation: minimum character length for a sentence to be translated. */
+    val translationMinLength: Int = 0
 )

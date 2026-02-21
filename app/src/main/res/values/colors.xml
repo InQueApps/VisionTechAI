@@ -3,17 +3,21 @@
     <color name="black">#FF000000</color>
     <color name="white">#FFFFFFFF</color>
 
-    <color name="primary">#FF120B24</color>
-    <color name="primary_dark">#FF080510</color>
-    <color name="surface_overlay">#E6120B24</color>
+    <!-- Deep dark base -->
+    <color name="primary">#FF0E0820</color>
+    <color name="primary_dark">#FF060412</color>
+    <color name="surface_overlay">#E60E0820</color>
     <color name="text_primary">#FFFFFFFF</color>
-    <color name="text_secondary">#DDFFFFFF</color>
+    <color name="text_secondary">#B3FFFFFF</color>
 
-    <color name="glassy">#E62A1850</color>
-    <color name="glassy_light">#33A090FF</color>
-    <color name="glassy_panel">#E0221545</color>
-    <color name="glassy_border">#809B80FF</color>
+    <!-- Frosted glass layers -->
+    <color name="glassy">#CC1E1242</color>
+    <color name="glassy_light">#1AA090FF</color>
+    <color name="glassy_panel">#D91A1038</color>
+    <color name="glassy_border">#409B80FF</color>
 
-    <color name="accent">#FFBB86FC</color>
-    <color name="accent_bright">#FFD0A5FF</color>
+    <!-- Accent tones -->
+    <color name="accent">#FFA78BFA</color>
+    <color name="accent_bright">#FFC4B5FD</color>
+    <color name="accent_dim">#66A78BFA</color>
 </resources>
