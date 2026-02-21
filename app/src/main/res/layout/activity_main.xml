@@ -890,6 +890,7 @@
                     android:layout_weight="1"
                     android:minHeight="40dp"
                     android:background="@drawable/button_info_background"
+                    android:popupBackground="@color/primary"
                     android:padding="8dp"
                     android:layout_marginEnd="8dp" />
 
@@ -909,6 +910,7 @@
                     android:layout_weight="1"
                     android:minHeight="40dp"
                     android:background="@drawable/button_info_background"
+                    android:popupBackground="@color/primary"
                     android:padding="8dp" />
 
             </LinearLayout>

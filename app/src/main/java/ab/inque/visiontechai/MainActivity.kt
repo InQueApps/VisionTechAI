@@ -566,7 +566,7 @@ class MainActivity : AppCompatActivity() {
                         val names = if (downloadedLangs.isEmpty()) listOf("(no packs installed)")
                                     else downloadedLangs.map { it.displayName }
                         val adapter = android.widget.ArrayAdapter(
-                            this, android.R.layout.simple_spinner_item, names
+                            this, R.layout.spinner_dropdown_item, names
                         ).apply { setDropDownViewResource(R.layout.spinner_dropdown_item) }
                         val prevFrom = visionState.params.translationSourceLanguageCode
                         val prevTo = visionState.params.translationTargetLanguageCode
@@ -844,6 +844,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setVisionMode(mode: VisionMode) {
+        val prev = visionState.mode
+        if (prev == VisionMode.SPHERE && mode != VisionMode.SPHERE) {
+            sphereController?.resetSession()
+            sphereController = null
+            orientationTracker.stop()
+            binding.sphereCaptureOverlay.visibility = View.GONE
+            binding.sphereViewerOverlay.visibility = View.GONE
+            binding.sphereViewerView.cleanup()
+        }
         visionState.mode = mode
         updateVisionModeUI()
     }
@@ -1477,7 +1486,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPermissionExplanationDialog() {
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        androidx.appcompat.app.AlertDialog.Builder(this, R.style.DarkDialogTheme)
             .setTitle("Permissions Required")
             .setMessage("This app needs camera and media permissions to function properly:\n\n" +
                     "• Camera: To capture photos and videos\n" +
@@ -1503,7 +1512,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPermissionRationaleDialog(permissions: Array<String>) {
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        androidx.appcompat.app.AlertDialog.Builder(this, R.style.DarkDialogTheme)
             .setTitle("Permissions Needed")
             .setMessage("This app needs the following permissions to work:\n\n" +
                     "• Camera: To take photos and record videos\n" +
@@ -1586,6 +1595,16 @@ class MainActivity : AppCompatActivity() {
                     binding.sphereCaptureOverlay.visibility = View.GONE
                     binding.sphereViewerOverlay.visibility = View.VISIBLE
                     binding.sphereViewerView.setLookDirection(0f, 0f, 90f)
+                }
+            },
+            onFrameWarning = { warning ->
+                runOnUiThread {
+                    when (warning) {
+                        SphereCaptureController.FrameWarning.NO_OVERLAP ->
+                            Toast.makeText(this, "No overlap — move back toward previous frames", Toast.LENGTH_SHORT).show()
+                        SphereCaptureController.FrameWarning.EXCESSIVE_SHIFT ->
+                            Toast.makeText(this, "Slow down — too much movement between frames", Toast.LENGTH_SHORT).show()
+                    }
                 }
             }
         )

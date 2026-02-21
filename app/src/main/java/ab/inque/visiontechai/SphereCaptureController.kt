@@ -10,8 +10,14 @@ import android.util.Log
 class SphereCaptureController(
     private val orientationTracker: OrientationTracker,
     private val onCoverageUpdate: (Float) -> Unit,
-    private val onPreviewReady: (Bitmap) -> Unit
+    private val onPreviewReady: (Bitmap) -> Unit,
+    private val onFrameWarning: ((FrameWarning) -> Unit)? = null
 ) {
+
+    enum class FrameWarning {
+        NO_OVERLAP,
+        EXCESSIVE_SHIFT
+    }
 
     enum class State { IDLE, CAPTURING, PREVIEW }
 
@@ -41,6 +47,24 @@ class SphereCaptureController(
         SphereNative.addFrame(bitmap, quat)
         frameCount++
         onCoverageUpdate(SphereNative.getCoverage())
+        checkFrameAlignment()
+    }
+
+    private fun checkFrameAlignment() {
+        val info = SphereNative.getLastFrameInfo() ?: return
+        if (info.isFirstFrame) return
+
+        when {
+            info.hasLowOverlap -> {
+                Log.w(TAG, "Frame ${info.frameIndex}: low overlap ${info.overlapCount}/${info.totalSamples} " +
+                        "(${(info.overlapRatio * 100).toInt()}%)")
+                onFrameWarning?.invoke(FrameWarning.NO_OVERLAP)
+            }
+            info.hasExcessiveShift -> {
+                Log.w(TAG, "Frame ${info.frameIndex}: excessive alignment shift ${info.alignmentOffsetPx}px")
+                onFrameWarning?.invoke(FrameWarning.EXCESSIVE_SHIFT)
+            }
+        }
     }
 
     /**

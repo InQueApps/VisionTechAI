@@ -62,6 +62,13 @@ static float storedFovH = 0, storedFovV = 0;
 static std::vector<float> eqR, eqG, eqB, eqWeight;
 static std::mutex sphereMutex;
 
+// Per-frame alignment metrics (readable via nativeGetLastFrameInfo)
+static int sFrameIndex = 0;
+static int sLastOverlapCount = 0;
+static int sLastTotalSamples = 0;
+static float sLastAlignOffset = 0.f;
+static float sLastResidualSSD = 0.f;
+
 static inline int clampI(int v, int lo, int hi) {
     return v < lo ? lo : (v > hi ? hi : v);
 }
@@ -92,6 +99,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeInit(
     eqG.assign(sz, 0.f);
     eqB.assign(sz, 0.f);
     eqWeight.assign(sz, 0.f);
+    sFrameIndex = 0;
     LOGI("Sphere init: %dx%d  fov=%.1f x %.1f", eqW, eqH, fovH, fovV);
     return JNI_TRUE;
 }
@@ -132,10 +140,12 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     overlap.reserve((frameW / SAMPLE_STEP + 1) * (frameH / SAMPLE_STEP + 1));
     double sumExR = 0, sumExG = 0, sumExB = 0;
     double sumNewR = 0, sumNewG = 0, sumNewB = 0;
+    int totalSamples = 0;
 
     for (int fy = 0; fy < frameH; fy += SAMPLE_STEP) {
         double ny = (0.5 - (double)fy / (frameH - 1)) * 2.0 * tanV;
         for (int fx = 0; fx < frameW; fx += SAMPLE_STEP) {
+            totalSamples++;
             double nx = ((double)fx / (frameW - 1) - 0.5) * 2.0 * tanH;
             double len = std::sqrt(nx * nx + ny * ny + 1.0);
             double rx = nx / len, ry = ny / len, rz = -1.0 / len;
@@ -176,15 +186,37 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
 
     // ── Phase 2: coarse-to-fine translational alignment ──
     // Two-level pyramid search to correct IMU timing lag and drift.
-    // Coarse: large radius, step 4, using every 4th overlap sample (~7° range)
-    // Fine:   ±4 around coarse best, step 1, all overlap samples (sub-pixel grid)
+    // Coarse: large radius, step 4, using every 2nd overlap sample (~7° range)
+    // Fine:   ±6 around coarse best, step 1, all overlap samples
     double bestOffX = 0.0, bestOffY = 0.0;
+    double finalSSD = 0.0;
 
     if (overlap.size() > 50) {
+        // ── Baseline: SSD at zero offset (raw IMU position) ──
+        double baselineSSD = 1e18;
+        {
+            double ssd = 0.0;
+            int count = 0;
+            for (const auto& s : overlap) {
+                int sx = ((int)(s.eqX) + eqW) % eqW;
+                int sy = clampI((int)(s.eqY), 0, eqH - 1);
+                int sidx = sy * eqW + sx;
+                if (eqWeight[sidx] > 0.f) {
+                    float inv = 1.f / eqWeight[sidx];
+                    double dr = s.newR * gainR - eqR[sidx] * inv;
+                    double dg = s.newG * gainG - eqG[sidx] * inv;
+                    double db = s.newB * gainB - eqB[sidx] * inv;
+                    ssd += dr * dr + dg * dg + db * db;
+                    count++;
+                }
+            }
+            if (count > 30) baselineSSD = ssd / count;
+        }
+
         // ── Coarse pass ──
-        constexpr int COARSE_RADIUS = 80;   // ±80 px ≈ ±7° on 4096-wide equirect
+        constexpr int COARSE_RADIUS = 80;
         constexpr int COARSE_STEP = 4;
-        constexpr int COARSE_SUBSAMPLE = 4; // use every 4th overlap sample
+        constexpr int COARSE_SUBSAMPLE = 2;
         double bestSSD = 1e18;
 
         for (int oy = -COARSE_RADIUS; oy <= COARSE_RADIUS; oy += COARSE_STEP) {
@@ -205,7 +237,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
                         count++;
                     }
                 }
-                if (count > 20) {
+                if (count > 40) {
                     ssd /= count;
                     if (ssd < bestSSD) {
                         bestSSD = ssd;
@@ -217,7 +249,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         }
 
         // ── Fine pass ──
-        constexpr int FINE_RADIUS = 4;
+        constexpr int FINE_RADIUS = 6;
         int coarseX = static_cast<int>(bestOffX);
         int coarseY = static_cast<int>(bestOffY);
         bestSSD = 1e18;
@@ -239,7 +271,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
                         count++;
                     }
                 }
-                if (count > 30) {
+                if (count > 50) {
                     ssd /= count;
                     if (ssd < bestSSD) {
                         bestSSD = ssd;
@@ -249,11 +281,32 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
                 }
             }
         }
+        finalSSD = bestSSD;
 
-        if (bestOffX != 0.0 || bestOffY != 0.0) {
-            LOGI("Alignment correction: dx=%.0f dy=%.0f (%zu overlap samples)",
-                 bestOffX, bestOffY, overlap.size());
+        // Reject alignment if it doesn't improve significantly over raw IMU
+        // (avoids false matches from noise in repetitive textures)
+        if (baselineSSD < 1e17 && bestSSD > baselineSSD * 0.75) {
+            LOGI("Alignment rejected: bestSSD=%.1f not much better than baseline=%.1f",
+                 bestSSD, baselineSSD);
+            bestOffX = 0.0;
+            bestOffY = 0.0;
+            finalSSD = baselineSSD;
+        } else if (bestOffX != 0.0 || bestOffY != 0.0) {
+            LOGI("Alignment correction: dx=%.0f dy=%.0f (baseline=%.1f -> aligned=%.1f, %zu samples)",
+                 bestOffX, bestOffY, baselineSSD, bestSSD, overlap.size());
         }
+    }
+
+    // Store per-frame metrics
+    sFrameIndex++;
+    sLastOverlapCount = static_cast<int>(overlap.size());
+    sLastTotalSamples = totalSamples;
+    sLastAlignOffset = static_cast<float>(std::sqrt(bestOffX * bestOffX + bestOffY * bestOffY));
+    sLastResidualSSD = static_cast<float>(finalSSD);
+
+    if (sFrameIndex > 1 && sLastOverlapCount < 20) {
+        LOGW("Frame %d: very low overlap (%d/%d samples) — user may have moved too far",
+             sFrameIndex, sLastOverlapCount, totalSamples);
     }
 
     // ── Phase 3: project and splat with gain + alignment offset ──
@@ -486,6 +539,21 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetCoverage(
     return static_cast<float>(covered) / sz;
 }
 
+JNIEXPORT jfloatArray JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeGetLastFrameInfo(
+    JNIEnv* env, jobject) {
+    jfloatArray result = env->NewFloatArray(5);
+    float data[5] = {
+        static_cast<float>(sFrameIndex),
+        static_cast<float>(sLastOverlapCount),
+        static_cast<float>(sLastTotalSamples),
+        sLastAlignOffset,
+        sLastResidualSSD
+    };
+    env->SetFloatArrayRegion(result, 0, 5, data);
+    return result;
+}
+
 JNIEXPORT jboolean JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeLoadEquirect(
     JNIEnv* env, jobject,
@@ -526,6 +594,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeReset(
         std::memset(eqB.data(), 0, sz * sizeof(float));
         std::memset(eqWeight.data(), 0, sz * sizeof(float));
     }
+    sFrameIndex = 0;
     LOGI("Sphere reset");
 }
 

@@ -3,6 +3,19 @@ package ab.inque.visiontechai
 import android.graphics.Bitmap
 import android.util.Log
 
+data class FrameAlignmentInfo(
+    val frameIndex: Int,
+    val overlapCount: Int,
+    val totalSamples: Int,
+    val alignmentOffsetPx: Float,
+    val residualSSD: Float
+) {
+    val overlapRatio: Float get() = if (totalSamples > 0) overlapCount.toFloat() / totalSamples else 0f
+    val isFirstFrame: Boolean get() = frameIndex <= 1
+    val hasLowOverlap: Boolean get() = !isFirstFrame && overlapRatio < 0.05f
+    val hasExcessiveShift: Boolean get() = !isFirstFrame && alignmentOffsetPx > 60f
+}
+
 /**
  * JNI wrapper for the C++ sphere panorama engine.
  * Manages an equirectangular buffer that accumulates camera frames
@@ -70,6 +83,19 @@ object SphereNative {
         return nativeGetCoverage()
     }
 
+    fun getLastFrameInfo(): FrameAlignmentInfo? {
+        if (!loaded) return null
+        val data = nativeGetLastFrameInfo() ?: return null
+        if (data.size < 5) return null
+        return FrameAlignmentInfo(
+            frameIndex = data[0].toInt(),
+            overlapCount = data[1].toInt(),
+            totalSamples = data[2].toInt(),
+            alignmentOffsetPx = data[3],
+            residualSSD = data[4]
+        )
+    }
+
     fun reset() {
         if (loaded) nativeReset()
     }
@@ -84,6 +110,7 @@ object SphereNative {
     private external fun nativeGetRectilinear(pixelsOut: IntArray, outW: Int, outH: Int, azimuth: Float, elevation: Float, fov: Float): Boolean
     private external fun nativeLoadEquirect(pixels: IntArray, w: Int, h: Int): Boolean
     private external fun nativeGetCoverage(): Float
+    private external fun nativeGetLastFrameInfo(): FloatArray?
     private external fun nativeReset()
     private external fun nativeRelease()
 }
