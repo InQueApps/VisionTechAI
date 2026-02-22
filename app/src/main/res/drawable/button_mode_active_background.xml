@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Normal glassy background -->
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@color/glassy" />
+            <corners android:radius="20dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:startColor="@color/glassy_light"
+                android:endColor="@android:color/transparent"
+                android:angle="135" />
+            <corners android:radius="20dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <stroke
+                android:width="0.5dp"
+                android:color="@color/glassy_border" />
+            <corners android:radius="20dp" />
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+    <!-- White underline at bottom -->
+    <item
+        android:gravity="bottom|center_horizontal"
+        android:height="3dp"
+        android:left="8dp"
+        android:right="8dp"
+        android:bottom="4dp">
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/white" />
+            <corners android:radius="1.5dp" />
+        </shape>
+    </item>
+</layer-list>

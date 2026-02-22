@@ -5,17 +5,68 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Preserve line number information for debugging stack traces
+-keepattributes SourceFile,LineNumberTable
+-renamesourcefileattribute SourceFile
 
-# Uncomment this to preserve the line number information for
-# debugging stack traces.
-#-keepattributes SourceFile,LineNumberTable
+# Keep all native methods (JNI)
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
 
-# If you keep the line number information, uncomment this to
-# hide the original source file name.
-#-renamesourcefileattribute SourceFile
+# Keep all classes with native methods and their members
+-keep class ab.inque.visiontechai.DepthNative { *; }
+-keep class ab.inque.visiontechai.ResampleNative { *; }
+-keep class ab.inque.visiontechai.TextTranslatorNative { *; }
+-keep class ab.inque.visiontechai.VideoNative { *; }
+
+# TensorFlow Lite
+-keep class org.tensorflow.lite.** { *; }
+-keep interface org.tensorflow.lite.** { *; }
+-keepclassmembers class org.tensorflow.lite.** { *; }
+
+# ML Kit
+-keep class com.google.mlkit.** { *; }
+-keep interface com.google.mlkit.** { *; }
+-dontwarn com.google.mlkit.**
+
+# Google Play Services (used by ML Kit)
+-keep class com.google.android.gms.** { *; }
+-dontwarn com.google.android.gms.**
+
+# Firebase
+-keep class com.google.firebase.** { *; }
+-dontwarn com.google.firebase.**
+
+# CameraX
+-keep class androidx.camera.** { *; }
+-keep interface androidx.camera.** { *; }
+-dontwarn androidx.camera.**
+
+# Keep ViewBinding classes
+-keep class ab.inque.visiontechai.databinding.** { *; }
+
+# Keep enum classes
+-keepclassmembers enum * {
+    public static **[] values();
+    public static ** valueOf(java.lang.String);
+}
+
+# Keep Parcelable implementations
+-keepclassmembers class * implements android.os.Parcelable {
+    public static final ** CREATOR;
+}
+
+# Keep custom views
+-keep public class * extends android.view.View {
+    public <init>(android.content.Context);
+    public <init>(android.content.Context, android.util.AttributeSet);
+    public <init>(android.content.Context, android.util.AttributeSet, int);
+}
+
+# Remove logging in release builds
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** v(...);
+    public static *** i(...);
+}

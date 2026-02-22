@@ -19,6 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "NightVisionCamera"
+rootProject.name = "PrismAI"
 include(":app")
  

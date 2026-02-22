@@ -54,11 +54,7 @@ import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
 import android.util.Size
 import com.google.mlkit.common.model.RemoteModelManager
-import com.google.mlkit.nl.translate.TranslateLanguage
 import com.google.mlkit.nl.translate.TranslateRemoteModel
-import com.google.mlkit.nl.translate.Translation
-import com.google.mlkit.nl.translate.Translator
-import com.google.mlkit.nl.translate.TranslatorOptions
 import androidx.appcompat.app.AlertDialog
 
 class MainActivity : AppCompatActivity() {
@@ -73,7 +69,6 @@ class MainActivity : AppCompatActivity() {
     private val visionState = VisionState()
     private lateinit var visionPipeline: VisionAnalysisPipeline
     private val frameProcessors: Map<VisionMode, FrameProcessor> by lazy { buildFrameProcessors() }
-    private lateinit var mlNightVisionProcessor: MLNightVisionProcessor
     private lateinit var objectDetectionProcessor: ObjectDetectionProcessor
     private lateinit var edgeDetectionProcessor: EdgeDetectionProcessor
     private lateinit var opticalFlowProcessor: OpticalFlowProcessor
@@ -95,6 +90,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var histogramView: HistogramView
     private lateinit var fpsView: TextView
     private var segmentationNullLogCounter = 0
+    private lateinit var orientationTracker: OrientationTracker
+    private var sphereController: SphereCaptureController? = null
+    private var cameraFovH = 65f
+    private var cameraFovV = 50f
+    @Volatile private var sphereCaptureNextFrame = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -273,8 +273,8 @@ class MainActivity : AppCompatActivity() {
             }
             setTextColor(Color.WHITE)
             setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
-            setBackgroundColor(Color.BLACK)
-            setPadding(8, 4, 8, 4)
+            setBackgroundResource(R.drawable.button_info_background)
+            setPadding(16, 8, 16, 8)
             text = "FPS: 0"
             visibility = View.VISIBLE // Always visible
         }
@@ -330,25 +330,21 @@ class MainActivity : AppCompatActivity() {
             setMode(false)
         }
         binding.nightVisionButton.setOnClickListener {
-            when (visionState.mode) {
-                VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> setVisionMode(VisionMode.NONE)
-                else -> toggleCategoryOverlay(VisionMode.Category.NV)
+            if (visionState.mode == VisionMode.NIGHT_VISION) {
+                setVisionMode(VisionMode.NONE)
+            } else {
+                setVisionMode(VisionMode.NIGHT_VISION)
+                Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
             }
-        }
-        binding.nvRegularButton.setOnClickListener {
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            setVisionMode(VisionMode.NIGHT_VISION)
-            Toast.makeText(this, "Night Vision Enabled", Toast.LENGTH_SHORT).show()
-        }
-        binding.nvMLButton.setOnClickListener {
-            binding.nightVisionOverlayRow.visibility = View.GONE
-            setVisionMode(VisionMode.ML_NIGHT_VISION)
-            Toast.makeText(this, "ML Night Vision Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.imgButton.setOnClickListener {
             when (visionState.mode) {
                 VisionMode.EDGE_DETECTION, VisionMode.COLOR_ADJUSTMENT, VisionMode.HD -> setVisionMode(VisionMode.NONE)
-                else -> toggleCategoryOverlay(VisionMode.Category.IMG)
+                else -> {
+                    if (visionState.mode != VisionMode.NONE) setVisionMode(VisionMode.NONE)
+                    toggleCategoryOverlay(VisionMode.Category.IMG)
+                    setMainButtonActive(binding.imgUnderline, binding.imgOverlayRow.visibility == View.VISIBLE)
+                }
             }
         }
         binding.imgEDButton.setOnClickListener {
@@ -368,8 +364,12 @@ class MainActivity : AppCompatActivity() {
         }
         binding.robButton.setOnClickListener {
             when (visionState.mode) {
-                VisionMode.OPTICAL_FLOW, VisionMode.SEGMENTATION, VisionMode.DEPTH_FIELD, VisionMode.OBJECT_DETECTION, VisionMode.TEXT_TRANSLATION -> setVisionMode(VisionMode.NONE)
-                else -> toggleCategoryOverlay(VisionMode.Category.ROB)
+                VisionMode.OPTICAL_FLOW, VisionMode.SEGMENTATION, VisionMode.DEPTH_FIELD, VisionMode.OBJECT_DETECTION -> setVisionMode(VisionMode.NONE)
+                else -> {
+                    if (visionState.mode != VisionMode.NONE) setVisionMode(VisionMode.NONE)
+                    toggleCategoryOverlay(VisionMode.Category.ROB)
+                    setMainButtonActive(binding.robUnderline, binding.robOverlayRow.visibility == View.VISIBLE)
+                }
             }
         }
         binding.robOFButton.setOnClickListener {
@@ -381,6 +381,7 @@ class MainActivity : AppCompatActivity() {
         binding.robSEGButton.setOnClickListener {
             binding.robOverlayRow.visibility = View.GONE
             setVisionMode(VisionMode.SEGMENTATION)
+            imageSegmentationProcessor.clear()
             Toast.makeText(this, "Image Segmentation Enabled", Toast.LENGTH_SHORT).show()
         }
         binding.robDFButton.setOnClickListener {
@@ -388,10 +389,29 @@ class MainActivity : AppCompatActivity() {
             setVisionMode(VisionMode.DEPTH_FIELD)
             Toast.makeText(this, "Depth Field Enabled", Toast.LENGTH_SHORT).show()
         }
-        binding.robTxtButton.setOnClickListener {
-            binding.robOverlayRow.visibility = View.GONE
-            setVisionMode(VisionMode.TEXT_TRANSLATION)
-            Toast.makeText(this, "Text translation enabled", Toast.LENGTH_SHORT).show()
+        binding.txtButton.setOnClickListener {
+            if (visionState.mode == VisionMode.TEXT_TRANSLATION) {
+                setVisionMode(VisionMode.NONE)
+            } else {
+                setVisionMode(VisionMode.TEXT_TRANSLATION)
+                Toast.makeText(this, "Text Translation Enabled", Toast.LENGTH_SHORT).show()
+            }
+        }
+        binding.sphereButton.setOnClickListener {
+            if (visionState.mode == VisionMode.SPHERE) {
+                exitSphereMode()
+            } else {
+                enterSphereMode()
+            }
+        }
+        binding.sphereDoneButton.setOnClickListener {
+            sphereController?.finishCapture()
+        }
+        binding.sphereSaveButton.setOnClickListener {
+            saveSphereImage()
+        }
+        binding.sphereCloseButton.setOnClickListener {
+            exitSphereMode()
         }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
@@ -409,6 +429,10 @@ class MainActivity : AppCompatActivity() {
             openContactEmail()
         }
         binding.recordButton.setOnClickListener {
+            if (visionState.mode == VisionMode.SPHERE) {
+                handleSphereRecordButton()
+                return@setOnClickListener
+            }
             if (isPhotoMode) {
                 takePhoto()
             } else {
@@ -423,14 +447,24 @@ class MainActivity : AppCompatActivity() {
         // Set up sliders to update visionState.params
         binding.nightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) visionState.params = visionState.params.copy(nightVisionIntensity = progress / 100f)
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(nightVisionIntensity = progress / 100f)
+                    binding.nightVisionIntensityValueText.text = "$progress%"
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-        binding.mlNightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+        binding.nightVisionExposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) visionState.params = visionState.params.copy(mlNightVisionSensitivity = progress / 100f)
+                if (fromUser) {
+                    val frames = progress + 1  // 0-9 → 1-10
+                    visionState.params = visionState.params.copy(nightVisionExposureFrames = frames)
+                    binding.nightVisionExposureValueText.text = "$frames"
+                    if (frames <= 1) {
+                        FrameAccumulatorNative.clear()
+                    }
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -448,11 +482,23 @@ class MainActivity : AppCompatActivity() {
                 if (fromUser) {
                     visionState.params = visionState.params.copy(hdScaleSliderValue = progress)
                     val scaleStr = when {
-                        progress < 50 -> String.format("%.2fx", 1f - (50 - progress) * 0.0198f) // ~0.01 at 0
-                        progress > 50 -> String.format("%.1fx", 1f + (progress - 50) * 0.06f)   // 4x at 100
+                        progress < 50 -> String.format("%.2fx", 1f - (50 - progress) * 0.0198f)
+                        progress > 50 -> String.format("%.1fx", 1f + (progress - 50) * 0.06f)
                         else -> "1.0x"
                     }
-                    binding.hdScaleValueText.text = "Scale: $scaleStr"
+                    binding.hdScaleValueText.text = scaleStr
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        binding.hdExposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val frames = progress + 1
+                    visionState.params = visionState.params.copy(hdExposureFrames = frames)
+                    binding.hdExposureValueText.text = "$frames"
+                    if (frames <= 1) FrameAccumulatorNative.clear()
                 }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -522,67 +568,78 @@ class MainActivity : AppCompatActivity() {
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
         })
-        // Translation: language From/To (currently English/Spanish)
-        val translationLangAdapter = android.widget.ArrayAdapter.createFromResource(
-            this, R.array.translation_languages, android.R.layout.simple_spinner_item
-        ).apply { setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
-        binding.translationFromSpinner.adapter = translationLangAdapter
-        binding.translationToSpinner.adapter = translationLangAdapter
-
-        // Default: English → Spanish
-        binding.translationFromSpinner.setSelection(0, false)
-        binding.translationToSpinner.setSelection(1, false)
-
-        val languageCodeToDisplayName: (String) -> String = { code ->
-            when (code) { "en" -> "English"; "es" -> "Spanish"; else -> code }
-        }
-
-        val targetLanguageToMlKit = { code: String? ->
-            when (code) { "en" -> TranslateLanguage.ENGLISH; "es" -> TranslateLanguage.SPANISH; else -> null }
-        }
-
-        fun refreshTranslationDownloadSection() {
-            val fromPos = binding.translationFromSpinner.selectedItemPosition
-            val toPos = binding.translationToSpinner.selectedItemPosition
-            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            if (toCode == null || fromCode == null || fromCode == toCode) {
-                binding.translationDownloadSection.visibility = View.GONE
-                return
+        // Optical flow: pixelation 2–16 (progress 0–14)
+        binding.opticalFlowPixelationSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val px = (progress + 2).coerceIn(2, 16)
+                    visionState.params = visionState.params.copy(opticalFlowPixelation = px)
+                    binding.opticalFlowPixelationValueText.text = "$px"
+                }
             }
-            // English is built-in; only show download for target languages that are downloaded on demand (e.g. Spanish)
-            if (toCode == "en") {
-                binding.translationDownloadSection.visibility = View.GONE
-                return
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        // Optical flow: intensity 0–100%
+        binding.opticalFlowIntensitySlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(opticalFlowIntensity = progress / 100f)
+                    binding.opticalFlowIntensityValueText.text = "$progress%"
+                }
             }
-            val remoteModel = TranslateRemoteModel.Builder(targetLanguageToMlKit(toCode)!!).build()
-            RemoteModelManager.getInstance().isModelDownloaded(remoteModel)
-                .addOnSuccessListener { downloaded ->
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        binding.opticalFlowSensitivitySlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(opticalFlowSensitivity = progress / 100f)
+                    binding.opticalFlowSensitivityValueText.text = "$progress%"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        // Translation: spinners show only downloaded language packs
+        var downloadedLangs = listOf<TranslationLang>()
+
+        fun refreshTranslationSpinners() {
+            RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
+                .addOnSuccessListener { models ->
                     runOnUiThread {
-                        if (downloaded) {
-                            binding.translationDownloadSection.visibility = View.GONE
-                        } else {
-                            binding.translationDownloadSection.visibility = View.VISIBLE
-                            binding.translationDownloadPairButton.text = "Download ${languageCodeToDisplayName(fromCode)} → ${languageCodeToDisplayName(toCode)}"
-                        }
+                        val codes = models.mapNotNull { it.language }.toSet()
+                        downloadedLangs = TranslationLanguages.ALL.filter { it.mlKitCode in codes }
+                        val names = if (downloadedLangs.isEmpty()) listOf("(no packs installed)")
+                                    else downloadedLangs.map { it.displayName }
+                        val adapter = android.widget.ArrayAdapter(
+                            this, R.layout.spinner_selected_item, names
+                        ).apply { setDropDownViewResource(R.layout.spinner_dropdown_item) }
+                        val prevFrom = visionState.params.translationSourceLanguageCode
+                        val prevTo = visionState.params.translationTargetLanguageCode
+                        binding.translationFromSpinner.adapter = adapter
+                        binding.translationToSpinner.adapter = adapter
+                        val fromIdx = downloadedLangs.indexOfFirst { it.code == prevFrom }.coerceAtLeast(0)
+                        val toIdx = downloadedLangs.indexOfFirst { it.code == prevTo }.let { if (it < 0 && downloadedLangs.size > 1) 1 else it.coerceAtLeast(0) }
+                        binding.translationFromSpinner.setSelection(fromIdx, false)
+                        binding.translationToSpinner.setSelection(toIdx, false)
                     }
                 }
-                .addOnFailureListener {
-                    runOnUiThread { binding.translationDownloadSection.visibility = View.GONE }
-                }
+        }
+
+        fun selectedLangCode(spinner: android.widget.Spinner): String? {
+            val pos = spinner.selectedItemPosition
+            return downloadedLangs.getOrNull(pos)?.code
         }
 
         val updateTranslationParams = {
-            val fromPos = binding.translationFromSpinner.selectedItemPosition
-            val toPos = binding.translationToSpinner.selectedItemPosition
-            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
+            val fromCode = selectedLangCode(binding.translationFromSpinner)
+            val toCode = selectedLangCode(binding.translationToSpinner)
             val effectiveTarget = if (fromCode != null && toCode != null && fromCode != toCode) toCode else null
             visionState.params = visionState.params.copy(
                 translationSourceLanguageCode = fromCode,
                 translationTargetLanguageCode = effectiveTarget
             )
-            refreshTranslationDownloadSection()
         }
 
         val translationListener = object : android.widget.AdapterView.OnItemSelectedListener {
@@ -595,77 +652,236 @@ class MainActivity : AppCompatActivity() {
         binding.translationFromSpinner.onItemSelectedListener = translationListener
         binding.translationToSpinner.onItemSelectedListener = translationListener
 
-        // Download button shown below dropdowns when selected pair is not yet downloaded
-        binding.translationDownloadPairButton.setOnClickListener {
-            val fromPos = binding.translationFromSpinner.selectedItemPosition
-            val toPos = binding.translationToSpinner.selectedItemPosition
-            val fromCode = when (fromPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            val toCode = when (toPos) { 0 -> "en"; 1 -> "es"; else -> null }
-            if (fromCode == null || toCode == null || fromCode == toCode) return@setOnClickListener
-            val src = targetLanguageToMlKit(fromCode) ?: return@setOnClickListener
-            val tgt = targetLanguageToMlKit(toCode) ?: return@setOnClickListener
-            binding.translationDownloadPairButton.isEnabled = false
-            binding.translationDownloadPairButton.text = "Downloading…"
-            val translator = Translation.getClient(TranslatorOptions.Builder().setSourceLanguage(src).setTargetLanguage(tgt).build())
-            translator.downloadModelIfNeeded()
-                .addOnSuccessListener {
-                    translator.close()
-                    runOnUiThread {
-                        binding.translationDownloadPairButton.isEnabled = true
-                        refreshTranslationDownloadSection()
-                        Toast.makeText(this, "Model ready for offline use", Toast.LENGTH_SHORT).show()
+        refreshTranslationSpinners()
+
+        binding.translationTextScaleSlider.progress = 20
+        binding.translationTextScaleValueText.text = "1.0x"
+        binding.translationBgAlphaSlider.progress = 100
+        binding.translationBgAlphaValueText.text = "100%"
+
+        binding.translationTextScaleSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val scale = 0.5f + progress * 0.025f
+                binding.translationTextScaleValueText.text = String.format("%.1fx", scale)
+                visionState.params = visionState.params.copy(translationTextScale = scale)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        binding.translationBgAlphaSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val alpha = progress / 100f
+                binding.translationBgAlphaValueText.text = "${progress}%"
+                visionState.params = visionState.params.copy(translationBackgroundAlpha = alpha)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        binding.translationConfidenceSlider.progress = 0
+        binding.translationConfidenceValueText.text = "0%"
+        binding.translationConfidenceSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                val conf = progress / 100f
+                binding.translationConfidenceValueText.text = "${progress}%"
+                visionState.params = visionState.params.copy(translationMinConfidence = conf)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        binding.translationMinLengthSlider.progress = 0
+        binding.translationMinLengthValueText.text = "0"
+        binding.translationMinLengthSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                binding.translationMinLengthValueText.text = "$progress"
+                visionState.params = visionState.params.copy(translationMinLength = progress)
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+
+        binding.translationSaveTxtButton.setOnClickListener {
+            saveTranslationsToTxt()
+        }
+        binding.translationSavePdfButton.setOnClickListener {
+            saveTranslationsToPdf()
+        }
+
+        var downloadProgressTimer: java.util.Timer? = null
+        var activeDownloadModel: TranslateRemoteModel? = null
+        var downloadCancelled = false
+
+        fun showDownloadProgress(langName: String) {
+            downloadCancelled = false
+            binding.translationDownloadProgressContainer.visibility = View.VISIBLE
+            binding.translationDownloadCancelButton.visibility = View.VISIBLE
+            binding.translationDownloadStatusText.text = "Downloading $langName…"
+            binding.translationDownloadProgressBar.isIndeterminate = false
+            binding.translationDownloadProgressBar.max = 100
+            binding.translationDownloadProgressBar.progress = 0
+            downloadProgressTimer?.cancel()
+            downloadProgressTimer = java.util.Timer().apply {
+                var simulated = 0
+                scheduleAtFixedRate(object : java.util.TimerTask() {
+                    override fun run() {
+                        simulated += when {
+                            simulated < 30 -> 4
+                            simulated < 60 -> 3
+                            simulated < 80 -> 2
+                            simulated < 90 -> 1
+                            else -> 0
+                        }
+                        simulated = simulated.coerceAtMost(92)
+                        runOnUiThread {
+                            binding.translationDownloadProgressBar.progress = simulated
+                            binding.translationDownloadStatusText.text = "Downloading $langName… $simulated%"
+                        }
                     }
-                }
-                .addOnFailureListener { e ->
-                    translator.close()
+                }, 300, 400)
+            }
+        }
+
+        fun finishDownloadProgress(langName: String, success: Boolean) {
+            downloadProgressTimer?.cancel()
+            downloadProgressTimer = null
+            activeDownloadModel = null
+            binding.translationDownloadCancelButton.visibility = View.GONE
+            binding.translationDownloadProgressBar.progress = if (success) 100 else 0
+            binding.translationDownloadStatusText.text = if (success) "$langName — done" else "$langName — failed"
+            val delay = if (success) 1500L else 2500L
+            binding.translationDownloadProgressBar.postDelayed({
+                binding.translationDownloadProgressContainer.visibility = View.GONE
+            }, delay)
+        }
+
+        binding.translationDownloadCancelButton.setOnClickListener {
+            downloadCancelled = true
+            downloadProgressTimer?.cancel()
+            downloadProgressTimer = null
+            val model = activeDownloadModel
+            activeDownloadModel = null
+            binding.translationDownloadCancelButton.visibility = View.GONE
+            binding.translationDownloadStatusText.text = "Cancelling…"
+            if (model != null) {
+                RemoteModelManager.getInstance().deleteDownloadedModel(model)
+                    .addOnCompleteListener {
+                        runOnUiThread {
+                            binding.translationDownloadProgressContainer.visibility = View.GONE
+                            Toast.makeText(this, "Download cancelled", Toast.LENGTH_SHORT).show()
+                            refreshTranslationSpinners()
+                        }
+                    }
+            } else {
+                binding.translationDownloadProgressContainer.visibility = View.GONE
+            }
+        }
+
+        fun refreshLangPackList() {
+            val manager = RemoteModelManager.getInstance()
+            manager.getDownloadedModels(TranslateRemoteModel::class.java)
+                .addOnSuccessListener { models ->
                     runOnUiThread {
-                        binding.translationDownloadPairButton.isEnabled = true
-                        binding.translationDownloadPairButton.text = "Download ${languageCodeToDisplayName(fromCode)} → ${languageCodeToDisplayName(toCode)}"
-                        Toast.makeText(this, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                        val downloadedCodes = models.mapNotNull { it.language }.toSet()
+                        val allLangs = TranslationLanguages.ALL
+                        val accentColor = resources.getColor(R.color.accent_bright, theme)
+                        val mutedColor = resources.getColor(R.color.text_secondary, theme)
+
+                        val listAdapter = object : android.widget.BaseAdapter() {
+                            override fun getCount() = allLangs.size
+                            override fun getItem(pos: Int) = allLangs[pos]
+                            override fun getItemId(pos: Int) = pos.toLong()
+                            override fun getView(pos: Int, convertView: View?, parent: android.view.ViewGroup): View {
+                                val row = convertView ?: layoutInflater.inflate(R.layout.item_language_pack, parent, false)
+                                val lang = allLangs[pos]
+                                val isDl = lang.mlKitCode in downloadedCodes
+                                row.findViewById<android.widget.TextView>(R.id.langStatusIcon).text = if (isDl) "✓" else ""
+                                row.findViewById<android.widget.TextView>(R.id.langName).text = lang.displayName
+                                val action = row.findViewById<android.widget.TextView>(R.id.langAction)
+                                if (isDl) {
+                                    action.text = "DELETE"
+                                    action.setTextColor(mutedColor)
+                                    val bg = android.graphics.drawable.GradientDrawable().apply {
+                                        setColor(android.graphics.Color.TRANSPARENT)
+                                        cornerRadius = 16f
+                                        setStroke(1, mutedColor)
+                                    }
+                                    action.background = bg
+                                } else {
+                                    action.text = "GET"
+                                    action.setTextColor(accentColor)
+                                    val bg = android.graphics.drawable.GradientDrawable().apply {
+                                        setColor(resources.getColor(R.color.glassy, theme))
+                                        cornerRadius = 16f
+                                        setStroke(1, accentColor)
+                                    }
+                                    action.background = bg
+                                }
+
+                                action.setOnClickListener {
+                                    if (isDl) {
+                                        AlertDialog.Builder(this@MainActivity, R.style.DarkDialogTheme)
+                                            .setTitle("Delete ${lang.displayName}?")
+                                            .setMessage("Remove this language pack. You can re-download it anytime.")
+                                            .setPositiveButton("Delete") { _, _ ->
+                                                val model = TranslateRemoteModel.Builder(lang.mlKitCode).build()
+                                                manager.deleteDownloadedModel(model)
+                                                    .addOnSuccessListener {
+                                                        runOnUiThread {
+                                                            Toast.makeText(this@MainActivity, "${lang.displayName} removed", Toast.LENGTH_SHORT).show()
+                                                            refreshTranslationSpinners()
+                                                            refreshLangPackList()
+                                                        }
+                                                    }
+                                                    .addOnFailureListener { e ->
+                                                        runOnUiThread {
+                                                            Toast.makeText(this@MainActivity, "Failed: ${e.message}", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    }
+                                            }
+                                            .setNegativeButton("Cancel", null)
+                                            .show()
+                                    } else {
+                                        val model = TranslateRemoteModel.Builder(lang.mlKitCode).build()
+                                        activeDownloadModel = model
+                                        showDownloadProgress(lang.displayName)
+                                        val conditions = com.google.mlkit.common.model.DownloadConditions.Builder().build()
+                                        manager.download(model, conditions)
+                                            .addOnSuccessListener {
+                                                runOnUiThread {
+                                                    if (!downloadCancelled) {
+                                                        finishDownloadProgress(lang.displayName, true)
+                                                        refreshTranslationSpinners()
+                                                        refreshLangPackList()
+                                                    }
+                                                }
+                                            }
+                                            .addOnFailureListener { e ->
+                                                runOnUiThread {
+                                                    if (!downloadCancelled) {
+                                                        finishDownloadProgress(lang.displayName, false)
+                                                        Toast.makeText(this@MainActivity, "Download failed: ${e.message}", Toast.LENGTH_LONG).show()
+                                                    }
+                                                }
+                                            }
+                                    }
+                                }
+
+                                return row
+                            }
+                        }
+
+                        binding.langPackListView.adapter = listAdapter
                     }
                 }
         }
 
-        // View available (downloaded) translators and remove from device
-        binding.translationViewAvailableButton.setOnClickListener {
-            RemoteModelManager.getInstance().getDownloadedModels(TranslateRemoteModel::class.java)
-                .addOnSuccessListener { models ->
-                    runOnUiThread {
-                        val modelList = models.sortedBy { it.language }
-                        if (modelList.isEmpty()) {
-                            Toast.makeText(this, "No downloaded translation models", Toast.LENGTH_SHORT).show()
-                            return@runOnUiThread
-                        }
-                        val items = modelList.map { m ->
-                            val code = m.language
-                            val name = languageCodeToDisplayName(if (code is String) code else "?")
-                            "$name  \u00D7" to m  // × for remove
-                        }
-                        val adapter = android.widget.ArrayAdapter(this, android.R.layout.simple_list_item_1, items.map { it.first })
-                        val dialog = AlertDialog.Builder(this)
-                            .setTitle("Downloaded translators (tap to remove)")
-                            .setAdapter(adapter) { d, which ->
-                                val model = items[which].second
-                                RemoteModelManager.getInstance().deleteDownloadedModel(model)
-                                    .addOnSuccessListener {
-                                        runOnUiThread {
-                                            d.dismiss()
-                                            Toast.makeText(this, "Model removed", Toast.LENGTH_SHORT).show()
-                                            refreshTranslationDownloadSection()
-                                        }
-                                    }
-                                    .addOnFailureListener { e ->
-                                        runOnUiThread { Toast.makeText(this, "Remove failed: ${e.message}", Toast.LENGTH_SHORT).show() }
-                                    }
-                            }
-                            .setNegativeButton(android.R.string.cancel, null)
-                            .create()
-                        dialog.show()
-                    }
-                }
-                .addOnFailureListener { e ->
-                    runOnUiThread { Toast.makeText(this, "Could not list models: ${e.message}", Toast.LENGTH_SHORT).show() }
-                }
+        refreshLangPackList()
+
+        binding.translationLangSettingsButton.setOnClickListener {
+            refreshLangPackList()
+            showLangSettingsPanel()
         }
 
         // Initialize params based on defaults
@@ -673,9 +889,6 @@ class MainActivity : AppCompatActivity() {
 
         setMode(true)
         cameraExecutor = Executors.newSingleThreadExecutor()
-
-        // Initialize ML Night Vision processor
-        mlNightVisionProcessor = MLNightVisionProcessor()
 
         // Initialize Object Detection processor
         objectDetectionProcessor = ObjectDetectionProcessor(this)
@@ -695,6 +908,8 @@ class MainActivity : AppCompatActivity() {
         // HD up/downsampling for IMG modes (Edge, Color)
         hdImageProcessor = HDImageProcessor(this)
 
+        orientationTracker = OrientationTracker(this)
+
         visionPipeline = VisionAnalysisPipeline(
             getState = { visionState },
             processors = frameProcessors,
@@ -708,7 +923,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun buildFrameProcessors(): Map<VisionMode, FrameProcessor> = mapOf(
         VisionMode.NIGHT_VISION to NightVisionFrameProcessor(),
-        VisionMode.ML_NIGHT_VISION to MLNightVisionFrameProcessor(mlNightVisionProcessor),
         VisionMode.EDGE_DETECTION to EdgeDetectionFrameProcessor(edgeDetectionProcessor),
         VisionMode.COLOR_ADJUSTMENT to ColorAdjustmentFrameProcessor(),
         VisionMode.HD to HDFrameProcessor(hdImageProcessor),
@@ -726,39 +940,71 @@ class MainActivity : AppCompatActivity() {
         } else {
             binding.sliderArrow.setImageResource(R.drawable.ic_arrow_down)
             binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.mlNightVisionSliderContainer.visibility = View.GONE
             binding.edgeDetectionSliderContainer.visibility = View.GONE
             binding.colorSliderContainer.visibility = View.GONE
             binding.hdSliderContainer.visibility = View.GONE
             binding.segmentationSliderContainer.visibility = View.GONE
             binding.depthFieldSliderContainer.visibility = View.GONE
             binding.translationOptionsContainer.visibility = View.GONE
+            binding.langSettingsPanel.visibility = View.GONE
         }
     }
 
     private fun setVisionMode(mode: VisionMode) {
+        val prev = visionState.mode
+        if (prev == VisionMode.SPHERE && mode != VisionMode.SPHERE) {
+            sphereController?.resetSession()
+            sphereController = null
+            orientationTracker.stop()
+            binding.sphereCaptureOverlay.visibility = View.GONE
+            binding.sphereViewerOverlay.visibility = View.GONE
+            binding.sphereViewerView.cleanup()
+        }
+        if (prev == VisionMode.NIGHT_VISION && mode != VisionMode.NIGHT_VISION) {
+            FrameAccumulatorNative.clear()
+        }
+        if (prev == VisionMode.HD && mode != VisionMode.HD) {
+            FrameAccumulatorNative.clear()
+            (frameProcessors[VisionMode.HD] as? HDFrameProcessor)?.clearCache()
+        }
         visionState.mode = mode
         updateVisionModeUI()
     }
 
+    private fun setMainButtonActive(underline: View, active: Boolean) {
+        underline.setBackgroundColor(if (active) android.graphics.Color.WHITE else android.graphics.Color.TRANSPARENT)
+    }
+
+    private fun setSubButtonActive(btn: com.google.android.material.button.MaterialButton, active: Boolean) {
+        btn.setTextColor(getColor(if (active) android.R.color.white else R.color.text_secondary))
+    }
+
     private fun updateVisionModeUI() {
         val m = visionState.mode
-        // Reset all button strokes
-        binding.nightVisionButton.setStrokeColorResource(android.R.color.white)
-        binding.imgButton.setStrokeColorResource(android.R.color.white)
-        binding.robButton.setStrokeColorResource(android.R.color.white)
-        binding.nightVisionButton.strokeWidth = 1
-        binding.imgButton.strokeWidth = 1
-        binding.robButton.strokeWidth = 1
+        // Reset all main button underlines
+        setMainButtonActive(binding.nvUnderline, false)
+        setMainButtonActive(binding.imgUnderline, false)
+        setMainButtonActive(binding.robUnderline, false)
+        setMainButtonActive(binding.txtUnderline, false)
+        setMainButtonActive(binding.sphereUnderline, false)
+        // Reset all sub-mode buttons to inactive
+        setSubButtonActive(binding.imgEDButton, false)
+        setSubButtonActive(binding.imgCOLButton, false)
+        setSubButtonActive(binding.imgHDButton, false)
+        setSubButtonActive(binding.robOFButton, false)
+        setSubButtonActive(binding.robSEGButton, false)
+        setSubButtonActive(binding.robDFButton, false)
         // Hide all sliders and overlays
         binding.nightVisionSliderContainer.visibility = View.GONE
-        binding.mlNightVisionSliderContainer.visibility = View.GONE
         binding.edgeDetectionSliderContainer.visibility = View.GONE
         binding.colorSliderContainer.visibility = View.GONE
         binding.hdSliderContainer.visibility = View.GONE
         binding.segmentationSliderContainer.visibility = View.GONE
         binding.depthFieldSliderContainer.visibility = View.GONE
+        binding.opticalFlowSliderContainer.visibility = View.GONE
         binding.translationOptionsContainer.visibility = View.GONE
+        binding.langSettingsPanel.visibility = View.GONE
+        binding.infoButton.visibility = View.VISIBLE
         objectDetectionOverlay.visibility = View.GONE
         nightVisionImageView.visibility = View.GONE
         edgeDetectionImageView.visibility = View.GONE
@@ -768,7 +1014,6 @@ class MainActivity : AppCompatActivity() {
         segmentationImageView.visibility = View.GONE
         depthFieldImageView.visibility = View.GONE
         hdImageView.visibility = View.GONE
-        binding.nightVisionOverlayRow.visibility = View.GONE
         binding.imgOverlayRow.visibility = View.GONE
         binding.robOverlayRow.visibility = View.GONE
         // If this mode has sliders, auto-expand the slider panel so they are visible
@@ -780,51 +1025,58 @@ class MainActivity : AppCompatActivity() {
         when (m) {
             VisionMode.NONE -> { }
             VisionMode.NIGHT_VISION -> {
-                binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_green_light)
-                binding.nightVisionButton.strokeWidth = 3
+                setMainButtonActive(binding.nvUnderline, true)
                 nightVisionImageView.visibility = View.VISIBLE
-                showActiveSlider()
-            }
-            VisionMode.ML_NIGHT_VISION -> {
-                binding.nightVisionButton.setStrokeColorResource(android.R.color.holo_blue_light)
-                binding.nightVisionButton.strokeWidth = 3
-                nightVisionImageView.visibility = View.VISIBLE
+                binding.nightVisionSlider.progress = (visionState.params.nightVisionIntensity * 100).toInt().coerceIn(0, 100)
+                binding.nightVisionIntensityValueText.text = "${(visionState.params.nightVisionIntensity * 100).toInt()}%"
+                val expFrames = visionState.params.nightVisionExposureFrames
+                binding.nightVisionExposureSlider.progress = (expFrames - 1).coerceIn(0, 9)
+                binding.nightVisionExposureValueText.text = "$expFrames"
                 showActiveSlider()
             }
             VisionMode.EDGE_DETECTION -> {
-                binding.imgButton.setStrokeColorResource(android.R.color.holo_orange_light)
-                binding.imgButton.strokeWidth = 3
+                setMainButtonActive(binding.imgUnderline, true)
+                setSubButtonActive(binding.imgEDButton, true)
                 edgeDetectionImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
             VisionMode.COLOR_ADJUSTMENT -> {
-                binding.imgButton.setStrokeColorResource(android.R.color.holo_blue_light)
-                binding.imgButton.strokeWidth = 3
+                setMainButtonActive(binding.imgUnderline, true)
+                setSubButtonActive(binding.imgCOLButton, true)
                 colorAdjustmentImageView.visibility = View.VISIBLE
                 showActiveSlider()
             }
             VisionMode.HD -> {
-                binding.imgButton.setStrokeColorResource(android.R.color.holo_green_light)
-                binding.imgButton.strokeWidth = 3
+                setMainButtonActive(binding.imgUnderline, true)
+                setSubButtonActive(binding.imgHDButton, true)
                 hdImageView.visibility = View.VISIBLE
                 binding.hdSlider.progress = visionState.params.hdScaleSliderValue
                 val p = visionState.params.hdScaleSliderValue
-                binding.hdScaleValueText.text = "Scale: " + when {
+                binding.hdScaleValueText.text = when {
                     p < 50 -> String.format("%.2fx", 1f - (50 - p) * 0.0198f)
                     p > 50 -> String.format("%.1fx", 1f + (p - 50) * 0.06f)
                     else -> "1.0x"
                 }
+                binding.hdExposureSlider.progress = visionState.params.hdExposureFrames - 1
+                binding.hdExposureValueText.text = "${visionState.params.hdExposureFrames}"
                 showActiveSlider()
             }
             VisionMode.OPTICAL_FLOW -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
-                binding.robButton.strokeWidth = 3
+                setMainButtonActive(binding.robUnderline, true)
+                setSubButtonActive(binding.robOFButton, true)
                 opticalFlowImageView.visibility = View.VISIBLE
                 opticalFlowProcessor.clear()
+                binding.opticalFlowPixelationSlider.progress = (visionState.params.opticalFlowPixelation - 2).coerceIn(0, 14)
+                binding.opticalFlowPixelationValueText.text = "${visionState.params.opticalFlowPixelation}"
+                binding.opticalFlowIntensitySlider.progress = (visionState.params.opticalFlowIntensity * 100).toInt().coerceIn(0, 100)
+                binding.opticalFlowIntensityValueText.text = "${(visionState.params.opticalFlowIntensity * 100).toInt()}%"
+                binding.opticalFlowSensitivitySlider.progress = (visionState.params.opticalFlowSensitivity * 100).toInt().coerceIn(0, 100)
+                binding.opticalFlowSensitivityValueText.text = "${(visionState.params.opticalFlowSensitivity * 100).toInt()}%"
+                showActiveSlider()
             }
             VisionMode.SEGMENTATION -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_purple)
-                binding.robButton.strokeWidth = 3
+                setMainButtonActive(binding.robUnderline, true)
+                setSubButtonActive(binding.robSEGButton, true)
                 segmentationImageView.visibility = View.VISIBLE
                 binding.segmentationClustersSlider.progress = (visionState.params.segmentationNumClusters - 3).coerceIn(0, 7)
                 binding.segmentationClustersValueText.text = "${visionState.params.segmentationNumClusters}"
@@ -833,23 +1085,24 @@ class MainActivity : AppCompatActivity() {
                 showActiveSlider()
             }
             VisionMode.DEPTH_FIELD -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_blue_dark)
-                binding.robButton.strokeWidth = 3
+                setMainButtonActive(binding.robUnderline, true)
+                setSubButtonActive(binding.robDFButton, true)
                 depthFieldImageView.visibility = View.VISIBLE
                 binding.depthFieldFocusSlider.progress = (visionState.params.depthFieldFocus * 100).toInt().coerceIn(0, 100)
                 binding.depthFieldFocusValueText.text = "${(visionState.params.depthFieldFocus * 100).toInt()}%"
                 showActiveSlider()
             }
             VisionMode.OBJECT_DETECTION -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_red_light)
-                binding.robButton.strokeWidth = 3
+                setMainButtonActive(binding.robUnderline, true)
                 objectDetectionOverlay.visibility = View.VISIBLE
             }
             VisionMode.TEXT_TRANSLATION -> {
-                binding.robButton.setStrokeColorResource(android.R.color.holo_green_light)
-                binding.robButton.strokeWidth = 3
+                setMainButtonActive(binding.txtUnderline, true)
                 textTranslationImageView.visibility = View.VISIBLE
                 showActiveSlider()
+            }
+            VisionMode.SPHERE -> {
+                setMainButtonActive(binding.sphereUnderline, true)
             }
         }
         bringHudToFront()
@@ -859,10 +1112,10 @@ class MainActivity : AppCompatActivity() {
         if (!visionState.isSliderExpanded) return
         when (visionState.mode) {
             VisionMode.NIGHT_VISION -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
-            VisionMode.ML_NIGHT_VISION -> binding.mlNightVisionSliderContainer.visibility = View.VISIBLE
             VisionMode.EDGE_DETECTION -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
             VisionMode.COLOR_ADJUSTMENT -> binding.colorSliderContainer.visibility = View.VISIBLE
             VisionMode.HD -> binding.hdSliderContainer.visibility = View.VISIBLE
+            VisionMode.OPTICAL_FLOW -> binding.opticalFlowSliderContainer.visibility = View.VISIBLE
             VisionMode.SEGMENTATION -> binding.segmentationSliderContainer.visibility = View.VISIBLE
             VisionMode.DEPTH_FIELD -> binding.depthFieldSliderContainer.visibility = View.VISIBLE
             VisionMode.TEXT_TRANSLATION -> binding.translationOptionsContainer.visibility = View.VISIBLE
@@ -878,24 +1131,34 @@ class MainActivity : AppCompatActivity() {
 
     private fun toggleCategoryOverlay(category: VisionMode.Category) {
         val row = when (category) {
-            VisionMode.Category.NV -> binding.nightVisionOverlayRow
+            VisionMode.Category.NV -> return
             VisionMode.Category.IMG -> binding.imgOverlayRow
             VisionMode.Category.ROB -> binding.robOverlayRow
+            VisionMode.Category.TXT -> return
+            VisionMode.Category.SPHERE -> return
             VisionMode.Category.NONE -> return
         }
         val visible = row.visibility == View.VISIBLE
-        if (visible) row.visibility = View.GONE
+        binding.imgOverlayRow.visibility = View.GONE
+        binding.robOverlayRow.visibility = View.GONE
+        setMainButtonActive(binding.imgUnderline, false)
+        setMainButtonActive(binding.robUnderline, false)
+        if (visible) return
         else {
             row.visibility = View.VISIBLE
             Handler(Looper.getMainLooper()).postDelayed({
-                if (row.visibility == View.VISIBLE) row.visibility = View.GONE
+                if (row.visibility == View.VISIBLE) {
+                    row.visibility = View.GONE
+                    setMainButtonActive(binding.imgUnderline, false)
+                    setMainButtonActive(binding.robUnderline, false)
+                }
             }, Constants.OVERLAY_AUTO_HIDE_MS)
         }
     }
 
     private fun setMode(photo: Boolean) {
         isPhotoMode = photo
-        val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy_green))
+        val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy))
         val redBg = ColorStateList.valueOf(Color.RED)
         val whiteIcon = ColorStateList.valueOf(Color.WHITE)
         if (photo) {
@@ -935,7 +1198,7 @@ class MainActivity : AppCompatActivity() {
                     val drawable = opticalFlowImageView.drawable
                     if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
-                VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> {
+                VisionMode.NIGHT_VISION -> {
                     val drawable = nightVisionImageView.drawable
                     if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
@@ -959,6 +1222,7 @@ class MainActivity : AppCompatActivity() {
                     val drawable = hdImageView.drawable
                     if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
                 }
+                VisionMode.SPHERE -> null // Sphere mode handles its own save flow
                 else -> {
                     // No filters active: PreviewView draws camera to a Surface, not to Canvas, so draw(canvas) would be black.
                     // Caller will use ImageCapture (takeProcessedPhoto) for a real photo instead.
@@ -972,6 +1236,310 @@ class MainActivity : AppCompatActivity() {
             Log.e(TAG, "Failed to capture screen content: ${e.message}")
             e.printStackTrace()
             return null
+        }
+    }
+
+    private fun saveTranslationsToTxt() {
+        val processor = frameProcessors[VisionMode.TEXT_TRANSLATION] as? TextTranslationFrameProcessor
+        if (processor == null) {
+            Toast.makeText(this, "Translation processor not available", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val translations = processor.getTranslationSnapshot()
+        if (translations.isEmpty()) {
+            Toast.makeText(this, "No translations to save yet", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val fromLang = visionState.params.translationSourceLanguageCode ?: "?"
+        val toLang = visionState.params.translationTargetLanguageCode ?: "?"
+
+        val sb = StringBuilder()
+        sb.appendLine("PRISM AI Translation — $fromLang → $toLang")
+        sb.appendLine("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(System.currentTimeMillis())}")
+        sb.appendLine("=" .repeat(50))
+        sb.appendLine()
+        for ((i, pair) in translations.withIndex()) {
+            sb.appendLine("[${i + 1}]")
+            sb.appendLine("  Original:    ${pair.first}")
+            sb.appendLine("  Translated:  ${pair.second}")
+            sb.appendLine()
+        }
+
+        try {
+            val name = Constants.MEDIA_FILENAME_PREFIX + "TRANS_" +
+                SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".txt"
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                    put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                    put(MediaStore.Files.FileColumns.RELATIVE_PATH, Constants.GALLERY_DOCUMENT_RELATIVE_PATH)
+                }
+                val uri = contentResolver.insert(MediaStore.Files.getContentUri("external"), contentValues)
+                uri?.let { savedUri ->
+                    contentResolver.openOutputStream(savedUri)?.use { stream ->
+                        stream.write(sb.toString().toByteArray(Charsets.UTF_8))
+                    }
+                    SavedMediaTracker.addDocument(this, savedUri)
+                    Toast.makeText(this, "Translation saved: $name", Toast.LENGTH_SHORT).show()
+                    Log.d(TAG, "Translation text saved: $savedUri")
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                    android.os.Environment.DIRECTORY_DOCUMENTS), "PrismAI")
+                dir.mkdirs()
+                val file = java.io.File(dir, name)
+                file.writeText(sb.toString(), Charsets.UTF_8)
+                val uri = Uri.fromFile(file)
+                SavedMediaTracker.addDocument(this, uri)
+                sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                Toast.makeText(this, "Translation saved: $name", Toast.LENGTH_SHORT).show()
+            }
+            processor.clearTranslationCache()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save translations: ${e.message}", e)
+            Toast.makeText(this, "Failed to save translations", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun saveTranslationsToPdf() {
+        val processor = frameProcessors[VisionMode.TEXT_TRANSLATION] as? TextTranslationFrameProcessor
+        if (processor == null) {
+            Toast.makeText(this, "Translation processor not available", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val entries = processor.getFullTranslationSnapshot()
+        val frame = processor.getLatestFrame()
+        if (entries.isEmpty() || frame == null) {
+            Toast.makeText(this, "No translations or frame available", Toast.LENGTH_SHORT).show()
+            return
+        }
+
+        val fromLang = visionState.params.translationSourceLanguageCode ?: "?"
+        val toLang = visionState.params.translationTargetLanguageCode ?: "?"
+
+        Thread {
+            try {
+                val pdfDoc = android.graphics.pdf.PdfDocument()
+                val pageW = 595  // A4 width in points (72dpi)
+                val pageH = 842  // A4 height in points
+
+                val margin = 36f
+                val usableW = pageW - 2 * margin
+
+                val titlePaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.BLACK; textSize = 16f; isFakeBoldText = true; isAntiAlias = true
+                }
+                val labelPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.DKGRAY; textSize = 10f; isFakeBoldText = true; isAntiAlias = true
+                }
+                val textPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.BLACK; textSize = 10f; isAntiAlias = true
+                }
+
+                // --- Page 1: Full image with overlay ---
+                val p1Info = android.graphics.pdf.PdfDocument.PageInfo.Builder(pageW, pageH, 1).create()
+                val page1 = pdfDoc.startPage(p1Info)
+                val c1 = page1.canvas
+
+                c1.drawText("PRISM AI Translation — $fromLang → $toLang", margin, margin + 16f, titlePaint)
+                val dateStr = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(System.currentTimeMillis())
+                c1.drawText(dateStr, margin, margin + 32f, labelPaint)
+
+                val imgTop = margin + 48f
+                val scale = usableW / frame.width.toFloat()
+                val scaledH = frame.height * scale
+                val imgRect = android.graphics.RectF(margin, imgTop, margin + usableW, imgTop + scaledH.coerceAtMost(pageH - imgTop - margin))
+
+                c1.drawBitmap(frame, null, imgRect, null)
+
+                val overlayPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.WHITE; isAntiAlias = true
+                    setShadowLayer(2f, 0f, 0f, android.graphics.Color.BLACK)
+                }
+                val bgPaint = android.graphics.Paint().apply {
+                    color = android.graphics.Color.argb(160, 0, 0, 0)
+                    style = android.graphics.Paint.Style.FILL
+                }
+                for (entry in entries) {
+                    val cx = margin + (entry.bounds.exactCenterX() * scale)
+                    val cy = imgTop + (entry.bounds.exactCenterY() * scale)
+                    val targetH = entry.bounds.height() * scale
+                    val targetW = entry.bounds.width() * scale
+
+                    overlayPaint.textSize = (targetH * 0.7f).coerceIn(4f, 14f)
+                    val measuredW = overlayPaint.measureText(entry.translated)
+                    if (measuredW > targetW && measuredW > 0f) {
+                        overlayPaint.textSize *= (targetW / measuredW)
+                    }
+                    overlayPaint.textSize = overlayPaint.textSize.coerceIn(3f, 14f)
+
+                    val fm = overlayPaint.fontMetrics
+                    val tH = fm.descent - fm.ascent
+                    val tW = overlayPaint.measureText(entry.translated)
+                    val pad = 2f
+                    c1.save()
+                    c1.rotate(entry.angleDegrees, cx, cy)
+                    c1.drawRect(cx - tW / 2f - pad, cy - tH / 2f - pad, cx + tW / 2f + pad, cy + tH / 2f + pad, bgPaint)
+                    c1.drawText(entry.translated, cx - tW / 2f, cy - fm.ascent - tH / 2f, overlayPaint)
+                    c1.restore()
+                }
+                pdfDoc.finishPage(page1)
+
+                // --- Page 2+: Cropped regions with original + translated ---
+                var pageNum = 2
+                var curY = margin
+                var curPage: android.graphics.pdf.PdfDocument.Page? = null
+                var curCanvas: android.graphics.Canvas? = null
+
+                fun ensurePage(): android.graphics.Canvas {
+                    if (curPage == null || curY > pageH - margin - 60f) {
+                        curPage?.let { pdfDoc.finishPage(it) }
+                        val info = android.graphics.pdf.PdfDocument.PageInfo.Builder(pageW, pageH, pageNum++).create()
+                        curPage = pdfDoc.startPage(info)
+                        curCanvas = curPage!!.canvas
+                        curY = margin
+                    }
+                    return curCanvas!!
+                }
+
+                for ((i, entry) in entries.withIndex()) {
+                    val bl = entry.bounds.left.coerceIn(0, frame.width - 1)
+                    val bt = entry.bounds.top.coerceIn(0, frame.height - 1)
+                    val br = entry.bounds.right.coerceIn(bl + 1, frame.width)
+                    val bb = entry.bounds.bottom.coerceIn(bt + 1, frame.height)
+                    val cropped = android.graphics.Bitmap.createBitmap(frame, bl, bt, br - bl, bb - bt)
+
+                    val cropScale = (usableW * 0.8f) / cropped.width.toFloat()
+                    val cropH = cropped.height * cropScale
+                    val cropW = cropped.width * cropScale
+                    val origTextH = measureWrappedTextHeight(entry.original, usableW, textPaint)
+                    val transTextH = measureWrappedTextHeight(entry.translated, usableW, textPaint)
+                    val neededH = cropH + 14f + origTextH + 14f + transTextH + 20f
+
+                    if (curY + neededH > pageH - margin) {
+                        ensurePage()
+                    }
+                    val canvas = ensurePage()
+                    drawEntryOnPage(canvas, i, entry, cropped, cropScale, cropH, cropW, margin, usableW, curY, labelPaint, textPaint)
+                    curY += neededH + 16f
+                    cropped.recycle()
+                }
+                curPage?.let { pdfDoc.finishPage(it) }
+
+                // Write PDF to a temp file first, then copy to MediaStore
+                val tempFile = java.io.File(cacheDir, "temp_translation.pdf")
+                java.io.FileOutputStream(tempFile).use { pdfDoc.writeTo(it) }
+                pdfDoc.close()
+
+                val name = Constants.MEDIA_FILENAME_PREFIX + "PDF_" +
+                    SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".pdf"
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val cv = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                        put(MediaStore.MediaColumns.MIME_TYPE, "application/pdf")
+                        put(MediaStore.Downloads.RELATIVE_PATH, Constants.GALLERY_DOCUMENT_RELATIVE_PATH)
+                        put(MediaStore.MediaColumns.IS_PENDING, 1)
+                    }
+                    val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, cv)
+                    uri?.let { savedUri ->
+                        contentResolver.openOutputStream(savedUri)?.use { out ->
+                            tempFile.inputStream().use { it.copyTo(out) }
+                        }
+                        val done = ContentValues().apply {
+                            put(MediaStore.MediaColumns.IS_PENDING, 0)
+                        }
+                        contentResolver.update(savedUri, done, null, null)
+                        SavedMediaTracker.addPdf(this, savedUri)
+                        runOnUiThread { Toast.makeText(this, "PDF saved: $name", Toast.LENGTH_SHORT).show() }
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val dir = java.io.File(android.os.Environment.getExternalStoragePublicDirectory(
+                        android.os.Environment.DIRECTORY_DOCUMENTS), "PrismAI")
+                    dir.mkdirs()
+                    val dest = java.io.File(dir, name)
+                    tempFile.copyTo(dest, overwrite = true)
+                    val uri = Uri.fromFile(dest)
+                    SavedMediaTracker.addPdf(this, uri)
+                    sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
+                    runOnUiThread { Toast.makeText(this, "PDF saved: $name", Toast.LENGTH_SHORT).show() }
+                }
+                tempFile.delete()
+                frame.recycle()
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to save PDF: ${e.message}", e)
+                runOnUiThread { Toast.makeText(this, "Failed to save PDF", Toast.LENGTH_SHORT).show() }
+            }
+        }.start()
+    }
+
+    private fun drawEntryOnPage(
+        canvas: android.graphics.Canvas,
+        index: Int,
+        entry: TextTranslationFrameProcessor.TranslationEntry,
+        cropped: android.graphics.Bitmap,
+        cropScale: Float,
+        cropH: Float,
+        cropW: Float,
+        margin: Float,
+        usableW: Float,
+        y: Float,
+        labelPaint: android.graphics.Paint,
+        textPaint: android.graphics.Paint
+    ) {
+        val dst = android.graphics.RectF(margin, y, margin + cropW, y + cropH)
+        canvas.drawBitmap(cropped, null, dst, null)
+
+        var curY = y + cropH + 14f
+        canvas.drawText("[${index + 1}] Original:", margin, curY, labelPaint)
+        curY += 12f
+        drawWrappedText(canvas, entry.original, margin, curY, usableW, textPaint)
+        curY += measureWrappedTextHeight(entry.original, usableW, textPaint) + 10f
+
+        canvas.drawText("Translated:", margin, curY, labelPaint)
+        curY += 12f
+        drawWrappedText(canvas, entry.translated, margin, curY, usableW, textPaint)
+    }
+
+    private fun measureWrappedTextHeight(
+        text: String,
+        maxWidth: Float,
+        paint: android.graphics.Paint
+    ): Float {
+        if (maxWidth <= 0f || text.isEmpty()) return paint.fontMetrics.let { it.descent - it.ascent }
+        val lineH = paint.fontMetrics.let { it.descent - it.ascent + it.leading }
+        var lines = 0
+        var start = 0
+        while (start < text.length) {
+            val count = paint.breakText(text, start, text.length, true, maxWidth, null)
+            if (count <= 0) break
+            start += count
+            lines++
+        }
+        return (lines.coerceAtLeast(1)) * lineH
+    }
+
+    private fun drawWrappedText(
+        canvas: android.graphics.Canvas,
+        text: String,
+        x: Float,
+        startY: Float,
+        maxWidth: Float,
+        paint: android.graphics.Paint
+    ) {
+        if (maxWidth <= 0f) { canvas.drawText(text, x, startY, paint); return }
+        var y = startY
+        var start = 0
+        while (start < text.length) {
+            val count = paint.breakText(text, start, text.length, true, maxWidth, null)
+            if (count <= 0) break
+            canvas.drawText(text, start, start + count, x, y, paint)
+            start += count
+            y += paint.fontMetrics.let { it.descent - it.ascent + it.leading }
         }
     }
 
@@ -1103,7 +1671,7 @@ class MainActivity : AppCompatActivity() {
             val moviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
                 ?: cacheDir
             if (!moviesDir.exists()) moviesDir.mkdirs()
-            val tempFile = File(moviesDir, "visiontechai_rec_${System.currentTimeMillis()}.mp4")
+            val tempFile = File(moviesDir, "prismai_rec_${System.currentTimeMillis()}.mp4")
             val recorder = ProcessedVideoRecorder(
                 contentResolver = contentResolver,
                 contentValues = contentValues,
@@ -1200,6 +1768,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toggleInfoPanel() {
+        if (binding.langSettingsPanel.visibility == View.VISIBLE) {
+            hideLangSettingsPanel()
+            return
+        }
         val isVisible = binding.infoPanel.visibility == View.VISIBLE
         if (isVisible) {
             hideInfoPanel()
@@ -1211,24 +1783,38 @@ class MainActivity : AppCompatActivity() {
     private fun showInfoPanel() {
         binding.infoPanel.visibility = View.VISIBLE
         binding.infoPanel.bringToFront()
-        // Ensure all UI elements remain visible
         histogramView.visibility = View.VISIBLE
         fpsView.visibility = View.VISIBLE
         binding.controlsContainer.visibility = View.VISIBLE
-        binding.infoButton.bringToFront() // Keep info button on top
+        binding.infoButton.bringToFront()
         histogramView.bringToFront()
         fpsView.bringToFront()
         binding.controlsContainer.bringToFront()
+        binding.infoButton.text = "✕"
     }
 
     private fun hideInfoPanel() {
         binding.infoPanel.visibility = View.GONE
+        binding.infoButton.text = "ℹ"
+    }
+
+    private fun showLangSettingsPanel() {
+        binding.langSettingsPanel.visibility = View.VISIBLE
+        binding.langSettingsPanel.bringToFront()
+        binding.controlsContainer.bringToFront()
+        binding.infoButton.text = "✕"
+        binding.infoButton.bringToFront()
+    }
+
+    private fun hideLangSettingsPanel() {
+        binding.langSettingsPanel.visibility = View.GONE
+        binding.infoButton.text = "ℹ"
     }
 
     private fun openContactEmail() {
         // To: inqueapps@gmail.com; Subject only. From is the user's email (not set).
         val uri = Uri.parse("mailto:inqueapps@gmail.com").buildUpon()
-            .appendQueryParameter("subject", "VisionTechAI feedback")
+            .appendQueryParameter("subject", "PRISM AI feedback")
             .build()
         val intent = Intent(Intent.ACTION_SENDTO).apply { data = uri }
         try {
@@ -1282,9 +1868,24 @@ class MainActivity : AppCompatActivity() {
                                     Log.w(TAG, "Segmentation: no bitmap from pipeline (native may have failed or lib not loaded)")
                                 }
                             }
+                            if (visionState.mode == VisionMode.SPHERE && sphereController?.state == SphereCaptureController.State.CAPTURING) {
+                                result.rawBitmap?.let { raw ->
+                                    val ts = result.frameTimestampNanos
+                                    if (sphereCaptureNextFrame) {
+                                        sphereCaptureNextFrame = false
+                                        sphereController?.captureFrame(raw, ts)
+                                    }
+                                    sphereController?.feedContinuousFrame(raw, ts)
+                                    val coverage = SphereNative.getCoverage()
+                                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
+                                    sphereController?.getPreviewBitmap()?.let { preview ->
+                                        binding.spherePreviewImage.setImageBitmap(preview)
+                                    }
+                                }
+                            }
                             result.processedBitmap?.let { bmp ->
                                 when (visionState.mode) {
-                                    VisionMode.NIGHT_VISION, VisionMode.ML_NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
+                                    VisionMode.NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
                                     VisionMode.EDGE_DETECTION -> edgeDetectionImageView.setImageBitmap(bmp)
                                     VisionMode.OPTICAL_FLOW -> opticalFlowImageView.setImageBitmap(bmp)
                                     VisionMode.COLOR_ADJUSTMENT -> colorAdjustmentImageView.setImageBitmap(bmp)
@@ -1307,9 +1908,24 @@ class MainActivity : AppCompatActivity() {
                 }
             try {
                 cameraProvider.unbindAll()
-                cameraProvider.bindToLifecycle(
+                val camera = cameraProvider.bindToLifecycle(
                     this, cameraSelector, preview, imageCapture, videoCapture, imageAnalyzer
                 )
+                // Detect camera FOV for sphere projection via Camera2 API
+                try {
+                    val cameraManager = getSystemService(android.content.Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
+                    val cameraId = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) "0" else "1"
+                    val chars = cameraManager.getCameraCharacteristics(cameraId)
+                    val focalLengths = chars.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    val sensorSize = chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
+                    if (focalLengths != null && focalLengths.isNotEmpty() && sensorSize != null) {
+                        cameraFovH = (2.0 * Math.toDegrees(kotlin.math.atan((sensorSize.width / (2.0 * focalLengths[0])).toDouble()))).toFloat()
+                        cameraFovV = (2.0 * Math.toDegrees(kotlin.math.atan((sensorSize.height / (2.0 * focalLengths[0])).toDouble()))).toFloat()
+                        Log.i(TAG, "Camera FOV: ${cameraFovH}° x ${cameraFovV}°")
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Could not detect camera FOV, using defaults: ${e.message}")
+                }
             } catch (exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
             }
@@ -1331,7 +1947,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPermissionExplanationDialog() {
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        androidx.appcompat.app.AlertDialog.Builder(this, R.style.DarkDialogTheme)
             .setTitle("Permissions Required")
             .setMessage("This app needs camera and media permissions to function properly:\n\n" +
                     "• Camera: To capture photos and videos\n" +
@@ -1357,7 +1973,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun showPermissionRationaleDialog(permissions: Array<String>) {
-        androidx.appcompat.app.AlertDialog.Builder(this)
+        androidx.appcompat.app.AlertDialog.Builder(this, R.style.DarkDialogTheme)
             .setTitle("Permissions Needed")
             .setMessage("This app needs the following permissions to work:\n\n" +
                     "• Camera: To take photos and record videos\n" +
@@ -1425,9 +2041,171 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private fun enterSphereMode() {
+        setVisionMode(VisionMode.SPHERE)
+        orientationTracker.start()
+        sphereController = SphereCaptureController(
+            orientationTracker,
+            onCoverageUpdate = { coverage ->
+                runOnUiThread {
+                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
+                }
+            },
+            onPreviewReady = { equirect ->
+                runOnUiThread {
+                    binding.sphereCaptureOverlay.visibility = View.GONE
+                    binding.sphereViewerOverlay.visibility = View.VISIBLE
+                    binding.sphereViewerView.setLookDirection(0f, 0f, 90f)
+                }
+            },
+            onFrameWarning = { warning ->
+                runOnUiThread {
+                    when (warning) {
+                        SphereCaptureController.FrameWarning.NO_OVERLAP ->
+                            Toast.makeText(this, "No overlap — move back toward previous frames", Toast.LENGTH_SHORT).show()
+                        SphereCaptureController.FrameWarning.EXCESSIVE_SHIFT ->
+                            Toast.makeText(this, "Slow down — too much movement between frames", Toast.LENGTH_SHORT).show()
+                        SphereCaptureController.FrameWarning.ALIGNMENT_FAILED ->
+                            Toast.makeText(this, "Frame skipped — could not align with panorama", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            }
+        )
+        // cameraFovH/V are computed from the sensor's physical width/height (landscape).
+        // When the phone is in portrait, the frame bitmap is rotated 90° so its horizontal
+        // axis corresponds to the sensor's HEIGHT dimension and vice versa — swap FOV values.
+        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
+        val effectiveFovH = if (isPortrait) cameraFovV else cameraFovH
+        val effectiveFovV = if (isPortrait) cameraFovH else cameraFovV
+        Log.i(TAG, "Sphere session: portrait=$isPortrait, effectiveFOV=${effectiveFovH}° x ${effectiveFovV}°")
+        sphereController?.startSession(effectiveFovH, effectiveFovV)
+        binding.sphereCaptureOverlay.visibility = View.VISIBLE
+        binding.sphereViewerOverlay.visibility = View.GONE
+        binding.sphereCoverageText.text = "Coverage: 0%"
+        Toast.makeText(this, "Sphere mode — scan your surroundings", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun exitSphereMode() {
+        sphereController?.resetSession()
+        sphereController = null
+        orientationTracker.stop()
+        binding.sphereCaptureOverlay.visibility = View.GONE
+        binding.sphereViewerOverlay.visibility = View.GONE
+        binding.sphereViewerView.cleanup()
+        setVisionMode(VisionMode.NONE)
+    }
+
+    private fun handleSphereRecordButton() {
+        val ctrl = sphereController ?: return
+        if (ctrl.state != SphereCaptureController.State.CAPTURING) return
+
+        if (isPhotoMode) {
+            sphereCaptureNextFrame = true
+            Toast.makeText(this, "Frame added to sphere", Toast.LENGTH_SHORT).show()
+        } else {
+            if (ctrl.isContinuousCapturing) {
+                ctrl.stopContinuousCapture()
+                binding.recordButton.setImageResource(R.drawable.ic_record)
+                Toast.makeText(this, "Continuous capture stopped", Toast.LENGTH_SHORT).show()
+            } else {
+                ctrl.startContinuousCapture()
+                binding.recordButton.setImageResource(R.drawable.ic_record)
+                Toast.makeText(this, "Continuous capture started — pan slowly", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    private fun saveSphereImage() {
+        val equirect = sphereController?.getFullEquirect()
+        if (equirect == null) {
+            Toast.makeText(this, "No sphere data to save", Toast.LENGTH_SHORT).show()
+            return
+        }
+        saveSphereEquirectangular(equirect)
+    }
+
+    private fun saveSphereEquirectangular(bitmap: Bitmap) {
+        try {
+            val timestamp = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
+            val name = "PrismAI_SPHERE_$timestamp.jpg"
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
+                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
+                    put(MediaStore.Images.Media.RELATIVE_PATH, Constants.GALLERY_IMAGE_RELATIVE_PATH)
+                }
+            }
+
+            val jpegBytes = ByteArrayOutputStream()
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, jpegBytes)
+            val imageData = jpegBytes.toByteArray()
+
+            // Inject XMP 360 metadata for Google Photos and other 360 viewers
+            val xmpData = buildXmpMetadata(bitmap.width, bitmap.height)
+            val finalData = injectXmpIntoJpeg(imageData, xmpData)
+
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+            uri?.let { savedUri ->
+                contentResolver.openOutputStream(savedUri)?.use { stream ->
+                    stream.write(finalData)
+                }
+                SavedMediaTracker.addImage(this, savedUri)
+                sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, savedUri))
+                Toast.makeText(this, "360° photo saved", Toast.LENGTH_SHORT).show()
+                Log.d(TAG, "Sphere photo saved: $savedUri")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to save sphere: ${e.message}")
+            Toast.makeText(this, "Failed to save sphere photo", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun buildXmpMetadata(width: Int, height: Int): ByteArray {
+        val xmp = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
+<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:GPano="http://ns.google.com/photos/1.0/panorama/"
+    GPano:UsePanoramaViewer="True"
+    GPano:ProjectionType="equirectangular"
+    GPano:FullPanoWidthPixels="$width"
+    GPano:FullPanoHeightPixels="$height"
+    GPano:CroppedAreaLeftPixels="0"
+    GPano:CroppedAreaTopPixels="0"
+    GPano:CroppedAreaImageWidthPixels="$width"
+    GPano:CroppedAreaImageHeightPixels="$height"/>
+ </rdf:RDF>
+</x:xmpmeta>
+<?xpacket end="w"?>"""
+        return xmp.toByteArray(Charsets.UTF_8)
+    }
+
+    private fun injectXmpIntoJpeg(jpegData: ByteArray, xmpData: ByteArray): ByteArray {
+        // XMP is stored in an APP1 segment: FF E1 [length] "http://ns.adobe.com/xap/1.0/\0" + xmp
+        val namespace = "http://ns.adobe.com/xap/1.0/\u0000".toByteArray(Charsets.US_ASCII)
+        val payloadLen = namespace.size + xmpData.size
+        val segmentLen = payloadLen + 2 // +2 for the length field itself
+
+        val result = ByteArrayOutputStream(jpegData.size + segmentLen + 4)
+        // Write SOI marker (first 2 bytes of JPEG: FF D8)
+        result.write(jpegData, 0, 2)
+        // Write APP1 marker
+        result.write(0xFF)
+        result.write(0xE1)
+        result.write((segmentLen shr 8) and 0xFF)
+        result.write(segmentLen and 0xFF)
+        result.write(namespace)
+        result.write(xmpData)
+        // Write rest of JPEG
+        result.write(jpegData, 2, jpegData.size - 2)
+        return result.toByteArray()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
+        orientationTracker.stop()
+        sphereController?.release()
     }
 
     companion object {

@@ -1,5 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/glassy_green" />
-    <corners android:topLeftRadius="16dp" android:topRightRadius="16dp" />
-</shape> 
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape>
+            <solid android:color="@color/glassy" />
+            <corners android:topLeftRadius="24dp" android:topRightRadius="24dp" />
+        </shape>
+    </item>
+    <item>
+        <shape>
+            <gradient
+                android:startColor="@color/glassy_light"
+                android:endColor="@android:color/transparent"
+                android:angle="135" />
+            <corners android:topLeftRadius="24dp" android:topRightRadius="24dp" />
+        </shape>
+    </item>
+    <item>
+        <shape>
+            <stroke
+                android:width="0.5dp"
+                android:color="@color/glassy_border" />
+            <corners android:topLeftRadius="24dp" android:topRightRadius="24dp" />
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+</layer-list>

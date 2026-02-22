@@ -19,10 +19,11 @@ object Constants {
     const val ELEVATION_NIGHT_VISION = 100f
     const val ELEVATION_DUAL_CAMERA = 50f
 
-    /** Folder visible in device gallery: photos go to Pictures/VisionTechAI, videos to Movies/VisionTechAI */
-    const val GALLERY_IMAGE_RELATIVE_PATH = "Pictures/VisionTechAI"
-    const val GALLERY_VIDEO_RELATIVE_PATH = "Movies/VisionTechAI"
+    /** Folder visible in device gallery */
+    const val GALLERY_IMAGE_RELATIVE_PATH = "Pictures/PrismAI"
+    const val GALLERY_VIDEO_RELATIVE_PATH = "Movies/PrismAI"
+    const val GALLERY_DOCUMENT_RELATIVE_PATH = "Documents/PrismAI"
 
-    /** Filename prefix for all saved photos/videos so they're findable in gallery and after reinstall (DISPLAY_NAME LIKE 'VisionTechAI_%') */
-    const val MEDIA_FILENAME_PREFIX = "VisionTechAI_"
+    /** Filename prefix for all saved media so they're findable in gallery and after reinstall */
+    const val MEDIA_FILENAME_PREFIX = "PrismAI_"
 }

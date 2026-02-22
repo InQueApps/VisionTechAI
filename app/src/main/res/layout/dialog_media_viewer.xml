@@ -4,21 +4,45 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/glassy_green_panel">
+    android:background="@color/glassy_panel">
 
     <ImageView
         android:id="@+id/photoView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:scaleType="centerCrop"
+        android:scaleType="matrix"
         android:contentDescription="Photo"
         android:visibility="gone" />
 
-    <SurfaceView
-        android:id="@+id/videoSurface"
+    <TextureView
+        android:id="@+id/videoTextureView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:visibility="gone" />
+
+    <ab.inque.visiontechai.SphereViewerView
+        android:id="@+id/sphereViewer"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:visibility="gone" />
+
+    <ScrollView
+        android:id="@+id/textScrollView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:padding="24dp"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/textContentView"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textColor="@android:color/white"
+            android:textSize="14sp"
+            android:lineSpacingExtra="4dp"
+            android:fontFamily="monospace" />
+
+    </ScrollView>
 
     <LinearLayout
         android:id="@+id/videoControls"
@@ -39,15 +63,4 @@
             android:thumbTint="@android:color/white" />
     </LinearLayout>
 
-    <ImageButton
-        android:id="@+id/closeButton"
-        android:layout_width="48dp"
-        android:layout_height="48dp"
-        android:layout_gravity="top|end"
-        android:layout_margin="16dp"
-        android:background="?attr/selectableItemBackgroundBorderless"
-        android:contentDescription="Close"
-        android:padding="12dp"
-        android:src="@drawable/ic_close_white"
-        app:tint="@android:color/white" />
 </FrameLayout>

@@ -43,10 +43,9 @@ static void bicubicResampleImpl(const int32_t* in, int inW, int inH,
                 for (int jx = -1; jx <= 2; jx++) {
                     int px = clamp(cx + jx, 0, inW - 1);
                     int py = clamp(cy + jy, 0, inH - 1);
-                    double wx = cubicWeight(srcX - px);
-                    double wy = cubicWeight(srcY - py);
+                    double wx = cubicWeight(srcX - (cx + jx));
+                    double wy = cubicWeight(srcY - (cy + jy));
                     double w = wx * wy;
-                    if (w <= 0) continue;
                     int32_t p = in[py * inW + px];
                     r += ((p >> 16) & 0xff) * w;
                     g += ((p >> 8) & 0xff) * w;
@@ -55,18 +54,15 @@ static void bicubicResampleImpl(const int32_t* in, int inW, int inH,
                 }
             }
             int ri, gi, bi;
-            if (wSum <= 0) {
+            if (std::fabs(wSum) < 1e-9) {
                 int32_t p = in[cy * inW + cx];
                 ri = (p >> 16) & 0xff;
                 gi = (p >> 8) & 0xff;
                 bi = p & 0xff;
             } else {
-                ri = static_cast<int>(r / wSum);
-                gi = static_cast<int>(g / wSum);
-                bi = static_cast<int>(b / wSum);
-                ri = clamp(ri, 0, 255);
-                gi = clamp(gi, 0, 255);
-                bi = clamp(bi, 0, 255);
+                ri = clamp(static_cast<int>(r / wSum), 0, 255);
+                gi = clamp(static_cast<int>(g / wSum), 0, 255);
+                bi = clamp(static_cast<int>(b / wSum), 0, 255);
             }
             out[y * outW + x] = 0xff000000 | (ri << 16) | (gi << 8) | bi;
         }

@@ -11,6 +11,16 @@ class EdgeDetectionProcessor {
 
     fun detectEdges(bitmap: Bitmap, sensitivity: Float): Bitmap {
         try {
+            val native_ = EdgeDetectionNative.detectEdges(bitmap, sensitivity)
+            if (native_ != null) return native_
+        } catch (e: Exception) {
+            Log.w(TAG, "Native edge detection failed, using Kotlin fallback: ${e.message}")
+        }
+        return detectEdgesKotlin(bitmap, sensitivity)
+    }
+
+    private fun detectEdgesKotlin(bitmap: Bitmap, sensitivity: Float): Bitmap {
+        try {
             val width = bitmap.width
             val height = bitmap.height
             

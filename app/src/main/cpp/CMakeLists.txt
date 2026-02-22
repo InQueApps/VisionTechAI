@@ -11,6 +11,14 @@ endif()
 find_library(log-lib log)
 target_link_libraries(vision_segmenter ${log-lib})
 
+# Night vision: adaptive low-light enhancement
+add_library(vision_nightvision SHARED nightvision_jni.cpp)
+target_compile_options(vision_nightvision PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_nightvision PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_nightvision ${log-lib})
+
 # Depth postprocess (normalize + render to greyscale)
 add_library(vision_depth SHARED depth_jni.cpp)
 target_compile_options(vision_depth PRIVATE -Wall -Wextra -O2)
@@ -42,3 +50,35 @@ if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
   target_link_options(vision_resample PRIVATE "LINKER:-z,max-page-size=16384")
 endif()
 target_link_libraries(vision_resample ${log-lib})
+
+# Frame accumulator: aligned multi-frame stacking with pyramid alignment
+add_library(vision_accumulator SHARED accumulator_jni.cpp)
+target_compile_options(vision_accumulator PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_accumulator PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_accumulator ${log-lib})
+
+# Edge detection: Sobel with Gaussian blur and morphological cleanup
+add_library(vision_edge SHARED edge_jni.cpp)
+target_compile_options(vision_edge PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_edge PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_edge ${log-lib})
+
+# Optical flow: Lucas-Kanade with configurable sensitivity
+add_library(vision_opticalflow SHARED opticalflow_jni.cpp)
+target_compile_options(vision_opticalflow PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_opticalflow PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_opticalflow ${log-lib})
+
+# Sphere panorama: equirectangular stitching with quaternion projection
+add_library(vision_sphere SHARED sphere_jni.cpp)
+target_compile_options(vision_sphere PRIVATE -Wall -Wextra -O2)
+if(ANDROID_ABI STREQUAL "arm64-v8a" OR ANDROID_ABI STREQUAL "x86_64")
+  target_link_options(vision_sphere PRIVATE "LINKER:-z,max-page-size=16384")
+endif()
+target_link_libraries(vision_sphere ${log-lib} -lm)

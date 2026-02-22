@@ -57,11 +57,20 @@ class DepthEstimationProcessor(private val context: Context) {
     /** True when model returns uint8 output. */
     private var outputQuantized: Boolean = false
 
+    private val modelLoading = AtomicBoolean(false)
+
     init {
-        initModel()
+        modelLoading.set(true)
+        depthExecutor.execute {
+            try {
+                initModel()
+            } finally {
+                modelLoading.set(false)
+            }
+        }
     }
 
-    /** Placeholder shown when the model is not loaded (e.g. TFLite file missing from assets). */
+    /** Placeholder shown while the model is loading or if the TFLite file is missing. */
     fun createPlaceholderBitmap(width: Int, height: Int): Bitmap {
         val bmp = Bitmap.createBitmap(width.coerceAtLeast(1), height.coerceAtLeast(1), Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
@@ -72,7 +81,11 @@ class DepthEstimationProcessor(private val context: Context) {
             isAntiAlias = true
             textAlign = Paint.Align.CENTER
         }
-        val msg = "Depth model not loaded.\n\nAdd Midas-V2-Quantized.tflite to:\napp/src/main/assets/\n\n(See README_DEPTH_MODEL.txt in that folder)"
+        val msg = if (modelLoading.get()) {
+            "Loading depth model..."
+        } else {
+            "Depth model not loaded.\n\nAdd Midas-V2-Quantized.tflite to:\napp/src/main/assets/\n\n(See README_DEPTH_MODEL.txt in that folder)"
+        }
         val y = bmp.height / 2f
         val lines = msg.split("\n")
         var lineY = y - (lines.size - 1) * paint.textSize * 0.5f
@@ -183,7 +196,11 @@ class DepthEstimationProcessor(private val context: Context) {
     fun processDepthField(input: Bitmap, params: ProcessorParams): Bitmap? {
         if (!isInitialized || interpreter == null) {
             if (nullReturnLogCounter++ % 90 == 0) {
-                Log.w(TAG, "Depth field: model not loaded. Add Midas-V2-Quantized.tflite to app/src/main/assets/ (see DEPTH_FIELD.md)")
+                if (modelLoading.get()) {
+                    Log.i(TAG, "Depth model still loading in background...")
+                } else {
+                    Log.w(TAG, "Depth field: model not loaded. Add a MiDaS .tflite to app/src/main/assets/ or assets/midas/")
+                }
             }
             return null
         }

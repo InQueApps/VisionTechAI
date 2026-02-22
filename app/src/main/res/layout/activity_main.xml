@@ -17,21 +17,21 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- Info Button -->
+    <!-- Info Button (overlays the info panel; toggles between ℹ and ✕) -->
     <TextView
         android:id="@+id/infoButton"
-        android:layout_width="40dp"
-        android:layout_height="40dp"
-        android:layout_marginEnd="16dp"
-        android:layout_marginBottom="16dp"
+        android:layout_width="32dp"
+        android:layout_height="32dp"
+        android:layout_marginEnd="8dp"
+        android:layout_marginBottom="8dp"
         android:background="@drawable/info_button_background"
         android:contentDescription="Camera features guide"
         android:gravity="center"
         android:text="ℹ"
         android:textColor="@android:color/white"
-        android:textSize="18sp"
+        android:textSize="14sp"
         android:textStyle="bold"
-        android:elevation="8dp"
+        android:elevation="1000dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/controlsContainer" />
 
@@ -94,7 +94,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Two modes: Regular NV (histogram equalization for low light) and ML NV (AI-enhanced). Use the sliders to adjust intensity or sensitivity."
+                        android:text="Adaptive low-light enhancement with gamma correction, contrast adjustment, and color correction. Use the slider to adjust intensity."
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -122,7 +122,7 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="• ED (Edge Detection): Highlights contours and edges\n• COL (Color Adjustment): Adjust red, green, and blue channels with sliders"
+                        android:text="• ED (Edge Detection): Highlights contours and edges using Sobel filters\n• COL (Color Adjustment): Adjust red, green, and blue channels independently with sliders\n• HD (Upscale): Bicubic upsampling with adaptive sharpening — scale from 0.01x down to 4x up"
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -150,7 +150,63 @@
                     <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="• OF (Optical Flow): Motion vectors as colored arrows\n• SEG (Segmentation): AI image segmentation\n• DEPTH: AI depth map (near = bright, far = dark); use Focus slider to emphasize a depth band\n• DET: Object detection with bounding boxes\n• TXT: Text detection and translation (choose English → Spanish in the Translation dropdown to overlay Spanish at text locations)"
+                        android:text="• OF (Optical Flow): Motion vectors visualized as HSV-colored overlay on greyscale camera feed; adjust pixelation and color intensity with sliders\n• SEG (Segmentation): AI image segmentation with temporal tracking for stable colors; adjust cluster count and iterations\n• DF (Depth Field): AI depth map using MiDaS model — near objects appear bright, far objects dark; use Focus slider to emphasize a depth band\n• DET (Detection): Real-time object detection with labeled bounding boxes"
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
+                <!-- TXT Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="TXT – Text Translation"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Detects text in the camera view and translates it in real time. Supports 60+ languages — download packs on-demand via Language Settings. Select source and target languages from the dropdowns (only downloaded languages are shown). Translation works in both directions between any two downloaded packs."
+                        android:textColor="@android:color/white"
+                        android:textSize="14sp"
+                        android:lineSpacingExtra="4dp" />
+
+                </LinearLayout>
+
+                <!-- SPHERE Button Info -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginBottom="20dp"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:background="@drawable/button_info_background"
+                        android:padding="8dp"
+                        android:text="360 – Sphere Panorama"
+                        android:textColor="@android:color/white"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:layout_marginBottom="8dp" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Captures a 360-degree sphere panorama using IMU orientation data. In photo mode, tap to add frames one at a time. In video mode, hold record to continuously capture. The live equirectangular preview updates as you scan the environment. When done, view the result in an interactive pan-and-zoom viewer and save as an equirectangular JPEG recognized by 360 photo viewers."
                         android:textColor="@android:color/white"
                         android:textSize="14sp"
                         android:lineSpacingExtra="4dp" />
@@ -164,7 +220,7 @@
                     android:layout_marginTop="8dp"
                     android:layout_marginBottom="8dp"
                     android:text="Camera controls"
-                    android:textColor="@android:color/holo_green_light"
+                    android:textColor="@color/accent"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -184,7 +240,7 @@
                     android:layout_marginTop="8dp"
                     android:layout_marginBottom="8dp"
                     android:text="Tips"
-                    android:textColor="@android:color/holo_blue_light"
+                    android:textColor="@color/accent"
                     android:textSize="16sp"
                     android:textStyle="bold" />
 
@@ -214,6 +270,247 @@
 
     </LinearLayout>
 
+    <!-- Language Settings Panel (overlay similar to info panel) -->
+    <LinearLayout
+        android:id="@+id/langSettingsPanel"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:layout_margin="16dp"
+        android:background="@drawable/info_panel_background"
+        android:orientation="vertical"
+        android:padding="20dp"
+        android:visibility="gone"
+        android:elevation="999dp"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingBottom="8dp"
+            android:text="Language Settings"
+            android:textColor="@android:color/white"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <!-- From / To row (above the list) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginBottom="8dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="From:"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginEnd="4dp" />
+
+            <Spinner
+                android:id="@+id/translationFromSpinner"
+                android:layout_width="0dp"
+                android:layout_height="32dp"
+                android:layout_weight="1"
+                android:background="@drawable/button_info_background"
+                android:popupBackground="@color/primary"
+                android:padding="4dp"
+                android:layout_marginEnd="8dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="To:"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:layout_marginEnd="4dp" />
+
+            <Spinner
+                android:id="@+id/translationToSpinner"
+                android:layout_width="0dp"
+                android:layout_height="32dp"
+                android:layout_weight="1"
+                android:background="@drawable/button_info_background"
+                android:popupBackground="@color/primary"
+                android:padding="4dp" />
+
+        </LinearLayout>
+
+        <!-- Download progress (hidden by default) -->
+        <LinearLayout
+            android:id="@+id/translationDownloadProgressContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone"
+            android:layout_marginBottom="4dp">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="4dp">
+
+                <TextView
+                    android:id="@+id/translationDownloadStatusText"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Downloading…"
+                    android:textColor="@color/accent_bright"
+                    android:textSize="12sp"
+                    android:singleLine="true" />
+
+                <TextView
+                    android:id="@+id/translationDownloadCancelButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="28dp"
+                    android:gravity="center"
+                    android:paddingHorizontal="12dp"
+                    android:text="CANCEL"
+                    android:textColor="@color/text_secondary"
+                    android:textSize="11sp"
+                    android:textStyle="bold"
+                    android:background="?android:attr/selectableItemBackground" />
+
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/translationDownloadProgressBar"
+                style="@android:style/Widget.ProgressBar.Horizontal"
+                android:layout_width="match_parent"
+                android:layout_height="8dp"
+                android:max="100"
+                android:progress="0"
+                android:progressTint="@color/accent"
+                android:progressBackgroundTint="@color/glassy_border" />
+
+        </LinearLayout>
+
+        <!-- Separator -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="@color/glassy_border"
+            android:layout_marginBottom="4dp" />
+
+        <!-- Language packs list (fills remaining space) -->
+        <ListView
+            android:id="@+id/langPackListView"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="0dp"
+            android:scrollbars="vertical" />
+
+    </LinearLayout>
+
+    <!-- Sphere Capture Overlay (live equirect preview + coverage + done) -->
+    <FrameLayout
+        android:id="@+id/sphereCaptureOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        android:background="#CC000000"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ImageView
+            android:id="@+id/spherePreviewImage"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:scaleType="fitCenter"
+            android:contentDescription="Sphere equirectangular preview" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:background="#80000000">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereDoneButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="DONE"
+                android:textSize="12sp" />
+
+            <TextView
+                android:id="@+id/sphereCoverageText"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Coverage: 0%"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+
+    <!-- Sphere Viewer Overlay (interactive 360 viewer) -->
+    <FrameLayout
+        android:id="@+id/sphereViewerOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:visibility="gone"
+        android:background="@android:color/black"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
+
+        <ab.inque.visiontechai.SphereViewerView
+            android:id="@+id/sphereViewerView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="bottom"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:padding="12dp"
+            android:background="#80000000">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereSaveButton"
+                style="@style/PrismActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="SAVE" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereCloseButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:text="CLOSE"
+                app:strokeColor="@android:color/white" />
+
+        </LinearLayout>
+
+    </FrameLayout>
+
     <!-- Camera Controls Container -->
     <LinearLayout
         android:id="@+id/controlsContainer"
@@ -240,51 +537,82 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="center"
-                android:text="NV Intensity"
+                android:text="Night Vision"
                 android:textColor="@android:color/white"
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:layout_marginBottom="8dp" />
 
-            <SeekBar
-                android:id="@+id/nightVisionSlider"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:max="100"
-                android:progress="50"
-                android:progressTint="@android:color/holo_green_light"
-                android:thumbTint="@android:color/holo_green_light" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
 
-        </LinearLayout>
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Intensity:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
 
-        <!-- ML Night Vision Slider (Above Controls) -->
-        <LinearLayout
-            android:id="@+id/mlNightVisionSliderContainer"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="vertical"
-            android:background="@drawable/slider_background"
-            android:padding="12dp"
-            android:visibility="gone">
+                <SeekBar
+                    android:id="@+id/nightVisionSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="50"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:text="ML Sensitivity"
-                android:textColor="@android:color/white"
-                android:textSize="14sp"
-                android:textStyle="bold"
-                android:layout_marginBottom="8dp" />
+                <TextView
+                    android:id="@+id/nightVisionIntensityValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="50%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
 
-            <SeekBar
-                android:id="@+id/mlNightVisionSlider"
+            </LinearLayout>
+
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:max="100"
-                android:progress="70"
-                android:progressTint="@android:color/holo_blue_light"
-                android:thumbTint="@android:color/holo_blue_light" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Exposure:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/nightVisionExposureSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="9"
+                    android:progress="0"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/nightVisionExposureValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="1"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
 
         </LinearLayout>
 
@@ -314,8 +642,8 @@
                 android:layout_height="wrap_content"
                 android:max="100"
                 android:progress="50"
-                android:progressTint="@android:color/holo_orange_light"
-                android:thumbTint="@android:color/holo_orange_light" />
+                android:progressTint="@color/accent"
+                android:thumbTint="@color/accent" />
 
         </LinearLayout>
 
@@ -333,30 +661,82 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_gravity="center"
-                android:text="HD (IMG): Scale 0.01x ↔ 4x"
+                android:text="HD (IMG)"
                 android:textColor="@android:color/white"
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:layout_marginBottom="8dp" />
 
-            <SeekBar
-                android:id="@+id/hdSlider"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:max="100"
-                android:progress="50"
-                android:progressTint="@android:color/holo_purple"
-                android:thumbTint="@android:color/holo_purple" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
 
-            <TextView
-                android:id="@+id/hdScaleValueText"
-                android:layout_width="wrap_content"
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Scale:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/hdSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="50"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/hdScaleValueText"
+                    android:layout_width="42dp"
+                    android:layout_height="wrap_content"
+                    android:text="1.0x"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_gravity="center"
-                android:text="Scale: 1.0x"
-                android:textColor="@android:color/white"
-                android:textSize="13sp"
-                android:layout_marginTop="6dp" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Exposure:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/hdExposureSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="9"
+                    android:progress="0"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/hdExposureValueText"
+                    android:layout_width="42dp"
+                    android:layout_height="wrap_content"
+                    android:text="1"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
 
         </LinearLayout>
 
@@ -473,8 +853,8 @@
                     android:layout_weight="1"
                     android:max="200"
                     android:progress="100"
-                    android:progressTint="@android:color/holo_blue_dark"
-                    android:thumbTint="@android:color/holo_blue_dark" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/blueValueText"
@@ -531,8 +911,8 @@
                     android:layout_weight="1"
                     android:max="7"
                     android:progress="1"
-                    android:progressTint="@android:color/holo_purple"
-                    android:thumbTint="@android:color/holo_purple" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/segmentationClustersValueText"
@@ -566,8 +946,8 @@
                     android:layout_weight="1"
                     android:max="12"
                     android:progress="3"
-                    android:progressTint="@android:color/holo_purple"
-                    android:thumbTint="@android:color/holo_purple" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/segmentationIterationsValueText"
@@ -624,14 +1004,143 @@
                     android:layout_weight="1"
                     android:max="100"
                     android:progress="50"
-                    android:progressTint="@android:color/holo_blue_dark"
-                    android:thumbTint="@android:color/holo_blue_dark" />
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
                 <TextView
                     android:id="@+id/depthFieldFocusValueText"
                     android:layout_width="36dp"
                     android:layout_height="wrap_content"
                     android:text="50%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+        </LinearLayout>
+
+        <!-- Optical Flow Sliders (Above Controls) -->
+        <LinearLayout
+            android:id="@+id/opticalFlowSliderContainer"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/slider_background"
+            android:padding="12dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Optical Flow"
+                android:textColor="@android:color/white"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="8dp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Pixelation:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/opticalFlowPixelationSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="14"
+                    android:progress="6"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/opticalFlowPixelationValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="8"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Intensity:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/opticalFlowIntensitySlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="70"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/opticalFlowIntensityValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="70%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Sensitivity:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/opticalFlowSensitivitySlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="30"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/opticalFlowSensitivityValueText"
+                    android:layout_width="36dp"
+                    android:layout_height="wrap_content"
+                    android:text="30%"
                     android:textColor="@android:color/white"
                     android:textSize="12sp"
                     android:gravity="end" />
@@ -650,119 +1159,192 @@
             android:padding="12dp"
             android:visibility="gone">
 
-            <!-- From / To row -->
+            <!-- Language Settings + Save to TXT + Save to PDF row -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="8dp">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="From:"
-                    android:textColor="@android:color/white"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    android:layout_marginEnd="8dp" />
-
-                <Spinner
-                    android:id="@+id/translationFromSpinner"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:background="@drawable/button_info_background"
-                    android:padding="8dp"
-                    android:layout_marginEnd="8dp" />
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="To:"
-                    android:textColor="@android:color/white"
-                    android:textSize="14sp"
-                    android:textStyle="bold"
-                    android:layout_marginEnd="8dp" />
-
-                <Spinner
-                    android:id="@+id/translationToSpinner"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:minHeight="40dp"
-                    android:background="@drawable/button_info_background"
-                    android:padding="8dp" />
-
-            </LinearLayout>
-
-            <!-- Shown only when selected pair needs download -->
-            <LinearLayout
-                android:id="@+id/translationDownloadSection"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:visibility="gone"
-                android:layout_marginBottom="8dp">
+                android:layout_marginBottom="10dp">
 
                 <Button
-                    android:id="@+id/translationDownloadPairButton"
+                    android:id="@+id/translationLangSettingsButton"
+                    style="@style/PrismActionButton"
                     android:layout_width="0dp"
                     android:layout_height="36dp"
                     android:layout_weight="1"
-                    android:text="Download English → Spanish"
-                    android:textSize="12sp"
-                    android:contentDescription="Download translation model for selected pair" />
+                    android:layout_marginEnd="4dp"
+                    android:text="Lang"
+                    android:contentDescription="Open language selection and pack management" />
+
+                <Button
+                    android:id="@+id/translationSaveTxtButton"
+                    style="@style/PrismActionButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:layout_marginHorizontal="4dp"
+                    android:text="Save TXT"
+                    android:contentDescription="Save translations to text file" />
+
+                <Button
+                    android:id="@+id/translationSavePdfButton"
+                    style="@style/PrismActionButton"
+                    android:layout_width="0dp"
+                    android:layout_height="36dp"
+                    android:layout_weight="1"
+                    android:layout_marginStart="4dp"
+                    android:text="Save PDF"
+                    android:contentDescription="Save translations to PDF file" />
 
             </LinearLayout>
 
-            <Button
-                android:id="@+id/translationViewAvailableButton"
+            <!-- Text Size slider -->
+            <LinearLayout
                 android:layout_width="match_parent"
-                android:layout_height="36dp"
-                android:text="View available translators"
-                android:textSize="12sp"
-                android:contentDescription="List downloaded translation models and remove from device" />
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
 
-        </LinearLayout>
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Text size:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
 
-        <!-- Night Vision Overlay Row -->
-        <LinearLayout
-            android:id="@+id/nightVisionOverlayRow"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:padding="8dp"
-            android:background="@color/glassy_green"
-            android:visibility="gone">
+                <SeekBar
+                    android:id="@+id/translationTextScaleSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="20"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
 
-            <!-- Regular Night Vision Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/nvRegularButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginEnd="4dp"
-                android:text="Night Vision"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                <TextView
+                    android:id="@+id/translationTextScaleValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="1.0x"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
 
-            <!-- Night Vision ML Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/nvMLButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginStart="4dp"
-                android:text="Night Vision ML"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+            </LinearLayout>
+
+            <!-- Background slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Background:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/translationBgAlphaSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="100"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationBgAlphaValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="100%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Confidence filter slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Confidence:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/translationConfidenceSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="100"
+                    android:progress="0"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationConfidenceValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="0%"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
+
+            <!-- Min length filter slider -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="8dp">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Min Length:"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:minWidth="70dp" />
+
+                <SeekBar
+                    android:id="@+id/translationMinLengthSlider"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:max="50"
+                    android:progress="0"
+                    android:progressTint="@color/accent"
+                    android:thumbTint="@color/accent" />
+
+                <TextView
+                    android:id="@+id/translationMinLengthValueText"
+                    android:layout_width="40dp"
+                    android:layout_height="wrap_content"
+                    android:text="0"
+                    android:textColor="@android:color/white"
+                    android:textSize="12sp"
+                    android:gravity="end" />
+
+            </LinearLayout>
 
         </LinearLayout>
 
@@ -772,48 +1354,42 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="8dp"
-            android:background="@color/glassy_green"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="2dp"
             android:visibility="gone">
 
-            <!-- Edge Detection Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgEDButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
+                android:layout_marginEnd="3dp"
                 android:text="ED"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- Color Adjustment Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgCOLButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginHorizontal="3dp"
                 android:text="COL"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- HD Button (scale only, separate from ED/COL) -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/imgHDButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginStart="3dp"
                 android:text="HD"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
         </LinearLayout>
 
@@ -823,62 +1399,42 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:padding="8dp"
-            android:background="@color/glassy_green"
+            android:paddingHorizontal="8dp"
+            android:paddingVertical="2dp"
             android:visibility="gone">
 
-            <!-- Optical Flow Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/robOFButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
+                android:layout_marginEnd="3dp"
                 android:text="OF"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- Segmentation Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/robSEGButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginHorizontal="3dp"
                 android:text="SEG"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
-            <!-- Depth Field Button -->
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/robDFButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+                style="@style/Widget.Material3.Button.TextButton"
                 android:layout_width="0dp"
                 android:layout_height="36dp"
                 android:layout_weight="1"
-                android:layout_marginStart="4dp"
+                android:layout_marginStart="3dp"
                 android:text="DF"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
-
-            <!-- Text Translation Button -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/robTxtButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="0dp"
-                android:layout_height="36dp"
-                android:layout_weight="1"
-                android:layout_marginStart="4dp"
-                android:contentDescription="TXT - Text detection and translation"
-                android:text="TXT"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:textColor="@color/text_secondary"
+                android:textSize="12sp" />
 
         </LinearLayout>
 
@@ -890,62 +1446,120 @@
             android:orientation="horizontal"
             android:paddingBottom="16dp">
 
-            <!-- Night Vision Button (NV) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/nightVisionButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginEnd="4dp"
-                android:contentDescription="NV - Night Vision modes"
-                android:text="NV"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginEnd="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/nightVisionButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="NV - Night Vision modes"
+                    android:text="NV" />
+                <View
+                    android:id="@+id/nvUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- IMG Button (Image processing) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/imgButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
-                android:contentDescription="IMG - Image effects (Edges, Color)"
-                android:text="IMG"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginHorizontal="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/imgButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="IMG - Image effects (Edges, Color)"
+                    android:text="IMG" />
+                <View
+                    android:id="@+id/imgUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- ROB Button (Robot vision) -->
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/robButton"
-                style="@style/Widget.Material3.Button.OutlinedButton"
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="36dp"
+                android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:layout_marginStart="2dp"
-                android:layout_marginEnd="2dp"
-                android:contentDescription="ROB - Optical Flow, Segmentation"
-                android:text="ROB"
-                android:textSize="12sp"
-                android:textColor="@android:color/white"
-                app:strokeColor="@android:color/white" />
+                android:layout_marginHorizontal="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/robButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="ROB - Optical Flow, Segmentation, Depth, Detection"
+                    android:text="ROB" />
+                <View
+                    android:id="@+id/robUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <!-- Hide/Show Button - Pushed to the right -->
-            <View
+            <LinearLayout
                 android:layout_width="0dp"
-                android:layout_height="1dp"
-                android:layout_weight="1" />
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginHorizontal="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/txtButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="TXT - Text detection and translation"
+                    android:text="TXT" />
+                <View
+                    android:id="@+id/txtUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
-            <ImageView
-                android:id="@+id/sliderArrow"
-                android:layout_width="24dp"
-                android:layout_height="24dp"
-                android:src="@drawable/ic_arrow_up"
-                app:tint="@android:color/white" />
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:layout_marginStart="3dp"
+                android:orientation="vertical"
+                android:gravity="center_horizontal">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/sphereButton"
+                    style="@style/PrismModeButton"
+                    android:layout_width="match_parent"
+                    android:layout_height="36dp"
+                    android:contentDescription="SPHERE - 360 degree panorama capture"
+                    android:text="360" />
+                <View
+                    android:id="@+id/sphereUnderline"
+                    android:layout_width="match_parent"
+                    android:layout_height="3dp"
+                    android:layout_marginHorizontal="10dp"
+                    android:layout_marginTop="2dp"
+                    android:background="@android:color/transparent" />
+            </LinearLayout>
 
         </LinearLayout>
 
@@ -963,7 +1577,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="Switch between front and rear camera"
                 android:src="@drawable/ic_switch_camera"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
             <!-- Saved media / Gallery Button -->
@@ -976,7 +1590,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="View saved photos and videos"
                 android:src="@drawable/ic_gallery"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
             <!-- Record Button -->
@@ -1000,7 +1614,7 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="Photo mode"
                 android:src="@drawable/ic_photo"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
                 app:tint="@android:color/white" />
 
             <!-- Video Button -->
@@ -1013,7 +1627,19 @@
                 android:layout_centerVertical="true"
                 android:contentDescription="Video mode"
                 android:src="@drawable/ic_video"
-                app:backgroundTint="@color/glassy_green"
+                app:backgroundTint="@color/glassy"
+                app:tint="@android:color/white" />
+
+            <!-- Slider expand/collapse arrow -->
+            <ImageView
+                android:id="@+id/sliderArrow"
+                android:layout_width="28dp"
+                android:layout_height="28dp"
+                android:layout_toEndOf="@id/videoButton"
+                android:layout_marginStart="12dp"
+                android:layout_centerVertical="true"
+                android:src="@drawable/ic_arrow_up"
+                android:contentDescription="Expand or collapse sliders"
                 app:tint="@android:color/white" />
 
         </RelativeLayout>

@@ -1,0 +1,16 @@
+model_files:
+  midas.tflite:
+    inputs:
+      image:
+        shape: [1, 256, 256, 3]
+        dtype: uint8
+        quantization_parameters:
+          scale: 0.00487531116232276
+          zero_point: 24
+    outputs:
+      depth_estimates:
+        shape: [1, 256, 256, 1]
+        dtype: uint8
+        quantization_parameters:
+          scale: 6.514298915863037
+          zero_point: 0
