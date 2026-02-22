@@ -3,13 +3,21 @@ package ab.inque.visiontechai
 import android.content.Context
 import android.graphics.*
 import android.util.Log
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
-/** Night vision: native adaptive low-light enhancement with Kotlin fallback. */
+/** Night vision: native adaptive low-light enhancement with aligned multi-frame exposure stacking. */
 class NightVisionFrameProcessor : FrameProcessor {
     override fun process(input: Bitmap, params: ProcessorParams): Bitmap? {
         return try {
-            NightVisionNative.enhance(input, params.nightVisionIntensity)
-                ?: ImageUtils.histogramEqualizationRGB(input, params.nightVisionIntensity)
+            val frames = params.nightVisionExposureFrames
+            val source = if (frames > 1) {
+                FrameAccumulatorNative.accumulate(input, frames, align = true) ?: input
+            } else {
+                input
+            }
+            NightVisionNative.enhance(source, params.nightVisionIntensity)
+                ?: ImageUtils.histogramEqualizationRGB(source, params.nightVisionIntensity)
         } catch (e: Exception) {
             Log.e("NightVisionFP", "Failed: ${e.message}")
             null
@@ -65,15 +73,61 @@ class SegmentationFrameProcessor(private val processor: ImageSegmentationProcess
     }
 }
 
-/** FrameProcessor for HD scale (upsample/downsample only). Used only when HD mode is active. */
+/**
+ * HD: accumulation runs every frame (synchronous, fast C++), while the
+ * expensive bicubic upscale runs asynchronously on a dedicated thread.
+ *
+ * When the upscaler is idle it grabs the latest accumulated snapshot and
+ * starts processing.  Until the first upscale completes, process() returns
+ * the raw accumulated bitmap so the feed is never blank.
+ */
 class HDFrameProcessor(private val hdImageProcessor: HDImageProcessor) : FrameProcessor {
+
+    private val upscaleExecutor = Executors.newSingleThreadExecutor()
+    private val upscaleBusy = AtomicBoolean(false)
+    @Volatile private var latestUpscaled: Bitmap? = null
+
     override fun process(input: Bitmap, params: ProcessorParams): Bitmap? {
         return try {
-            hdImageProcessor.processImage(input, params.hdScaleSliderValue)
+            val frames = params.hdExposureFrames
+            val accumulated = if (frames > 1) {
+                FrameAccumulatorNative.accumulate(input, frames, align = true) ?: input
+            } else {
+                input
+            }
+
+            val scaleValue = params.hdScaleSliderValue
+            if (scaleValue == 50) {
+                latestUpscaled = null
+                return accumulated
+            }
+
+            if (upscaleBusy.compareAndSet(false, true)) {
+                val snapshot = accumulated.copy(
+                    accumulated.config ?: Bitmap.Config.ARGB_8888, false
+                )
+                upscaleExecutor.submit {
+                    try {
+                        val result = hdImageProcessor.processImage(snapshot, scaleValue)
+                        latestUpscaled = result
+                        if (result !== snapshot) snapshot.recycle()
+                    } catch (e: Exception) {
+                        Log.e("HDFrameProcessor", "Async upscale failed: ${e.message}")
+                    } finally {
+                        upscaleBusy.set(false)
+                    }
+                }
+            }
+
+            latestUpscaled ?: accumulated
         } catch (e: Exception) {
             Log.e("HDFrameProcessor", "Failed: ${e.message}")
             null
         }
+    }
+
+    fun clearCache() {
+        latestUpscaled = null
     }
 }
 

@@ -21,6 +21,21 @@ class OpticalFlowProcessor(private val context: Context) {
 
     fun processOpticalFlow(currentFrame: Bitmap, params: ProcessorParams): Bitmap {
         try {
+            val native_ = OpticalFlowNative.processOpticalFlow(
+                currentFrame,
+                params.opticalFlowPixelation,
+                params.opticalFlowIntensity,
+                params.opticalFlowSensitivity
+            )
+            if (native_ != null) return native_
+        } catch (e: Exception) {
+            Log.w(TAG, "Native optical flow failed, using Kotlin fallback: ${e.message}")
+        }
+        return processOpticalFlowKotlin(currentFrame, params)
+    }
+
+    private fun processOpticalFlowKotlin(currentFrame: Bitmap, params: ProcessorParams): Bitmap {
+        try {
             val w = currentFrame.width
             val h = currentFrame.height
             val downscale = params.opticalFlowPixelation.coerceIn(2, 16)
@@ -265,6 +280,7 @@ class OpticalFlowProcessor(private val context: Context) {
         previousGray = null
         previousSmallW = 0
         previousSmallH = 0
+        try { OpticalFlowNative.clear() } catch (_: Exception) {}
         Log.d(TAG, "Optical flow processor cleared")
     }
 

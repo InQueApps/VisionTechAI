@@ -447,7 +447,24 @@ class MainActivity : AppCompatActivity() {
         // Set up sliders to update visionState.params
         binding.nightVisionSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                if (fromUser) visionState.params = visionState.params.copy(nightVisionIntensity = progress / 100f)
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(nightVisionIntensity = progress / 100f)
+                    binding.nightVisionIntensityValueText.text = "$progress%"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        binding.nightVisionExposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val frames = progress + 1  // 0-9 → 1-10
+                    visionState.params = visionState.params.copy(nightVisionExposureFrames = frames)
+                    binding.nightVisionExposureValueText.text = "$frames"
+                    if (frames <= 1) {
+                        FrameAccumulatorNative.clear()
+                    }
+                }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: SeekBar?) {}
@@ -465,11 +482,23 @@ class MainActivity : AppCompatActivity() {
                 if (fromUser) {
                     visionState.params = visionState.params.copy(hdScaleSliderValue = progress)
                     val scaleStr = when {
-                        progress < 50 -> String.format("%.2fx", 1f - (50 - progress) * 0.0198f) // ~0.01 at 0
-                        progress > 50 -> String.format("%.1fx", 1f + (progress - 50) * 0.06f)   // 4x at 100
+                        progress < 50 -> String.format("%.2fx", 1f - (50 - progress) * 0.0198f)
+                        progress > 50 -> String.format("%.1fx", 1f + (progress - 50) * 0.06f)
                         else -> "1.0x"
                     }
-                    binding.hdScaleValueText.text = "Scale: $scaleStr"
+                    binding.hdScaleValueText.text = scaleStr
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        binding.hdExposureSlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    val frames = progress + 1
+                    visionState.params = visionState.params.copy(hdExposureFrames = frames)
+                    binding.hdExposureValueText.text = "$frames"
+                    if (frames <= 1) FrameAccumulatorNative.clear()
                 }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -557,6 +586,16 @@ class MainActivity : AppCompatActivity() {
                 if (fromUser) {
                     visionState.params = visionState.params.copy(opticalFlowIntensity = progress / 100f)
                     binding.opticalFlowIntensityValueText.text = "$progress%"
+                }
+            }
+            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+        })
+        binding.opticalFlowSensitivitySlider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) {
+                    visionState.params = visionState.params.copy(opticalFlowSensitivity = progress / 100f)
+                    binding.opticalFlowSensitivityValueText.text = "$progress%"
                 }
             }
             override fun onStartTrackingTouch(seekBar: SeekBar?) {}
@@ -921,6 +960,13 @@ class MainActivity : AppCompatActivity() {
             binding.sphereViewerOverlay.visibility = View.GONE
             binding.sphereViewerView.cleanup()
         }
+        if (prev == VisionMode.NIGHT_VISION && mode != VisionMode.NIGHT_VISION) {
+            FrameAccumulatorNative.clear()
+        }
+        if (prev == VisionMode.HD && mode != VisionMode.HD) {
+            FrameAccumulatorNative.clear()
+            (frameProcessors[VisionMode.HD] as? HDFrameProcessor)?.clearCache()
+        }
         visionState.mode = mode
         updateVisionModeUI()
     }
@@ -981,6 +1027,11 @@ class MainActivity : AppCompatActivity() {
             VisionMode.NIGHT_VISION -> {
                 setMainButtonActive(binding.nvUnderline, true)
                 nightVisionImageView.visibility = View.VISIBLE
+                binding.nightVisionSlider.progress = (visionState.params.nightVisionIntensity * 100).toInt().coerceIn(0, 100)
+                binding.nightVisionIntensityValueText.text = "${(visionState.params.nightVisionIntensity * 100).toInt()}%"
+                val expFrames = visionState.params.nightVisionExposureFrames
+                binding.nightVisionExposureSlider.progress = (expFrames - 1).coerceIn(0, 9)
+                binding.nightVisionExposureValueText.text = "$expFrames"
                 showActiveSlider()
             }
             VisionMode.EDGE_DETECTION -> {
@@ -1001,11 +1052,13 @@ class MainActivity : AppCompatActivity() {
                 hdImageView.visibility = View.VISIBLE
                 binding.hdSlider.progress = visionState.params.hdScaleSliderValue
                 val p = visionState.params.hdScaleSliderValue
-                binding.hdScaleValueText.text = "Scale: " + when {
+                binding.hdScaleValueText.text = when {
                     p < 50 -> String.format("%.2fx", 1f - (50 - p) * 0.0198f)
                     p > 50 -> String.format("%.1fx", 1f + (p - 50) * 0.06f)
                     else -> "1.0x"
                 }
+                binding.hdExposureSlider.progress = visionState.params.hdExposureFrames - 1
+                binding.hdExposureValueText.text = "${visionState.params.hdExposureFrames}"
                 showActiveSlider()
             }
             VisionMode.OPTICAL_FLOW -> {
@@ -1017,6 +1070,8 @@ class MainActivity : AppCompatActivity() {
                 binding.opticalFlowPixelationValueText.text = "${visionState.params.opticalFlowPixelation}"
                 binding.opticalFlowIntensitySlider.progress = (visionState.params.opticalFlowIntensity * 100).toInt().coerceIn(0, 100)
                 binding.opticalFlowIntensityValueText.text = "${(visionState.params.opticalFlowIntensity * 100).toInt()}%"
+                binding.opticalFlowSensitivitySlider.progress = (visionState.params.opticalFlowSensitivity * 100).toInt().coerceIn(0, 100)
+                binding.opticalFlowSensitivityValueText.text = "${(visionState.params.opticalFlowSensitivity * 100).toInt()}%"
                 showActiveSlider()
             }
             VisionMode.SEGMENTATION -> {
@@ -1815,11 +1870,12 @@ class MainActivity : AppCompatActivity() {
                             }
                             if (visionState.mode == VisionMode.SPHERE && sphereController?.state == SphereCaptureController.State.CAPTURING) {
                                 result.rawBitmap?.let { raw ->
+                                    val ts = result.frameTimestampNanos
                                     if (sphereCaptureNextFrame) {
                                         sphereCaptureNextFrame = false
-                                        sphereController?.captureFrame(raw)
+                                        sphereController?.captureFrame(raw, ts)
                                     }
-                                    sphereController?.feedContinuousFrame(raw)
+                                    sphereController?.feedContinuousFrame(raw, ts)
                                     val coverage = SphereNative.getCoverage()
                                     binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
                                     sphereController?.getPreviewBitmap()?.let { preview ->
@@ -2009,6 +2065,8 @@ class MainActivity : AppCompatActivity() {
                             Toast.makeText(this, "No overlap — move back toward previous frames", Toast.LENGTH_SHORT).show()
                         SphereCaptureController.FrameWarning.EXCESSIVE_SHIFT ->
                             Toast.makeText(this, "Slow down — too much movement between frames", Toast.LENGTH_SHORT).show()
+                        SphereCaptureController.FrameWarning.ALIGNMENT_FAILED ->
+                            Toast.makeText(this, "Frame skipped — could not align with panorama", Toast.LENGTH_SHORT).show()
                     }
                 }
             }

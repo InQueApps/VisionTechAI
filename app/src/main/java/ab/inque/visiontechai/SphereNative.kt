@@ -7,13 +7,14 @@ data class FrameAlignmentInfo(
     val frameIndex: Int,
     val overlapCount: Int,
     val totalSamples: Int,
-    val alignmentOffsetPx: Float,
-    val residualSSD: Float
+    val alignmentOffsetDeg: Float,
+    val residualSSD: Float,
+    val wasRejected: Boolean
 ) {
     val overlapRatio: Float get() = if (totalSamples > 0) overlapCount.toFloat() / totalSamples else 0f
     val isFirstFrame: Boolean get() = frameIndex <= 1
     val hasLowOverlap: Boolean get() = !isFirstFrame && overlapRatio < 0.05f
-    val hasExcessiveShift: Boolean get() = !isFirstFrame && alignmentOffsetPx > 60f
+    val hasExcessiveShift: Boolean get() = !isFirstFrame && alignmentOffsetDeg > 5f
 }
 
 /**
@@ -86,13 +87,14 @@ object SphereNative {
     fun getLastFrameInfo(): FrameAlignmentInfo? {
         if (!loaded) return null
         val data = nativeGetLastFrameInfo() ?: return null
-        if (data.size < 5) return null
+        if (data.size < 6) return null
         return FrameAlignmentInfo(
             frameIndex = data[0].toInt(),
             overlapCount = data[1].toInt(),
             totalSamples = data[2].toInt(),
-            alignmentOffsetPx = data[3],
-            residualSSD = data[4]
+            alignmentOffsetDeg = data[3],
+            residualSSD = data[4],
+            wasRejected = data[5].toInt() != 0
         )
     }
 

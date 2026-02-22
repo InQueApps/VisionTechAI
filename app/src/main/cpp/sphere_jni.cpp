@@ -5,12 +5,19 @@
  * quaternion-based orientation from the device IMU. Supports rectilinear
  * (perspective) extraction for interactive viewing.
  *
+ * v3 — Performance + quality:
+ *   - Time-budgeted alignment: alignment stages are skipped if the budget
+ *     (TIME_BUDGET_US) is exceeded, guaranteeing bounded per-frame latency.
+ *   - Pre-computed ray directions in overlap samples, eliminating redundant
+ *     sqrt / divide / multiply in the SSD evaluator inner loop.
+ *   - Squared-distance mismatch check (no per-pixel sqrt in splatting).
+ *   - Gain recomputation after alignment using the corrected quaternion.
+ *   - Weight capping to prevent ghost accumulation in high-overlap regions.
+ *
  * Coordinate convention:
  *   Earth frame (from Android rotation vector sensor): X=East, Y=North, Z=Up
  *   Equirect mapping: lon = atan2(east, north), lat = asin(up)
  *   Camera looks along -Z in device space (out the back of the phone)
- *
- * No external dependencies beyond standard math and JNI.
  */
 
 #include <jni.h>
@@ -20,12 +27,32 @@
 #include <algorithm>
 #include <vector>
 #include <mutex>
+#include <chrono>
 
 #define LOG_TAG "SphereJni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 
 static constexpr double PI = 3.14159265358979323846;
+static constexpr double DEG2RAD = PI / 180.0;
+static constexpr double RAD2DEG = 180.0 / PI;
+
+// Time budget for the entire addFrame operation (microseconds).
+// Alignment refinement is skipped once this budget is exceeded.
+static constexpr int64_t TIME_BUDGET_US = 150000; // 150ms
+
+// Residual SSD above this threshold (after alignment) means poor match
+static constexpr double REJECT_SSD_THRESH = 8000.0;
+
+// Per-pixel mismatch rejection during splatting (squared per-channel thresholds)
+static constexpr float MISMATCH_SOFT_SQ  = 35.0f * 35.0f;  // ~1225
+static constexpr float MISMATCH_HARD_SQ  = 60.0f * 60.0f;  // ~3600
+
+// Maximum accumulated weight per equirect pixel.  Prevents early frames
+// from dominating in high-overlap regions, reducing ghosting.
+static constexpr float MAX_ACCUM_WEIGHT = 3.5f;
+
+using SteadyClock = std::chrono::steady_clock;
 
 // ── Quaternion helpers ──────────────────────────────────────────────────
 
@@ -55,6 +82,11 @@ static inline Quat quatMul(const Quat& a, const Quat& b) {
     };
 }
 
+static inline int64_t elapsedUs(SteadyClock::time_point start) {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+        SteadyClock::now() - start).count();
+}
+
 // ── Equirectangular buffer ──────────────────────────────────────────────
 
 static int eqW = 0, eqH = 0;
@@ -62,12 +94,13 @@ static float storedFovH = 0, storedFovV = 0;
 static std::vector<float> eqR, eqG, eqB, eqWeight;
 static std::mutex sphereMutex;
 
-// Per-frame alignment metrics (readable via nativeGetLastFrameInfo)
+// Per-frame alignment metrics
 static int sFrameIndex = 0;
 static int sLastOverlapCount = 0;
 static int sLastTotalSamples = 0;
 static float sLastAlignOffset = 0.f;
 static float sLastResidualSSD = 0.f;
+static int sLastRejected = 0;
 
 static inline int clampI(int v, int lo, int hi) {
     return v < lo ? lo : (v > hi ? hi : v);
@@ -100,6 +133,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeInit(
     eqB.assign(sz, 0.f);
     eqWeight.assign(sz, 0.f);
     sFrameIndex = 0;
+    sLastRejected = 0;
     LOGI("Sphere init: %dx%d  fov=%.1f x %.1f", eqW, eqH, fovH, fovV);
     return JNI_TRUE;
 }
@@ -113,6 +147,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     std::lock_guard<std::mutex> lock(sphereMutex);
     if (eqW == 0 || eqH == 0) return JNI_FALSE;
 
+    auto t0 = SteadyClock::now();
+
     jint* pixels = env->GetIntArrayElements(jPixels, nullptr);
     if (!pixels) return JNI_FALSE;
 
@@ -121,18 +157,17 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     if (qlen < 1e-9) { env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT); return JNI_FALSE; }
     q.x /= qlen; q.y /= qlen; q.z /= qlen; q.w /= qlen;
 
-    double halfFovH = storedFovH * 0.5 * PI / 180.0;
-    double halfFovV = storedFovV * 0.5 * PI / 180.0;
+    double halfFovH = storedFovH * 0.5 * DEG2RAD;
+    double halfFovV = storedFovV * 0.5 * DEG2RAD;
     double tanH = std::tan(halfFovH);
     double tanV = std::tan(halfFovV);
 
-    // ── Phase 1: sparse sampling for gain compensation + overlap collection ──
-    // Project a sparse grid of frame pixels to equirect coordinates. For pixels
-    // that land on already-filled equirect regions, record the mapping for both
-    // gain estimation and translational alignment refinement.
+    // ── Phase 1: sparse sampling for gain + overlap ──
+    // Pre-compute ray direction per sample so the alignment inner loop
+    // avoids redundant sqrt / divide per evaluation.
     struct OverlapSample {
-        double eqX, eqY;
         float newR, newG, newB;
+        double rx, ry, rz;
     };
 
     constexpr int SAMPLE_STEP = 8;
@@ -153,10 +188,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             quatRotate(q, rx, ry, rz, wx, wy, wz);
             double lon = std::atan2(wx, wy);
             double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
-            double eqXf = (lon / PI + 1.0) * 0.5 * eqW;
-            double eqYf = (0.5 - lat / PI) * eqH;
-            int eqX = ((int)eqXf + eqW) % eqW;
-            int eqY = clampI((int)eqYf, 0, eqH - 1);
+            int eqX = ((int)((lon / PI + 1.0) * 0.5 * eqW) + eqW) % eqW;
+            int eqY = clampI((int)((0.5 - lat / PI) * eqH), 0, eqH - 1);
             int idx = eqY * eqW + eqX;
 
             int32_t p = pixels[fy * frameW + fx];
@@ -172,7 +205,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
                 sumNewR += nr;
                 sumNewG += ng;
                 sumNewB += nb;
-                overlap.push_back({eqXf, eqYf, nr, ng, nb});
+                overlap.push_back({nr, ng, nb, rx, ry, rz});
             }
         }
     }
@@ -184,187 +217,344 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         gainB = std::max(0.5, std::min(2.0, sumExB / sumNewB));
     }
 
-    // ── Phase 2: coarse-to-fine translational alignment ──
-    // Two-level pyramid search to correct IMU timing lag and drift.
-    // Coarse: large radius, step 4, using every 2nd overlap sample (~7° range)
-    // Fine:   ±6 around coarse best, step 1, all overlap samples
-    double bestOffX = 0.0, bestOffY = 0.0;
+    int64_t phase1Us = elapsedUs(t0);
+
+    // ── Phase 2: Rotational alignment (time-budgeted) ──
+    Quat qCorrected = q;
     double finalSSD = 0.0;
+    bool frameRejected = false;
+    int alignLevelsCompleted = 0;
 
     if (overlap.size() > 50) {
-        // ── Baseline: SSD at zero offset (raw IMU position) ──
-        double baselineSSD = 1e18;
-        {
+
+        // SSD evaluator with pre-computed rays
+        auto computeRotSSD = [&](double dyaw, double dpitch, int subsample) -> double {
+            Quat qY = quatFromAxisAngle(0, 0, 1, dyaw);
+            Quat qP = quatFromAxisAngle(1, 0, 0, dpitch);
+            Quat qC = quatMul(qY, quatMul(qP, q));
+
             double ssd = 0.0;
             int count = 0;
-            for (const auto& s : overlap) {
-                int sx = ((int)(s.eqX) + eqW) % eqW;
-                int sy = clampI((int)(s.eqY), 0, eqH - 1);
-                int sidx = sy * eqW + sx;
-                if (eqWeight[sidx] > 0.f) {
-                    float inv = 1.f / eqWeight[sidx];
-                    double dr = s.newR * gainR - eqR[sidx] * inv;
-                    double dg = s.newG * gainG - eqG[sidx] * inv;
-                    double db = s.newB * gainB - eqB[sidx] * inv;
+            for (size_t i = 0; i < overlap.size(); i += subsample) {
+                const auto& s = overlap[i];
+                double wx, wy, wz;
+                quatRotate(qC, s.rx, s.ry, s.rz, wx, wy, wz);
+                double lon = std::atan2(wx, wy);
+                double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
+                int eqX = ((int)((lon / PI + 1.0) * 0.5 * eqW) + eqW) % eqW;
+                int eqY = clampI((int)((0.5 - lat / PI) * eqH), 0, eqH - 1);
+                int idx = eqY * eqW + eqX;
+
+                if (eqWeight[idx] > 0.f) {
+                    float inv = 1.f / eqWeight[idx];
+                    double dr = s.newR * gainR - eqR[idx] * inv;
+                    double dg = s.newG * gainG - eqG[idx] * inv;
+                    double db = s.newB * gainB - eqB[idx] * inv;
                     ssd += dr * dr + dg * dg + db * db;
                     count++;
                 }
             }
-            if (count > 30) baselineSSD = ssd / count;
+            if (count < 20) return 1e18;
+            return ssd / count;
+        };
+
+        double baselineSSD = computeRotSSD(0, 0, 1);
+        double bestDyaw = 0, bestDpitch = 0;
+        double bestSSD = baselineSSD;
+
+        auto parabolicMin = [](double sm, double s0, double sp) -> double {
+            double denom = 2.0 * (sm + sp - 2.0 * s0);
+            if (std::abs(denom) < 1e-12) return 0.0;
+            return std::max(-0.5, std::min(0.5, (sm - sp) / denom));
+        };
+
+        // Level 2 (coarsest): ±7° with 1° step
+        {
+            constexpr double R = 7.0 * DEG2RAD;
+            constexpr double S = 1.0 * DEG2RAD;
+            for (double dp = -R; dp <= R; dp += S)
+                for (double dy = -R; dy <= R; dy += S) {
+                    double s = computeRotSSD(dy, dp, 4);
+                    if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
+                }
+            alignLevelsCompleted = 1;
         }
 
-        // ── Coarse pass ──
-        constexpr int COARSE_RADIUS = 80;
-        constexpr int COARSE_STEP = 4;
-        constexpr int COARSE_SUBSAMPLE = 2;
-        double bestSSD = 1e18;
-
-        for (int oy = -COARSE_RADIUS; oy <= COARSE_RADIUS; oy += COARSE_STEP) {
-            for (int ox = -COARSE_RADIUS; ox <= COARSE_RADIUS; ox += COARSE_STEP) {
-                double ssd = 0.0;
-                int count = 0;
-                for (size_t i = 0; i < overlap.size(); i += COARSE_SUBSAMPLE) {
-                    const auto& s = overlap[i];
-                    int sx = ((int)(s.eqX + ox) + eqW) % eqW;
-                    int sy = clampI((int)(s.eqY + oy), 0, eqH - 1);
-                    int sidx = sy * eqW + sx;
-                    if (eqWeight[sidx] > 0.f) {
-                        float inv = 1.f / eqWeight[sidx];
-                        double dr = s.newR * gainR - eqR[sidx] * inv;
-                        double dg = s.newG * gainG - eqG[sidx] * inv;
-                        double db = s.newB * gainB - eqB[sidx] * inv;
-                        ssd += dr * dr + dg * dg + db * db;
-                        count++;
-                    }
+        // Level 1: ±1.5° with 0.25° step
+        if (elapsedUs(t0) < TIME_BUDGET_US * 40 / 100) {
+            constexpr double R = 1.5 * DEG2RAD;
+            constexpr double S = 0.25 * DEG2RAD;
+            double sy = bestDyaw, sp = bestDpitch;
+            bestSSD = 1e18;
+            for (double dp = sp - R; dp <= sp + R; dp += S)
+                for (double dy = sy - R; dy <= sy + R; dy += S) {
+                    double s = computeRotSSD(dy, dp, 2);
+                    if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
                 }
-                if (count > 40) {
-                    ssd /= count;
-                    if (ssd < bestSSD) {
-                        bestSSD = ssd;
-                        bestOffX = ox;
-                        bestOffY = oy;
-                    }
-                }
-            }
+            alignLevelsCompleted = 2;
         }
 
-        // ── Fine pass ──
-        constexpr int FINE_RADIUS = 6;
-        int coarseX = static_cast<int>(bestOffX);
-        int coarseY = static_cast<int>(bestOffY);
-        bestSSD = 1e18;
-
-        for (int oy = coarseY - FINE_RADIUS; oy <= coarseY + FINE_RADIUS; oy++) {
-            for (int ox = coarseX - FINE_RADIUS; ox <= coarseX + FINE_RADIUS; ox++) {
-                double ssd = 0.0;
-                int count = 0;
-                for (const auto& s : overlap) {
-                    int sx = ((int)(s.eqX + ox) + eqW) % eqW;
-                    int sy = clampI((int)(s.eqY + oy), 0, eqH - 1);
-                    int sidx = sy * eqW + sx;
-                    if (eqWeight[sidx] > 0.f) {
-                        float inv = 1.f / eqWeight[sidx];
-                        double dr = s.newR * gainR - eqR[sidx] * inv;
-                        double dg = s.newG * gainG - eqG[sidx] * inv;
-                        double db = s.newB * gainB - eqB[sidx] * inv;
-                        ssd += dr * dr + dg * dg + db * db;
-                        count++;
-                    }
+        // Level 0: ±0.3° with 0.05° step
+        if (elapsedUs(t0) < TIME_BUDGET_US * 55 / 100) {
+            constexpr double R = 0.3 * DEG2RAD;
+            constexpr double S = 0.05 * DEG2RAD;
+            double sy = bestDyaw, sp = bestDpitch;
+            bestSSD = 1e18;
+            for (double dp = sp - R; dp <= sp + R; dp += S)
+                for (double dy = sy - R; dy <= sy + R; dy += S) {
+                    double s = computeRotSSD(dy, dp, 1);
+                    if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
                 }
-                if (count > 50) {
-                    ssd /= count;
-                    if (ssd < bestSSD) {
-                        bestSSD = ssd;
-                        bestOffX = ox;
-                        bestOffY = oy;
-                    }
-                }
-            }
+            alignLevelsCompleted = 3;
         }
+
+        // Parabolic refinement
+        if (elapsedUs(t0) < TIME_BUDGET_US * 65 / 100) {
+            constexpr double EPS = 0.02 * DEG2RAD;
+            double sC = bestSSD;
+            double sL = computeRotSSD(bestDyaw - EPS, bestDpitch, 1);
+            double sR = computeRotSSD(bestDyaw + EPS, bestDpitch, 1);
+            double sU = computeRotSSD(bestDyaw, bestDpitch - EPS, 1);
+            double sD = computeRotSSD(bestDyaw, bestDpitch + EPS, 1);
+            bestDyaw   += parabolicMin(sL, sC, sR) * EPS;
+            bestDpitch += parabolicMin(sU, sC, sD) * EPS;
+            alignLevelsCompleted = 4;
+        }
+
+        // Ultra-fine refinement (single iteration, time-gated)
+        if (elapsedUs(t0) < TIME_BUDGET_US * 75 / 100) {
+            constexpr double R = 0.08 * DEG2RAD;
+            constexpr double S = 0.01 * DEG2RAD;
+            double sy = bestDyaw, sp = bestDpitch;
+            bestSSD = 1e18;
+            for (double dp = sp - R; dp <= sp + R; dp += S)
+                for (double dy = sy - R; dy <= sy + R; dy += S) {
+                    double s = computeRotSSD(dy, dp, 1);
+                    if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
+                }
+
+            constexpr double EPS2 = 0.005 * DEG2RAD;
+            double sC2 = bestSSD;
+            double sL2 = computeRotSSD(bestDyaw - EPS2, bestDpitch, 1);
+            double sR2 = computeRotSSD(bestDyaw + EPS2, bestDpitch, 1);
+            double sU2 = computeRotSSD(bestDyaw, bestDpitch - EPS2, 1);
+            double sD2 = computeRotSSD(bestDyaw, bestDpitch + EPS2, 1);
+            bestDyaw   += parabolicMin(sL2, sC2, sR2) * EPS2;
+            bestDpitch += parabolicMin(sU2, sC2, sD2) * EPS2;
+            bestSSD = computeRotSSD(bestDyaw, bestDpitch, 1);
+            alignLevelsCompleted = 5;
+        }
+
         finalSSD = bestSSD;
 
-        // Reject alignment if it doesn't improve significantly over raw IMU
-        // (avoids false matches from noise in repetitive textures)
-        if (baselineSSD < 1e17 && bestSSD > baselineSSD * 0.75) {
-            LOGI("Alignment rejected: bestSSD=%.1f not much better than baseline=%.1f",
-                 bestSSD, baselineSSD);
-            bestOffX = 0.0;
-            bestOffY = 0.0;
+        // Build corrected quaternion
+        if (baselineSSD < 1e17 && bestSSD > baselineSSD * 0.92) {
+            qCorrected = q;
             finalSSD = baselineSSD;
-        } else if (bestOffX != 0.0 || bestOffY != 0.0) {
-            LOGI("Alignment correction: dx=%.0f dy=%.0f (baseline=%.1f -> aligned=%.1f, %zu samples)",
-                 bestOffX, bestOffY, baselineSSD, bestSSD, overlap.size());
+        } else {
+            Quat qY = quatFromAxisAngle(0, 0, 1, bestDyaw);
+            Quat qP = quatFromAxisAngle(1, 0, 0, bestDpitch);
+            qCorrected = quatMul(qY, quatMul(qP, q));
+
+            double corrDeg = std::sqrt(bestDyaw * bestDyaw + bestDpitch * bestDpitch) * RAD2DEG;
+            LOGI("Align: yaw=%.3f° pitch=%.3f° (%.3f° total, SSD %.1f->%.1f, L%d, %zu samp)",
+                 bestDyaw * RAD2DEG, bestDpitch * RAD2DEG, corrDeg,
+                 baselineSSD, bestSSD, alignLevelsCompleted, overlap.size());
+        }
+
+        // Recompute gain with corrected quaternion for better color matching
+        {
+            double reExR = 0, reExG = 0, reExB = 0;
+            double reNewR = 0, reNewG = 0, reNewB = 0;
+            int reCount = 0;
+            for (const auto& s : overlap) {
+                double wx, wy, wz;
+                quatRotate(qCorrected, s.rx, s.ry, s.rz, wx, wy, wz);
+                double lon = std::atan2(wx, wy);
+                double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
+                int eqX = ((int)((lon / PI + 1.0) * 0.5 * eqW) + eqW) % eqW;
+                int eqY = clampI((int)((0.5 - lat / PI) * eqH), 0, eqH - 1);
+                int idx = eqY * eqW + eqX;
+                if (eqWeight[idx] > 0.f) {
+                    float inv = 1.f / eqWeight[idx];
+                    reExR += eqR[idx] * inv;
+                    reExG += eqG[idx] * inv;
+                    reExB += eqB[idx] * inv;
+                    reNewR += s.newR;
+                    reNewG += s.newG;
+                    reNewB += s.newB;
+                    reCount++;
+                }
+            }
+            if (reCount > 30 && reNewR > 1 && reNewG > 1 && reNewB > 1) {
+                gainR = std::max(0.5, std::min(2.0, reExR / reNewR));
+                gainG = std::max(0.5, std::min(2.0, reExG / reNewG));
+                gainB = std::max(0.5, std::min(2.0, reExB / reNewB));
+            }
+        }
+
+        // Quality-based rejection
+        if (finalSSD > REJECT_SSD_THRESH && sFrameIndex > 0) {
+            frameRejected = true;
+            LOGW("Frame %d REJECTED: SSD=%.1f (thresh=%.1f)",
+                 sFrameIndex + 1, finalSSD, REJECT_SSD_THRESH);
         }
     }
+
+    int64_t phase2Us = elapsedUs(t0) - phase1Us;
 
     // Store per-frame metrics
     sFrameIndex++;
     sLastOverlapCount = static_cast<int>(overlap.size());
     sLastTotalSamples = totalSamples;
-    sLastAlignOffset = static_cast<float>(std::sqrt(bestOffX * bestOffX + bestOffY * bestOffY));
+    double corrDeg = 0;
+    if (!frameRejected) {
+        corrDeg = std::sqrt(
+            std::pow(std::atan2(2.0*(qCorrected.w*qCorrected.z + qCorrected.x*qCorrected.y),
+                                1.0 - 2.0*(qCorrected.y*qCorrected.y + qCorrected.z*qCorrected.z))
+                     - std::atan2(2.0*(q.w*q.z + q.x*q.y),
+                                  1.0 - 2.0*(q.y*q.y + q.z*q.z)), 2.0) +
+            std::pow(std::asin(std::max(-1.0, std::min(1.0, 2.0*(qCorrected.w*qCorrected.y - qCorrected.z*qCorrected.x))))
+                     - std::asin(std::max(-1.0, std::min(1.0, 2.0*(q.w*q.y - q.z*q.x)))), 2.0)
+        ) * RAD2DEG;
+    }
+    sLastAlignOffset = static_cast<float>(corrDeg);
     sLastResidualSSD = static_cast<float>(finalSSD);
+    sLastRejected = frameRejected ? 1 : 0;
 
     if (sFrameIndex > 1 && sLastOverlapCount < 20) {
-        LOGW("Frame %d: very low overlap (%d/%d samples) — user may have moved too far",
+        LOGW("Frame %d: very low overlap (%d/%d)",
              sFrameIndex, sLastOverlapCount, totalSamples);
+        frameRejected = true;
+        sLastRejected = 1;
     }
 
-    // ── Phase 3: project and splat with gain + alignment offset ──
-    double featherX = frameW * 0.25;
-    double featherY = frameH * 0.25;
+    // ── Phase 3: project and splat with per-pixel mismatch rejection ──
+    int rejectedPixels = 0, totalOverlapPixels = 0;
+    int minSplatY = eqH, maxSplatY = 0;
 
-    for (int fy = 0; fy < frameH; fy++) {
-        double ny = (0.5 - (double)fy / (frameH - 1)) * 2.0 * tanV;
-        for (int fx = 0; fx < frameW; fx++) {
-            double nx = ((double)fx / (frameW - 1) - 0.5) * 2.0 * tanH;
+    if (!frameRejected) {
+        double featherX = frameW * 0.25;
+        double featherY = frameH * 0.25;
+        float mismatchSqRange = MISMATCH_HARD_SQ - MISMATCH_SOFT_SQ;
+        bool doMismatchCheck = (elapsedUs(t0) < TIME_BUDGET_US * 85 / 100);
 
-            double len = std::sqrt(nx*nx + ny*ny + 1.0);
-            double rx = nx / len, ry = ny / len, rz = -1.0 / len;
+        for (int fy = 0; fy < frameH; fy++) {
+            double ny = (0.5 - (double)fy / (frameH - 1)) * 2.0 * tanV;
+            for (int fx = 0; fx < frameW; fx++) {
+                double nx = ((double)fx / (frameW - 1) - 0.5) * 2.0 * tanH;
 
-            double wx, wy, wz;
-            quatRotate(q, rx, ry, rz, wx, wy, wz);
+                double len = std::sqrt(nx*nx + ny*ny + 1.0);
+                double rx = nx / len, ry = ny / len, rz = -1.0 / len;
 
-            double lon = std::atan2(wx, wy);
-            double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
+                double wx, wy, wz;
+                quatRotate(qCorrected, rx, ry, rz, wx, wy, wz);
 
-            double eqXf = (lon / PI + 1.0) * 0.5 * eqW + bestOffX;
-            double eqYf = (0.5 - lat / PI) * eqH + bestOffY;
+                double lon = std::atan2(wx, wy);
+                double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
 
-            int32_t p = pixels[fy * frameW + fx];
-            float pr = static_cast<float>((p >> 16) & 0xff) * static_cast<float>(gainR);
-            float pg = static_cast<float>((p >> 8) & 0xff) * static_cast<float>(gainG);
-            float pb = static_cast<float>(p & 0xff) * static_cast<float>(gainB);
+                double eqXf = (lon / PI + 1.0) * 0.5 * eqW;
+                double eqYf = (0.5 - lat / PI) * eqH;
 
-            double edgeDistX = std::min((double)fx, (double)(frameW - 1 - fx));
-            double edgeDistY = std::min((double)fy, (double)(frameH - 1 - fy));
-            double edgeFrac = std::min(1.0, std::min(edgeDistX / featherX, edgeDistY / featherY));
-            float fw = static_cast<float>(0.5 - 0.5 * std::cos(edgeFrac * PI));
+                int32_t p = pixels[fy * frameW + fx];
+                float pr = static_cast<float>((p >> 16) & 0xff) * static_cast<float>(gainR);
+                float pg = static_cast<float>((p >> 8) & 0xff) * static_cast<float>(gainG);
+                float pb = static_cast<float>(p & 0xff) * static_cast<float>(gainB);
 
-            int x0 = static_cast<int>(std::floor(eqXf));
-            int y0 = static_cast<int>(std::floor(eqYf));
-            double fracX = eqXf - x0;
-            double fracY = eqYf - y0;
-            int x1 = x0 + 1;
-            int y1 = y0 + 1;
+                double edgeDistX = std::min((double)fx, (double)(frameW - 1 - fx));
+                double edgeDistY = std::min((double)fy, (double)(frameH - 1 - fy));
+                double edgeFrac = std::min(1.0, std::min(edgeDistX / featherX, edgeDistY / featherY));
+                float fw = static_cast<float>(0.5 - 0.5 * std::cos(edgeFrac * PI));
 
-            if (x0 < 0) x0 += eqW;
-            if (x1 >= eqW) x1 -= eqW;
-            x0 = ((x0 % eqW) + eqW) % eqW;
+                // Per-pixel mismatch (squared comparison — no sqrt)
+                if (doMismatchCheck) {
+                    int nearX = ((int)std::round(eqXf) + eqW) % eqW;
+                    int nearY = clampI((int)std::round(eqYf), 0, eqH - 1);
+                    int nearIdx = nearY * eqW + nearX;
 
-            float w00 = fw * static_cast<float>((1.0 - fracX) * (1.0 - fracY));
-            float w10 = fw * static_cast<float>(fracX * (1.0 - fracY));
-            float w01 = fw * static_cast<float>((1.0 - fracX) * fracY);
-            float w11 = fw * static_cast<float>(fracX * fracY);
+                    if (eqWeight[nearIdx] > 0.f) {
+                        totalOverlapPixels++;
+                        float inv = 1.f / eqWeight[nearIdx];
+                        float dr = pr - eqR[nearIdx] * inv;
+                        float dg = pg - eqG[nearIdx] * inv;
+                        float db = pb - eqB[nearIdx] * inv;
+                        float diffSq = (dr*dr + dg*dg + db*db) / 3.0f;
 
-            splatPixel(x0, y0, pr, pg, pb, w00);
-            splatPixel(x1, y0, pr, pg, pb, w10);
-            splatPixel(x0, y1, pr, pg, pb, w01);
-            splatPixel(x1, y1, pr, pg, pb, w11);
+                        if (diffSq > MISMATCH_HARD_SQ) {
+                            rejectedPixels++;
+                            continue;
+                        } else if (diffSq > MISMATCH_SOFT_SQ) {
+                            float t = (diffSq - MISMATCH_SOFT_SQ) / mismatchSqRange;
+                            fw *= (1.0f - t);
+                        }
+                    }
+                }
+
+                if (fw < 1e-6f) continue;
+
+                int x0 = static_cast<int>(std::floor(eqXf));
+                int y0 = static_cast<int>(std::floor(eqYf));
+                double fracX = eqXf - x0;
+                double fracY = eqYf - y0;
+                int x1 = x0 + 1;
+                int y1 = y0 + 1;
+
+                if (x0 < 0) x0 += eqW;
+                if (x1 >= eqW) x1 -= eqW;
+                x0 = ((x0 % eqW) + eqW) % eqW;
+
+                minSplatY = std::min(minSplatY, y0);
+                maxSplatY = std::max(maxSplatY, std::min(y1, eqH - 1));
+
+                float w00 = fw * static_cast<float>((1.0 - fracX) * (1.0 - fracY));
+                float w10 = fw * static_cast<float>(fracX * (1.0 - fracY));
+                float w01 = fw * static_cast<float>((1.0 - fracX) * fracY);
+                float w11 = fw * static_cast<float>(fracX * fracY);
+
+                splatPixel(x0, y0, pr, pg, pb, w00);
+                splatPixel(x1, y0, pr, pg, pb, w10);
+                splatPixel(x0, y1, pr, pg, pb, w01);
+                splatPixel(x1, y1, pr, pg, pb, w11);
+            }
+        }
+
+        // ── Phase 4: weight capping in the splatted Y-band ──
+        // Prevents early frames from dominating in high-overlap regions.
+        // Capping preserves the average color (both numerator and denominator
+        // scale equally) but ensures new frames always contribute ≥ ~20%.
+        if (minSplatY <= maxSplatY) {
+            for (int y = minSplatY; y <= maxSplatY; y++) {
+                for (int x = 0; x < eqW; x++) {
+                    int idx = y * eqW + x;
+                    if (eqWeight[idx] > MAX_ACCUM_WEIGHT) {
+                        float scale = MAX_ACCUM_WEIGHT / eqWeight[idx];
+                        eqR[idx] *= scale;
+                        eqG[idx] *= scale;
+                        eqB[idx] *= scale;
+                        eqWeight[idx] = MAX_ACCUM_WEIGHT;
+                    }
+                }
+            }
+        }
+
+        if (totalOverlapPixels > 0) {
+            float rejectPct = 100.f * rejectedPixels / totalOverlapPixels;
+            if (rejectPct > 5.f) {
+                LOGI("Frame %d: %.1f%% pixels rejected (%d/%d)",
+                     sFrameIndex, rejectPct, rejectedPixels, totalOverlapPixels);
+            }
         }
     }
 
+    int64_t totalUs = elapsedUs(t0);
+
+    LOGI("Frame %d: P1=%lldus P2=%lldus P3+4=%lldus total=%lldus (L%d, %zu overlap)",
+         sFrameIndex, (long long)phase1Us, (long long)phase2Us,
+         (long long)(totalUs - phase1Us - phase2Us), (long long)totalUs,
+         alignLevelsCompleted, overlap.size());
+
     env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT);
-    return JNI_TRUE;
+    return frameRejected ? JNI_FALSE : JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -378,7 +568,6 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetEquirect(
     jint* out = env->GetIntArrayElements(jOut, nullptr);
     if (!out) return JNI_FALSE;
 
-    // First pass: resolve weighted averages
     for (int i = 0; i < sz; i++) {
         if (eqWeight[i] > 0.f) {
             float inv = 1.f / eqWeight[i];
@@ -387,11 +576,11 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetEquirect(
             int b = clampI(static_cast<int>(eqB[i] * inv), 0, 255);
             out[i] = static_cast<int32_t>(0xff000000 | (r << 16) | (g << 8) | b);
         } else {
-            out[i] = 0; // mark as unfilled
+            out[i] = 0;
         }
     }
 
-    // Second pass: fill isolated gaps (unfilled pixels surrounded by filled ones)
+    // Fill isolated gaps
     for (int y = 0; y < eqH; y++) {
         for (int x = 0; x < eqW; x++) {
             int idx = y * eqW + x;
@@ -438,21 +627,11 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetRectilinear(
     jint* out = env->GetIntArrayElements(jOut, nullptr);
     if (!out) return JNI_FALSE;
 
-    /*
-     * Viewer coordinate system (equirect space):
-     *   X = East (right), Y = North (forward at lon=0), Z = Up (sky)
-     *
-     * At azimuth=0, elevation=0 we look North (+Y).
-     * Forward ray = (0, 1, 0), Right = (1, 0, 0), Up = (0, 0, 1).
-     *
-     * Azimuth rotates around Z (up), negative angle so positive azimuth = look East (right).
-     * Elevation rotates around X (right), positive angle = look up.
-     */
     Quat qAz = quatFromAxisAngle(0, 0, 1, -azimuth);
     Quat qEl = quatFromAxisAngle(1, 0, 0, elevation);
     Quat qLook = quatMul(qAz, qEl);
 
-    double halfFov = fov * 0.5 * PI / 180.0;
+    double halfFov = fov * 0.5 * DEG2RAD;
     double tanFov = std::tan(halfFov);
     double aspect = static_cast<double>(outW) / outH;
 
@@ -461,7 +640,6 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetRectilinear(
         for (int x = 0; x < outW; x++) {
             double rightOff = ((double)x / (outW - 1) - 0.5) * 2.0 * tanFov * aspect;
 
-            // Ray in viewer local space: right=X, forward=Y, up=Z
             double rx = rightOff;
             double ry = 1.0;
             double rz = upOff;
@@ -471,14 +649,12 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetRectilinear(
             double wx, wy, wz;
             quatRotate(qLook, rx, ry, rz, wx, wy, wz);
 
-            // Same equirect mapping as nativeAddFrame
             double lon = std::atan2(wx, wy);
             double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
 
             double eqXf = (lon / PI + 1.0) * 0.5 * eqW;
             double eqYf = (0.5 - lat / PI) * eqH;
 
-            // Bilinear sampling
             int x0 = static_cast<int>(std::floor(eqXf));
             int y0 = static_cast<int>(std::floor(eqYf));
             double fx = eqXf - x0;
@@ -542,15 +718,16 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetCoverage(
 JNIEXPORT jfloatArray JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeGetLastFrameInfo(
     JNIEnv* env, jobject) {
-    jfloatArray result = env->NewFloatArray(5);
-    float data[5] = {
+    jfloatArray result = env->NewFloatArray(6);
+    float data[6] = {
         static_cast<float>(sFrameIndex),
         static_cast<float>(sLastOverlapCount),
         static_cast<float>(sLastTotalSamples),
         sLastAlignOffset,
-        sLastResidualSSD
+        sLastResidualSSD,
+        static_cast<float>(sLastRejected)
     };
-    env->SetFloatArrayRegion(result, 0, 5, data);
+    env->SetFloatArrayRegion(result, 0, 6, data);
     return result;
 }
 
@@ -595,6 +772,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeReset(
         std::memset(eqWeight.data(), 0, sz * sizeof(float));
     }
     sFrameIndex = 0;
+    sLastRejected = 0;
     LOGI("Sphere reset");
 }
 

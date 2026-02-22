@@ -12,6 +12,7 @@
 #include <jni.h>
 #include <android/log.h>
 #include <cmath>
+#include <cstdint>
 #include <algorithm>
 
 #define LOG_TAG "NightVisionJni"

@@ -16,7 +16,8 @@ class SphereCaptureController(
 
     enum class FrameWarning {
         NO_OVERLAP,
-        EXCESSIVE_SHIFT
+        EXCESSIVE_SHIFT,
+        ALIGNMENT_FAILED
     }
 
     enum class State { IDLE, CAPTURING, PREVIEW }
@@ -37,15 +38,25 @@ class SphereCaptureController(
         Log.i(TAG, "Sphere session started (fov=${fovH}x${fovV})")
     }
 
-    /** Add a single frame (photo mode tap). */
-    fun captureFrame(bitmap: Bitmap) {
+    /**
+     * Add a single frame (photo mode tap).
+     * @param frameTimestampNanos the camera frame's capture timestamp
+     *        (elapsedRealtimeNanos); if >0, the quaternion is interpolated
+     *        from IMU history at that exact instant, eliminating pipeline lag.
+     */
+    fun captureFrame(bitmap: Bitmap, frameTimestampNanos: Long = 0) {
         if (state != State.CAPTURING) return
-        val quat = orientationTracker.getQuaternion()
+        val quat = if (frameTimestampNanos > 0)
+            orientationTracker.getQuaternionAt(frameTimestampNanos)
+        else
+            orientationTracker.getQuaternion()
         if (frameCount == 0) {
             Log.i(TAG, "First frame: ${bitmap.width}x${bitmap.height}, quat=[${quat[0]}, ${quat[1]}, ${quat[2]}, ${quat[3]}]")
         }
-        SphereNative.addFrame(bitmap, quat)
-        frameCount++
+        val accepted = SphereNative.addFrame(bitmap, quat)
+        if (accepted) {
+            frameCount++
+        }
         onCoverageUpdate(SphereNative.getCoverage())
         checkFrameAlignment()
     }
@@ -55,13 +66,18 @@ class SphereCaptureController(
         if (info.isFirstFrame) return
 
         when {
+            info.wasRejected -> {
+                Log.w(TAG, "Frame ${info.frameIndex}: REJECTED (SSD=${info.residualSSD}, " +
+                        "overlap=${info.overlapCount}/${info.totalSamples})")
+                onFrameWarning?.invoke(FrameWarning.ALIGNMENT_FAILED)
+            }
             info.hasLowOverlap -> {
                 Log.w(TAG, "Frame ${info.frameIndex}: low overlap ${info.overlapCount}/${info.totalSamples} " +
                         "(${(info.overlapRatio * 100).toInt()}%)")
                 onFrameWarning?.invoke(FrameWarning.NO_OVERLAP)
             }
             info.hasExcessiveShift -> {
-                Log.w(TAG, "Frame ${info.frameIndex}: excessive alignment shift ${info.alignmentOffsetPx}px")
+                Log.w(TAG, "Frame ${info.frameIndex}: excessive alignment shift ${info.alignmentOffsetDeg}°")
                 onFrameWarning?.invoke(FrameWarning.EXCESSIVE_SHIFT)
             }
         }
@@ -71,12 +87,12 @@ class SphereCaptureController(
      * Feed a frame during continuous capture (video mode).
      * Throttles to ~5 fps to avoid overloading.
      */
-    fun feedContinuousFrame(bitmap: Bitmap) {
+    fun feedContinuousFrame(bitmap: Bitmap, frameTimestampNanos: Long = 0) {
         if (state != State.CAPTURING || !continuousCapture) return
         val now = System.currentTimeMillis()
         if (now - lastCaptureTimeMs < CONTINUOUS_INTERVAL_MS) return
         lastCaptureTimeMs = now
-        captureFrame(bitmap)
+        captureFrame(bitmap, frameTimestampNanos)
     }
 
     fun startContinuousCapture() {

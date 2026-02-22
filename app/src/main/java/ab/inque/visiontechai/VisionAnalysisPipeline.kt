@@ -14,7 +14,8 @@ data class PipelineResult(
     val rawBitmap: Bitmap? = null,
     val detections: List<DetectionResult>?,
     val imageHeight: Int = 0,
-    val imageWidth: Int = 0
+    val imageWidth: Int = 0,
+    val frameTimestampNanos: Long = 0
 )
 
 /**
@@ -34,6 +35,7 @@ class VisionAnalysisPipeline(
 
     fun createAnalyzer(callback: (PipelineResult) -> Unit): ImageAnalysis.Analyzer {
         return ImageAnalysis.Analyzer { image ->
+            val frameTs = image.imageInfo.timestamp
             val bitmap = ImageUtils.yuvToBitmap(image)
             if (bitmap == null) {
                 image.close()
@@ -77,7 +79,8 @@ class VisionAnalysisPipeline(
                     rawBitmap = rawForSphere,
                     detections = detections,
                     imageHeight = bitmap.height,
-                    imageWidth = bitmap.width
+                    imageWidth = bitmap.width,
+                    frameTimestampNanos = frameTs
                 )
             )
             image.close()

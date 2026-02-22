@@ -539,15 +539,6 @@ class SavedMediaActivity : AppCompatActivity() {
                             else { mp.start(); isPlaying = true }
                             return true
                         }
-                        override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-                            if (scaleDetector.isInProgress) return false
-                            if (currentScale > 1.01f) {
-                                displayMatrix.postTranslate(-dx, -dy)
-                                textureView.setTransform(displayMatrix)
-                                return true
-                            }
-                            return false
-                        }
                         override fun onDoubleTap(e: MotionEvent): Boolean {
                             if (currentScale > 1.5f) { displayMatrix.set(baseMatrix); currentScale = 1f }
                             else { val sf = 2.5f / currentScale; currentScale = 2.5f; displayMatrix.postScale(sf, sf, e.x, e.y) }
@@ -634,13 +625,6 @@ class SavedMediaActivity : AppCompatActivity() {
 
         val gestureDetector = GestureDetector(this,
             object : GestureDetector.SimpleOnGestureListener() {
-                override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-                    if (scaleDetector.isInProgress) return false
-                    displayMatrix.postTranslate(-dx, -dy)
-                    photoView.imageMatrix = displayMatrix
-                    return true
-                }
-
                 override fun onDoubleTap(e: MotionEvent): Boolean {
                     if (currentScale > 1.5f) {
                         displayMatrix.set(baseMatrix)
