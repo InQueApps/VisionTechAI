@@ -31,6 +31,10 @@ class ObjectDetectionProcessor(
         private const val YOLO11N_INPUT_SIZE = 640
         private const val INPUT_CHANNELS = 3
         private const val DEFAULT_THRESHOLD = 0.5f  // Lower threshold for debugging
+
+        private fun debugLog(message: String) {
+            if (BuildConfig.DEBUG) Log.d(TAG, message)
+        }
     }
 
     // YOLO11n components
@@ -42,10 +46,10 @@ class ObjectDetectionProcessor(
         .build()
 
     init {
-        Log.d(TAG, "Initializing ObjectDetectionProcessor...")
+        debugLog( "Initializing ObjectDetectionProcessor...")
         initializeYOLO11n()
         loadClassLabels()
-        Log.d(TAG, "ObjectDetectionProcessor initialization complete. Ready: ${isYolo11nInitialized && yolo11nInterpreter != null}")
+        debugLog( "ObjectDetectionProcessor initialization complete. Ready: ${isYolo11nInitialized && yolo11nInterpreter != null}")
     }
 
     data class CropInfo(
@@ -56,15 +60,15 @@ class ObjectDetectionProcessor(
 
     private fun loadClassLabels() {
         try {
-            Log.d(TAG, "Loading class labels from $CLASS_LABELS_FILE...")
+            debugLog( "Loading class labels from $CLASS_LABELS_FILE...")
             val inputStream = context.assets.open(CLASS_LABELS_FILE)
             classLabels = inputStream.bufferedReader().readLines()
             inputStream.close()
-            Log.d(TAG, "Successfully loaded ${classLabels.size} class labels")
+            debugLog( "Successfully loaded ${classLabels.size} class labels")
             
             // Log first few labels for verification
             val previewLabels = classLabels.take(5).joinToString(", ")
-            Log.d(TAG, "Class labels preview: $previewLabels...")
+            debugLog( "Class labels preview: $previewLabels...")
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load class labels from $CLASS_LABELS_FILE: ${e.message}")
@@ -75,21 +79,21 @@ class ObjectDetectionProcessor(
 
     private fun initializeYOLO11n() {
         try {
-            Log.d(TAG, "Loading YOLO11n model from $YOLO11N_MODEL_FILE...")
+            debugLog( "Loading YOLO11n model from $YOLO11N_MODEL_FILE...")
             
             // Check if model file exists
             val modelInputStream = context.assets.open(YOLO11N_MODEL_FILE)
             val modelBytes = modelInputStream.readBytes()
             modelInputStream.close()
             
-            Log.d(TAG, "Model file loaded successfully. Size: ${modelBytes.size} bytes")
+            debugLog( "Model file loaded successfully. Size: ${modelBytes.size} bytes")
             
             val options = Interpreter.Options().apply {
                 setNumThreads(numThreads)
                 setUseXNNPACK(true)
             }
 
-            Log.d(TAG, "Creating TensorFlow Lite interpreter with $numThreads threads...")
+            debugLog( "Creating TensorFlow Lite interpreter with $numThreads threads...")
             val modelBuffer = ByteBuffer.allocateDirect(modelBytes.size)
             modelBuffer.put(modelBytes)
             modelBuffer.rewind()
@@ -97,16 +101,16 @@ class ObjectDetectionProcessor(
             yolo11nInterpreter = Interpreter(modelBuffer, options)
             
             isYolo11nInitialized = true
-            Log.d(TAG, "YOLO11n detector initialized successfully")
+            debugLog( "YOLO11n detector initialized successfully")
             
             // Log model input/output information
             val inputTensor = yolo11nInterpreter?.getInputTensor(0)
             val outputTensor = yolo11nInterpreter?.getOutputTensor(0)
             
-            Log.d(TAG, "Model input shape: ${inputTensor?.shape()?.contentToString()}")
-            Log.d(TAG, "Model output shape: ${outputTensor?.shape()?.contentToString()}")
-            Log.d(TAG, "Model input data type: ${inputTensor?.dataType()}")
-            Log.d(TAG, "Model output data type: ${outputTensor?.dataType()}")
+            debugLog( "Model input shape: ${inputTensor?.shape()?.contentToString()}")
+            debugLog( "Model output shape: ${outputTensor?.shape()?.contentToString()}")
+            debugLog( "Model input data type: ${inputTensor?.dataType()}")
+            debugLog( "Model output data type: ${outputTensor?.dataType()}")
             
         } catch (e: Exception) {
             Log.e(TAG, "Failed to initialize YOLO11n detector: ${e.message}")
@@ -123,16 +127,16 @@ class ObjectDetectionProcessor(
             return emptyList()
         }
 
-        Log.d(TAG, "Starting object detection...")
-        Log.d(TAG, "Input image size: ${bitmap.width}x${bitmap.height}")
-        Log.d(TAG, "Image rotation: $imageRotation degrees")
-        Log.d(TAG, "Confidence threshold: $threshold")
+        debugLog( "Starting object detection...")
+        debugLog( "Input image size: ${bitmap.width}x${bitmap.height}")
+        debugLog( "Image rotation: $imageRotation degrees")
+        debugLog( "Confidence threshold: $threshold")
 
         try {
             val inferenceTime = SystemClock.uptimeMillis()
             val cropInfo = calculateCropInfo(bitmap)
 
-            Log.d(TAG, "Crop info - Crop rect: ${cropInfo.cropRect}, Scale factor: ${cropInfo.scaleFactor}")
+            debugLog( "Crop info - Crop rect: ${cropInfo.cropRect}, Scale factor: ${cropInfo.scaleFactor}")
 
             // Extract the crop region
             val croppedBitmap = Bitmap.createBitmap(
@@ -143,18 +147,18 @@ class ObjectDetectionProcessor(
                 cropInfo.cropRect.height()
             )
 
-            Log.d(TAG, "Cropped image size: ${croppedBitmap.width}x${croppedBitmap.height}")
+            debugLog( "Cropped image size: ${croppedBitmap.width}x${croppedBitmap.height}")
 
             // Scale the cropped square to 640x640 for YOLO11n input
             val tensorImage = TensorImage(org.tensorflow.lite.DataType.FLOAT32)
             tensorImage.load(croppedBitmap)
             val processedImage = yolo11nImageProcessor.process(tensorImage)
 
-            Log.d(TAG, "Scaled image size: ${processedImage.width}x${processedImage.height} (target: ${YOLO11N_INPUT_SIZE}x${YOLO11N_INPUT_SIZE})")
+            debugLog( "Scaled image size: ${processedImage.width}x${processedImage.height} (target: ${YOLO11N_INPUT_SIZE}x${YOLO11N_INPUT_SIZE})")
 
             // Get the expected input shape from the interpreter
             val inputShape = yolo11nInterpreter?.getInputTensor(0)?.shape()
-            Log.d(TAG, "Expected input shape: ${inputShape?.contentToString()}")
+            debugLog( "Expected input shape: ${inputShape?.contentToString()}")
             
             // Prepare input tensor
             val inputBuffer = TensorBuffer.createFixedSize(
@@ -166,8 +170,8 @@ class ObjectDetectionProcessor(
             val floatArray = FloatArray(processedImage.buffer.capacity() / 4)
             processedImage.buffer.asFloatBuffer().get(floatArray)
             
-            Log.d(TAG, "Raw float array size: ${floatArray.size}")
-            Log.d(TAG, "Raw float array sample values: ${floatArray.take(10).joinToString(", ")}")
+            debugLog( "Raw float array size: ${floatArray.size}")
+            debugLog( "Raw float array sample values: ${floatArray.take(10).joinToString(", ")}")
             
             // Normalize pixel values for YOLO11n (0-255 to 0-1)
             val normalizedArray = FloatArray(floatArray.size)
@@ -175,12 +179,12 @@ class ObjectDetectionProcessor(
                 normalizedArray[i] = floatArray[i] / 255.0f
             }
             
-            Log.d(TAG, "Normalized array sample values: ${normalizedArray.take(10).joinToString(", ")}")
-            Log.d(TAG, "Input array min: ${normalizedArray.minOrNull()}, max: ${normalizedArray.maxOrNull()}")
+            debugLog( "Normalized array sample values: ${normalizedArray.take(10).joinToString(", ")}")
+            debugLog( "Input array min: ${normalizedArray.minOrNull()}, max: ${normalizedArray.maxOrNull()}")
             
             // Ensure the array size matches the expected input size
             val expectedSize = inputShape?.reduce { acc, i -> acc * i } ?: (1 * YOLO11N_INPUT_SIZE * YOLO11N_INPUT_SIZE * INPUT_CHANNELS)
-            Log.d(TAG, "Expected input size: $expectedSize, Actual size: ${normalizedArray.size}")
+            debugLog( "Expected input size: $expectedSize, Actual size: ${normalizedArray.size}")
             
             if (normalizedArray.size != expectedSize) {
                 Log.w(TAG, "Array size mismatch. Expected: $expectedSize, Got: ${normalizedArray.size}")
@@ -188,15 +192,15 @@ class ObjectDetectionProcessor(
                 val copySize = minOf(normalizedArray.size, expectedSize)
                 System.arraycopy(normalizedArray, 0, resizedArray, 0, copySize)
                 inputBuffer.loadArray(resizedArray)
-                Log.d(TAG, "Resized array to match expected input size")
+                debugLog( "Resized array to match expected input size")
             } else {
                 inputBuffer.loadArray(normalizedArray)
-                Log.d(TAG, "Input array loaded successfully")
+                debugLog( "Input array loaded successfully")
             }
 
             // Get the expected output shape
             val outputShape = yolo11nInterpreter?.getOutputTensor(0)?.shape()
-            Log.d(TAG, "Expected output shape: ${outputShape?.contentToString()}")
+            debugLog( "Expected output shape: ${outputShape?.contentToString()}")
             
             // Prepare output tensor
             val outputBuffer = TensorBuffer.createFixedSize(
@@ -204,26 +208,26 @@ class ObjectDetectionProcessor(
                 org.tensorflow.lite.DataType.FLOAT32
             )
 
-            Log.d(TAG, "Running YOLO11n inference...")
+            debugLog( "Running YOLO11n inference...")
             // Run inference
             yolo11nInterpreter?.run(inputBuffer.buffer, outputBuffer.buffer)
-            Log.d(TAG, "YOLO11n inference completed")
+            debugLog( "YOLO11n inference completed")
             
             // Debug output array
             val outputArray = outputBuffer.floatArray
-            Log.d(TAG, "Output array size: ${outputArray.size}")
-            Log.d(TAG, "Output array min: ${outputArray.minOrNull()}, max: ${outputArray.maxOrNull()}")
-            Log.d(TAG, "Output array sample values: ${outputArray.take(20).joinToString(", ")}")
+            debugLog( "Output array size: ${outputArray.size}")
+            debugLog( "Output array min: ${outputArray.minOrNull()}, max: ${outputArray.maxOrNull()}")
+            debugLog( "Output array sample values: ${outputArray.take(20).joinToString(", ")}")
 
             // Process results
             val detections = processYOLO11nOutput(outputBuffer.floatArray, cropInfo)
             
             val finalInferenceTime = SystemClock.uptimeMillis() - inferenceTime
-            Log.d(TAG, "YOLO11n detection completed in ${finalInferenceTime}ms: ${detections.size} objects found")
+            debugLog( "YOLO11n detection completed in ${finalInferenceTime}ms: ${detections.size} objects found")
             
             // Log detection details
             detections.forEachIndexed { index, detection ->
-                Log.d(TAG, "Detection $index: ${detection.label} (${detection.confidence}) at ${detection.boundingBox}")
+                debugLog( "Detection $index: ${detection.label} (${detection.confidence}) at ${detection.boundingBox}")
             }
             
             return detections
@@ -239,22 +243,22 @@ class ObjectDetectionProcessor(
         val originalWidth = bitmap.width
         val originalHeight = bitmap.height
         
-        Log.d(TAG, "Original image size: ${originalWidth}x${originalHeight}")
+        debugLog( "Original image size: ${originalWidth}x${originalHeight}")
         
         // Find the shortest side and crop to a square with that dimension
         val shortestSide = min(originalWidth, originalHeight)
-        Log.d(TAG, "Shortest side: $shortestSide")
+        debugLog( "Shortest side: $shortestSide")
         
         // Calculate the crop rectangle (center crop)
         val xOffset = (originalWidth - shortestSide) / 2
         val yOffset = (originalHeight - shortestSide) / 2
         val cropRect = Rect(xOffset, yOffset, xOffset + shortestSide, yOffset + shortestSide)
         
-        Log.d(TAG, "Crop rectangle: $cropRect (${cropRect.width()}x${cropRect.height()})")
+        debugLog( "Crop rectangle: $cropRect (${cropRect.width()}x${cropRect.height()})")
         
         // The scale factor from cropped square to 640x640
         val scaleFactor = YOLO11N_INPUT_SIZE.toFloat() / shortestSide
-        Log.d(TAG, "Scale factor to 640x640: $scaleFactor")
+        debugLog( "Scale factor to 640x640: $scaleFactor")
         
         return CropInfo(cropRect, scaleFactor, YOLO11N_INPUT_SIZE)
     }
@@ -271,29 +275,29 @@ class ObjectDetectionProcessor(
 
         // YOLO11n output format analysis - try different formats
         val outputSize = outputArray.size
-        Log.d(TAG, "YOLO11n output size: $outputSize")
-        Log.d(TAG, "Output array sample values: ${outputArray.take(20).joinToString(", ")}")
+        debugLog( "YOLO11n output size: $outputSize")
+        debugLog( "Output array sample values: ${outputArray.take(20).joinToString(", ")}")
         
         // Try different output formats
         when {
             // Format: [1, 84, 8400] - typical YOLO11n format
             outputSize == 1 * 84 * 8400 -> {
-                Log.d(TAG, "Processing YOLO11n standard format [1, 84, 8400]")
+                debugLog( "Processing YOLO11n standard format [1, 84, 8400]")
                 return processYOLO11nStandardFormat(outputArray, cropInfo)
             }
             // Format: [1, 8400, 84] - transposed format
             outputSize == 1 * 8400 * 84 -> {
-                Log.d(TAG, "Processing YOLO11n transposed format [1, 8400, 84]")
+                debugLog( "Processing YOLO11n transposed format [1, 8400, 84]")
                 return processYOLO11nTransposedFormat(outputArray, cropInfo)
             }
             // Format: [8400, 84] - no batch dimension
             outputSize == 8400 * 84 -> {
-                Log.d(TAG, "Processing YOLO11n no-batch format [8400, 84]")
+                debugLog( "Processing YOLO11n no-batch format [8400, 84]")
                 return processYOLO11nNoBatchFormat(outputArray, cropInfo)
             }
             // Format: [1, 85, 8400] - alternative format with objectness
             outputSize == 1 * 85 * 8400 -> {
-                Log.d(TAG, "Processing YOLO11n alternative format [1, 85, 8400]")
+                debugLog( "Processing YOLO11n alternative format [1, 85, 8400]")
                 return processYOLO11nAlternativeFormat(outputArray, cropInfo)
             }
             else -> {
@@ -310,7 +314,7 @@ class ObjectDetectionProcessor(
         val numClasses = classLabels.size
         val bboxSize = 4
         
-        Log.d(TAG, "Processing standard format with $numDetections detections, $numClasses classes")
+        debugLog( "Processing standard format with $numDetections detections, $numClasses classes")
         
         for (detectionIndex in 0 until numDetections) {
             val baseIndex = detectionIndex * (bboxSize + numClasses)
@@ -361,11 +365,11 @@ class ObjectDetectionProcessor(
                     
                     detections.add(DetectionResult(boundingBox, label, maxConfidence))
                 
-                Log.d(TAG, "Found detection: $label (${maxConfidence}) at ($x, $y, $w, $h)")
+                debugLog( "Found detection: $label (${maxConfidence}) at ($x, $y, $w, $h)")
             }
         }
 
-        Log.d(TAG, "Standard format processing complete. Raw detections: ${detections.size}")
+        debugLog( "Standard format processing complete. Raw detections: ${detections.size}")
         return applyNMS(detections)
     }
 
@@ -375,7 +379,7 @@ class ObjectDetectionProcessor(
         val numClasses = classLabels.size
         val bboxSize = 4
         
-        Log.d(TAG, "Processing transposed format with $numDetections detections, $numClasses classes")
+        debugLog( "Processing transposed format with $numDetections detections, $numClasses classes")
         
         for (detectionIndex in 0 until numDetections) {
             val baseIndex = detectionIndex * (bboxSize + numClasses)
@@ -419,11 +423,11 @@ class ObjectDetectionProcessor(
                 val boundingBox = RectF(absoluteLeft, absoluteTop, absoluteRight, absoluteBottom)
                 detections.add(DetectionResult(boundingBox, label, maxConfidence))
                 
-                Log.d(TAG, "Found detection: $label (${maxConfidence}) at ($x, $y, $w, $h)")
+                debugLog( "Found detection: $label (${maxConfidence}) at ($x, $y, $w, $h)")
             }
         }
         
-        Log.d(TAG, "Transposed format processing complete. Raw detections: ${detections.size}")
+        debugLog( "Transposed format processing complete. Raw detections: ${detections.size}")
         return applyNMS(detections)
     }
 
@@ -433,7 +437,7 @@ class ObjectDetectionProcessor(
         val numClasses = classLabels.size
         val bboxSize = 4
         
-        Log.d(TAG, "Processing no-batch format with $numDetections detections, $numClasses classes")
+        debugLog( "Processing no-batch format with $numDetections detections, $numClasses classes")
         
         for (detectionIndex in 0 until numDetections) {
             val baseIndex = detectionIndex * (bboxSize + numClasses)
@@ -477,11 +481,11 @@ class ObjectDetectionProcessor(
                 val boundingBox = RectF(absoluteLeft, absoluteTop, absoluteRight, absoluteBottom)
                 detections.add(DetectionResult(boundingBox, label, maxConfidence))
                 
-                Log.d(TAG, "Found detection: $label (${maxConfidence}) at ($x, $y, $w, $h)")
+                debugLog( "Found detection: $label (${maxConfidence}) at ($x, $y, $w, $h)")
             }
         }
         
-        Log.d(TAG, "No-batch format processing complete. Raw detections: ${detections.size}")
+        debugLog( "No-batch format processing complete. Raw detections: ${detections.size}")
         return applyNMS(detections)
     }
 
@@ -491,7 +495,7 @@ class ObjectDetectionProcessor(
         val numClasses = classLabels.size
         val bboxSize = 4
         
-        Log.d(TAG, "Processing alternative format with $numDetections detections, $numClasses classes")
+        debugLog( "Processing alternative format with $numDetections detections, $numClasses classes")
         
         for (detectionIndex in 0 until numDetections) {
             val baseIndex = detectionIndex * (bboxSize + numClasses + 1) // +1 for objectness score
@@ -536,18 +540,18 @@ class ObjectDetectionProcessor(
                 val boundingBox = RectF(absoluteLeft, absoluteTop, absoluteRight, absoluteBottom)
                 detections.add(DetectionResult(boundingBox, label, finalConfidence))
                 
-                Log.d(TAG, "Found detection: $label (${finalConfidence}) at ($x, $y, $w, $h)")
+                debugLog( "Found detection: $label (${finalConfidence}) at ($x, $y, $w, $h)")
             }
         }
         
-        Log.d(TAG, "Alternative format processing complete. Raw detections: ${detections.size}")
+        debugLog( "Alternative format processing complete. Raw detections: ${detections.size}")
         return applyNMS(detections)
     }
 
     private fun applyNMS(detections: List<DetectionResult>): List<DetectionResult> {
         if (detections.isEmpty()) return emptyList()
 
-        Log.d(TAG, "Applying NMS to ${detections.size} detections")
+        debugLog( "Applying NMS to ${detections.size} detections")
 
         // Sort by confidence (highest first)
         val sorted = detections.sortedByDescending { it.confidence }
@@ -571,7 +575,7 @@ class ObjectDetectionProcessor(
             }
         }
 
-        Log.d(TAG, "NMS complete. Final detections: ${result.size}")
+        debugLog( "NMS complete. Final detections: ${result.size}")
         return result
     }
 
@@ -600,7 +604,7 @@ class ObjectDetectionProcessor(
     // Utility methods
     fun isReady(): Boolean {
         val ready = isYolo11nInitialized && yolo11nInterpreter != null
-        Log.d(TAG, "Model ready check: $ready (YOLO11n initialized: $isYolo11nInitialized, Interpreter: ${yolo11nInterpreter != null})")
+        debugLog( "Model ready check: $ready (YOLO11n initialized: $isYolo11nInitialized, Interpreter: ${yolo11nInterpreter != null})")
         return ready
     }
 
@@ -620,9 +624,9 @@ class ObjectDetectionProcessor(
     }
 
     fun clear() {
-        Log.d(TAG, "Clearing YOLO11n interpreter...")
+        debugLog( "Clearing YOLO11n interpreter...")
         yolo11nInterpreter = null
         isYolo11nInitialized = false
-        Log.d(TAG, "YOLO11n interpreter cleared")
+        debugLog( "YOLO11n interpreter cleared")
     }
 } 

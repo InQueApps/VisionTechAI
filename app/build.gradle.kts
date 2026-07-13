@@ -13,8 +13,8 @@ android {
         applicationId = "ab.inque.prismai"
         minSdk = 27
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.4.4"
+        versionCode = 9
+        versionName = "0.4.5"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         signingConfig = signingConfigs.getByName("debug")
@@ -60,9 +60,13 @@ android {
     }
     buildFeatures {
         viewBinding = true
+        buildConfig = true
     }
     androidResources {
         noCompress += listOf("tflite", "data", "lite")
+    }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
     }
     // AGP 8.5.1+: use uncompressed native libs so they can be 16 KB zip-aligned (required for Play).
     // Do not use useLegacyPackaging = true; that compresses .so and is only for AGP < 8.5.1.
@@ -96,10 +100,8 @@ dependencies {
     implementation("com.google.mlkit:translate:17.0.2")
     implementation("com.google.android.gms:play-services-tasks:18.2.0")
     
-    // Play Billing Library for in-app purchases and subscriptions
-    implementation("com.android.billingclient:billing-ktx:8.3.0")
-    
     testImplementation(libs.junit)
+    testImplementation("org.robolectric:robolectric:4.14.1")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
 }
