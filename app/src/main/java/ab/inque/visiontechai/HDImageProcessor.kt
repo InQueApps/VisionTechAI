@@ -10,18 +10,11 @@ import android.util.Log
  */
 class HDImageProcessor(private val context: Context) {
 
-    companion object {
-        private const val TAG = "HDImageProcessor"
-        private const val MIN_SCALE = 0.01f
-        private const val MAX_SCALE = 4.0f
-        private const val CENTER_SCALE = 1.0f
-    }
-
     fun processImage(bitmap: Bitmap, sliderValue: Int): Bitmap {
         try {
-            val scale = convertSliderToScale(sliderValue)
-            if (scale == CENTER_SCALE) return bitmap
-            return if (scale < CENTER_SCALE) {
+            val scale = HdScaleMapper.sliderToScale(sliderValue)
+            if (scale == 1.0f) return bitmap
+            return if (scale < 1.0f) {
                 ImageResampleUtils.bicubicDownsample(
                     bitmap,
                     (bitmap.width * scale).toInt().coerceAtLeast(1),
@@ -49,17 +42,7 @@ class HDImageProcessor(private val context: Context) {
         }
     }
 
-    private fun convertSliderToScale(sliderValue: Int): Float {
-        return when {
-            sliderValue < 50 -> {
-                val normalized = sliderValue / 50f
-                CENTER_SCALE - (CENTER_SCALE - MIN_SCALE) * (1f - normalized)
-            }
-            sliderValue > 50 -> {
-                val normalized = (sliderValue - 50) / 50f
-                CENTER_SCALE + (MAX_SCALE - CENTER_SCALE) * normalized
-            }
-            else -> CENTER_SCALE
-        }
+    companion object {
+        private const val TAG = "HDImageProcessor"
     }
 }
