@@ -730,7 +730,7 @@ class MainActivity : AppCompatActivity() {
         visionPipeline = VisionAnalysisPipeline(
             getState = { visionState },
             processors = frameProcessors,
-            objectDetectionProcessor = objectDetectionProcessor,
+            detectObjects = objectDetectionProcessor::detectObjects,
             applyFlip = { b -> if (useFrontCamera) ImageUtils.flipBitmapHorizontally(b) else b }
         )
 
@@ -810,7 +810,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun captureCurrentScreenContent(): Bitmap? {
         return try {
-            if (overlayHost.usesFilterOverlay(visionState.mode)) {
+            if (MediaCapturePolicy.shouldCaptureOverlayBitmap(visionState.mode)) {
                 overlayHost.captureFilterBitmap()
             } else {
                 null
@@ -835,18 +835,7 @@ class MainActivity : AppCompatActivity() {
 
         val fromLang = visionState.params.translationSourceLanguageCode ?: "?"
         val toLang = visionState.params.translationTargetLanguageCode ?: "?"
-
-        val sb = StringBuilder()
-        sb.appendLine("PRISM AI Translation — $fromLang → $toLang")
-        sb.appendLine("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(System.currentTimeMillis())}")
-        sb.appendLine("=" .repeat(50))
-        sb.appendLine()
-        for ((i, pair) in translations.withIndex()) {
-            sb.appendLine("[${i + 1}]")
-            sb.appendLine("  Original:    ${pair.first}")
-            sb.appendLine("  Translated:  ${pair.second}")
-            sb.appendLine()
-        }
+        val body = TranslationExportFormatter.formatTxt(translations, fromLang, toLang)
 
         try {
             val name = Constants.MEDIA_FILENAME_PREFIX + "TRANS_" +
@@ -861,7 +850,7 @@ class MainActivity : AppCompatActivity() {
                 val uri = contentResolver.insert(MediaStore.Files.getContentUri("external"), contentValues)
                 uri?.let { savedUri ->
                     contentResolver.openOutputStream(savedUri)?.use { stream ->
-                        stream.write(sb.toString().toByteArray(Charsets.UTF_8))
+                        stream.write(body.toByteArray(Charsets.UTF_8))
                     }
                     SavedMediaTracker.addDocument(this, savedUri)
                     Toast.makeText(this, "Translation saved: $name", Toast.LENGTH_SHORT).show()
@@ -873,7 +862,7 @@ class MainActivity : AppCompatActivity() {
                     android.os.Environment.DIRECTORY_DOCUMENTS), "PrismAI")
                 dir.mkdirs()
                 val file = java.io.File(dir, name)
-                file.writeText(sb.toString(), Charsets.UTF_8)
+                file.writeText(body, Charsets.UTF_8)
                 val uri = Uri.fromFile(file)
                 SavedMediaTracker.addDocument(this, uri)
                 sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
@@ -1245,7 +1234,7 @@ class MainActivity : AppCompatActivity() {
                 put(MediaStore.Video.Media.RELATIVE_PATH, Constants.GALLERY_VIDEO_RELATIVE_PATH)
             }
         }
-        val recordWithFilter = visionState.mode != VisionMode.NONE && visionState.mode != VisionMode.OBJECT_DETECTION
+        val recordWithFilter = MediaCapturePolicy.shouldRecordProcessedVideo(visionState.mode)
         if (recordWithFilter) {
             // Record processed frames to temp file, then copy to MediaStore. Set isRecording only when encoder is ready.
             val moviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)

@@ -25,7 +25,7 @@ data class PipelineResult(
 class VisionAnalysisPipeline(
     private val getState: () -> VisionState,
     private val processors: Map<VisionMode, FrameProcessor>,
-    private val objectDetectionProcessor: ObjectDetectionProcessor,
+    private val detectObjects: (Bitmap) -> List<DetectionResult>,
     private val applyFlip: (Bitmap) -> Bitmap
 ) {
     private var frameCount = 0
@@ -41,49 +41,52 @@ class VisionAnalysisPipeline(
                 image.close()
                 return@Analyzer
             }
-            val state = getState()
-
-            // FPS
-            frameCount++
-            val now = System.currentTimeMillis()
-            if (now - lastFpsTime >= Constants.FPS_UPDATE_INTERVAL_MS) {
-                currentFps = frameCount * 1000f / (now - lastFpsTime)
-                frameCount = 0
-                lastFpsTime = now
-            }
-
-            // Histograms: compute every 2nd frame; reuse last for lower latency
-            val histograms = if (lastHistograms == null || frameCount % 2 == 0) {
-                ImageUtils.calculateHistograms(bitmap).also { lastHistograms = it }
-            } else {
-                lastHistograms
-            }
-
-            // Object detection (overlay only)
-            val detections = if (state.mode == VisionMode.OBJECT_DETECTION) {
-                objectDetectionProcessor.detectObjects(bitmap)
-            } else null
-
-            // Frame processor for overlay modes
-            val processor = if (state.mode != VisionMode.NONE && state.mode != VisionMode.OBJECT_DETECTION) {
-                processors[state.mode]
-            } else null
-            val processedBitmap = processor?.process(bitmap, state.params)?.let { applyFlip(it) }
-            val rawForSphere = if (state.mode == VisionMode.SPHERE) applyFlip(bitmap) else null
-
-            callback(
-                PipelineResult(
-                    fps = currentFps,
-                    histograms = histograms,
-                    processedBitmap = processedBitmap,
-                    rawBitmap = rawForSphere,
-                    detections = detections,
-                    imageHeight = bitmap.height,
-                    imageWidth = bitmap.width,
-                    frameTimestampNanos = frameTs
-                )
-            )
+            callback(processFrame(bitmap, frameTs))
             image.close()
         }
+    }
+
+    /** Frame logic extracted for unit tests (no [ImageProxy] required). */
+    internal fun processFrame(bitmap: Bitmap, frameTimestampNanos: Long): PipelineResult {
+        val state = getState()
+
+        frameCount++
+        val now = System.currentTimeMillis()
+        if (now - lastFpsTime >= Constants.FPS_UPDATE_INTERVAL_MS) {
+            currentFps = frameCount * 1000f / (now - lastFpsTime)
+            frameCount = 0
+            lastFpsTime = now
+        }
+
+        val histograms = if (lastHistograms == null || frameCount % 2 == 0) {
+            ImageUtils.calculateHistograms(bitmap).also { lastHistograms = it }
+        } else {
+            lastHistograms
+        }
+
+        val detections = if (state.mode == VisionMode.OBJECT_DETECTION) {
+            detectObjects(bitmap)
+        } else {
+            null
+        }
+
+        val processor = if (state.mode != VisionMode.NONE && state.mode != VisionMode.OBJECT_DETECTION) {
+            processors[state.mode]
+        } else {
+            null
+        }
+        val processedBitmap = processor?.process(bitmap, state.params)?.let { applyFlip(it) }
+        val rawForSphere = if (state.mode == VisionMode.SPHERE) applyFlip(bitmap) else null
+
+        return PipelineResult(
+            fps = currentFps,
+            histograms = histograms,
+            processedBitmap = processedBitmap,
+            rawBitmap = rawForSphere,
+            detections = detections,
+            imageHeight = bitmap.height,
+            imageWidth = bitmap.width,
+            frameTimestampNanos = frameTimestampNanos
+        )
     }
 }

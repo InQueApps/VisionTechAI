@@ -9,6 +9,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.constraintlayout.widget.ConstraintLayout
 import ab.inque.visiontechai.Constants
+import ab.inque.visiontechai.MediaCapturePolicy
 import ab.inque.visiontechai.ObjectDetectionOverlay
 import ab.inque.visiontechai.R
 import ab.inque.visiontechai.VisionMode
@@ -86,17 +87,8 @@ class VisionOverlayHost(
     }
 
     /** Modes that render a processed bitmap into [filterOverlay]. */
-    fun usesFilterOverlay(mode: VisionMode): Boolean = when (mode) {
-        VisionMode.NIGHT_VISION,
-        VisionMode.EDGE_DETECTION,
-        VisionMode.COLOR_ADJUSTMENT,
-        VisionMode.HD,
-        VisionMode.OPTICAL_FLOW,
-        VisionMode.SEGMENTATION,
-        VisionMode.DEPTH_FIELD,
-        VisionMode.TEXT_TRANSLATION -> true
-        else -> false
-    }
+    fun usesFilterOverlay(mode: VisionMode): Boolean =
+        MediaCapturePolicy.shouldCaptureOverlayBitmap(mode)
 
     fun hideAllEffectOverlays() {
         filterOverlay.visibility = View.GONE

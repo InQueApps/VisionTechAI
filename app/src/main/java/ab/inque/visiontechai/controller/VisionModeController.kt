@@ -8,6 +8,7 @@ import ab.inque.visiontechai.HDFrameProcessor
 import ab.inque.visiontechai.OpticalFlowProcessor
 import ab.inque.visiontechai.ImageSegmentationProcessor
 import ab.inque.visiontechai.VisionMode
+import ab.inque.visiontechai.VisionModeTransitions
 import ab.inque.visiontechai.VisionState
 import ab.inque.visiontechai.databinding.ActivityMainBinding
 import ab.inque.visiontechai.FrameProcessor
@@ -30,14 +31,14 @@ class VisionModeController(
 ) {
     fun setVisionMode(mode: VisionMode) {
         val prev = visionState.mode
-        if (prev == VisionMode.SPHERE && mode != VisionMode.SPHERE) {
+        val cleanup = VisionModeTransitions.cleanupOnModeChange(prev, mode)
+        if (cleanup.clearSphere) {
             onSphereCleanup()
         }
-        if (prev == VisionMode.NIGHT_VISION && mode != VisionMode.NIGHT_VISION) {
+        if (cleanup.clearFrameAccumulator) {
             FrameAccumulatorNative.clear()
         }
-        if (prev == VisionMode.HD && mode != VisionMode.HD) {
-            FrameAccumulatorNative.clear()
+        if (cleanup.clearHdCache) {
             (frameProcessors[VisionMode.HD] as? HDFrameProcessor)?.clearCache()
         }
         visionState.mode = mode
