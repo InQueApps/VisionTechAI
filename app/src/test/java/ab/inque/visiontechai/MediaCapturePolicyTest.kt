@@ -20,10 +20,11 @@ class MediaCapturePolicyTest {
     }
 
     @Test
-    fun shouldRecordProcessedVideo_falseOnlyForNoneAndObjectDetection() {
+    fun shouldRecordProcessedVideo_matchesOverlayBitmapPolicy() {
         assertFalse(MediaCapturePolicy.shouldRecordProcessedVideo(VisionMode.NONE))
         assertFalse(MediaCapturePolicy.shouldRecordProcessedVideo(VisionMode.OBJECT_DETECTION))
+        assertFalse(MediaCapturePolicy.shouldRecordProcessedVideo(VisionMode.SPHERE))
         assertTrue(MediaCapturePolicy.shouldRecordProcessedVideo(VisionMode.EDGE_DETECTION))
-        assertTrue(MediaCapturePolicy.shouldRecordProcessedVideo(VisionMode.SPHERE))
+        assertTrue(MediaCapturePolicy.shouldRecordProcessedVideo(VisionMode.HD))
     }
 }

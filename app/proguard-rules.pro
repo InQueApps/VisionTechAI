@@ -20,10 +20,12 @@
 -keep class ab.inque.visiontechai.TextTranslatorNative { *; }
 -keep class ab.inque.visiontechai.VideoNative { *; }
 
-# TensorFlow Lite
+# TensorFlow Lite / LiteRT (org.tensorflow.lite API + com.google.ai.edge.litert)
 -keep class org.tensorflow.lite.** { *; }
 -keep interface org.tensorflow.lite.** { *; }
 -keepclassmembers class org.tensorflow.lite.** { *; }
+-keep class com.google.ai.edge.litert.** { *; }
+-dontwarn com.google.ai.edge.litert.**
 
 # ML Kit
 -keep class com.google.mlkit.** { *; }

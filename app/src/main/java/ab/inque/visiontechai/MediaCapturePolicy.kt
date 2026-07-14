@@ -20,5 +20,5 @@ object MediaCapturePolicy {
 
     /** True when video should be encoded from processed pipeline frames instead of raw CameraX. */
     fun shouldRecordProcessedVideo(mode: VisionMode): Boolean =
-        mode != VisionMode.NONE && mode != VisionMode.OBJECT_DETECTION
+        shouldCaptureOverlayBitmap(mode)
 }
