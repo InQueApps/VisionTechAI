@@ -1,7 +1,16 @@
 package ab.inque.visiontechai.controller
 
+import ab.inque.visiontechai.Constants
+import ab.inque.visiontechai.LensDistortion
+import ab.inque.visiontechai.LensDistortionStore
 import ab.inque.visiontechai.OrientationTracker
+import ab.inque.visiontechai.SavedMediaTracker
 import ab.inque.visiontechai.SphereCaptureController
+import ab.inque.visiontechai.SphereCoverageFormatter
+import ab.inque.visiontechai.SphereExtrinsicCalibration
+import ab.inque.visiontechai.SphereFovHelper
+import ab.inque.visiontechai.SpherePreviewBinder
+import ab.inque.visiontechai.SphereXmpMetadata
 import ab.inque.visiontechai.VisionMode
 import ab.inque.visiontechai.databinding.ActivityMainBinding
 import android.content.ContentValues
@@ -12,8 +21,6 @@ import android.util.Log
 import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
-import ab.inque.visiontechai.Constants
-import ab.inque.visiontechai.SavedMediaTracker
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
@@ -27,22 +34,40 @@ class SphereSessionController(
     private val orientationTracker: OrientationTracker,
     private val setVisionMode: (VisionMode) -> Unit,
     private val getCameraFovH: () -> Float,
-    private val getCameraFovV: () -> Float
+    private val getCameraFovV: () -> Float,
+    private val getAnalysisWidth: () -> Int,
+    private val getAnalysisHeight: () -> Int,
+    private val getDisplayRotationDegrees: () -> Int
 ) {
     var controller: SphereCaptureController? = null
-        private set
+        internal set
+
+    private val extrinsicCalibration = SphereExtrinsicCalibration(activity)
+    private val lensDistortionStore = LensDistortionStore(activity)
 
     @Volatile
     var captureNextFrame: Boolean = false
+
+    @Volatile
+    var lastRawFrame: Bitmap? = null
+        private set
+
+    @Volatile
+    private var lastRawFrameTimestampNanos: Long = 0L
 
     fun enter() {
         setVisionMode(VisionMode.SPHERE)
         orientationTracker.start()
         controller = SphereCaptureController(
             orientationTracker,
-            onCoverageUpdate = { coverage ->
+            extrinsicCalibration,
+            onCoverageUpdate = { area, solid, preview ->
                 activity.runOnUiThread {
-                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
+                    binding.sphereCoverageText.text =
+                        SphereCoverageFormatter.format(area, solid)
+                    if (preview != null) {
+                        SpherePreviewBinder.apply(binding.spherePreviewImage, preview)
+                    }
                 }
             },
             onPreviewReady = {
@@ -64,21 +89,63 @@ class SphereSessionController(
                     }
                     Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
                 }
+            },
+            onFrameAccepted = {
+                activity.runOnUiThread {
+                    Toast.makeText(activity, "Frame added to sphere", Toast.LENGTH_SHORT).show()
+                }
             }
         )
         val isPortrait = activity.resources.configuration.orientation ==
             android.content.res.Configuration.ORIENTATION_PORTRAIT
-        val effectiveFovH = if (isPortrait) getCameraFovV() else getCameraFovH()
-        val effectiveFovV = if (isPortrait) getCameraFovH() else getCameraFovV()
-        controller?.startSession(effectiveFovH, effectiveFovV)
+        val (effectiveFovH, effectiveFovV) = SphereFovHelper.effectiveFov(
+            isPortrait = isPortrait,
+            fovH = getCameraFovH(),
+            fovV = getCameraFovV(),
+            analysisWidth = getAnalysisWidth().coerceAtLeast(320),
+            analysisHeight = getAnalysisHeight().coerceAtLeast(240),
+            rotationDegrees = getDisplayRotationDegrees()
+        )
+        controller?.startSession(effectiveFovH, effectiveFovV, lensDistortionStore.get())
+        if (!ab.inque.visiontechai.SphereNative.isAvailable()) {
+            Toast.makeText(
+                activity,
+                "Sphere stitching unavailable on this device",
+                Toast.LENGTH_LONG
+            ).show()
+        }
         binding.sphereCaptureOverlay.visibility = View.VISIBLE
         binding.sphereViewerOverlay.visibility = View.GONE
-        binding.sphereCoverageText.text = "Coverage: 0%"
+        binding.sphereCoverageText.text = SphereCoverageFormatter.format(0f, 0f)
         Toast.makeText(activity, "Sphere mode — scan your surroundings", Toast.LENGTH_SHORT).show()
     }
 
+    fun resetExtrinsicCalibration() {
+        extrinsicCalibration.reset()
+        Toast.makeText(activity, "Sphere calibration reset", Toast.LENGTH_SHORT).show()
+    }
+
+    fun onRawFrame(bitmap: Bitmap, timestampNanos: Long) {
+        if (!bitmap.isRecycled) {
+            lastRawFrame = bitmap
+            lastRawFrameTimestampNanos = timestampNanos
+        }
+    }
+
+    fun capturePhotoFrame() {
+        val ctrl = controller ?: return
+        if (ctrl.state != SphereCaptureController.State.CAPTURING) return
+        val raw = lastRawFrame
+        if (raw != null && !raw.isRecycled) {
+            ctrl.captureFrame(raw, lastRawFrameTimestampNanos)
+        } else {
+            captureNextFrame = true
+            Toast.makeText(activity, "Capturing frame…", Toast.LENGTH_SHORT).show()
+        }
+    }
+
     fun exit() {
-        controller?.resetSession()
+        controller?.release()
         controller = null
         orientationTracker.stop()
         binding.sphereCaptureOverlay.visibility = View.GONE
@@ -106,8 +173,7 @@ class SphereSessionController(
         val ctrl = controller ?: return
         if (ctrl.state != SphereCaptureController.State.CAPTURING) return
         if (isPhotoMode) {
-            captureNextFrame = true
-            Toast.makeText(activity, "Frame added to sphere", Toast.LENGTH_SHORT).show()
+            capturePhotoFrame()
         } else if (ctrl.isContinuousCapturing) {
             ctrl.stopContinuousCapture()
             onRecordIconChange(ab.inque.visiontechai.R.drawable.ic_record)
@@ -120,7 +186,14 @@ class SphereSessionController(
     }
 
     fun finishCapture() {
-        controller?.finishCapture()
+        val started = controller?.finishCapture() ?: false
+        if (!started) {
+            Toast.makeText(
+                activity,
+                "Need ${(SphereCoverageFormatter.MIN_SOLID_ANGLE_TO_FINISH * 100).toInt()}% sphere coverage to finish",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
     }
 
     fun saveEquirectangular() {
@@ -145,7 +218,7 @@ class SphereSessionController(
             }
             val jpegBytes = ByteArrayOutputStream()
             bitmap.compress(Bitmap.CompressFormat.JPEG, 95, jpegBytes)
-            val xmpData = buildXmpMetadata(bitmap.width, bitmap.height)
+            val xmpData = SphereXmpMetadata.buildGpanoXmp(bitmap.width, bitmap.height).toByteArray(Charsets.UTF_8)
             val finalData = injectXmpIntoJpeg(jpegBytes.toByteArray(), xmpData)
             val uri = activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
             uri?.let { savedUri ->
@@ -161,26 +234,6 @@ class SphereSessionController(
             Log.e(TAG, "Failed to save sphere: ${e.message}")
             Toast.makeText(activity, "Failed to save sphere photo", Toast.LENGTH_SHORT).show()
         }
-    }
-
-    private fun buildXmpMetadata(width: Int, height: Int): ByteArray {
-        val xmp = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-    xmlns:GPano="http://ns.google.com/photos/1.0/panorama/"
-    GPano:UsePanoramaViewer="True"
-    GPano:ProjectionType="equirectangular"
-    GPano:FullPanoWidthPixels="$width"
-    GPano:FullPanoHeightPixels="$height"
-    GPano:CroppedAreaLeftPixels="0"
-    GPano:CroppedAreaTopPixels="0"
-    GPano:CroppedAreaImageWidthPixels="$width"
-    GPano:CroppedAreaImageHeightPixels="$height"/>
- </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end="w"?>"""
-        return xmp.toByteArray(Charsets.UTF_8)
     }
 
     private fun injectXmpIntoJpeg(jpegData: ByteArray, xmpData: ByteArray): ByteArray {

@@ -20,6 +20,8 @@ object NightVisionNative {
         }
     }
 
+    fun isAvailable(): Boolean = loaded
+
     fun enhance(bitmap: Bitmap, intensity: Float): Bitmap? {
         if (!loaded) return null
         val w = bitmap.width

@@ -9,10 +9,16 @@ import android.util.Log
  */
 class SphereCaptureController(
     private val orientationTracker: OrientationTracker,
-    private val onCoverageUpdate: (Float) -> Unit,
+    private val extrinsicCalibration: SphereExtrinsicCalibration,
+    private val onCoverageUpdate: (areaCoverage: Float, solidAngleCoverage: Float, preview: Bitmap?) -> Unit,
     private val onPreviewReady: (Bitmap) -> Unit,
-    private val onFrameWarning: ((FrameWarning) -> Unit)? = null
+    private val onFrameWarning: ((FrameWarning) -> Unit)? = null,
+    private val onFrameAccepted: (() -> Unit)? = null,
+    private val operations: SphereStitchOperations = SphereNativeOperations,
+    stitchWorker: SphereStitchWorker = SphereStitchWorker(operations = operations)
 ) {
+
+    private val stitchWorker: SphereStitchWorker = stitchWorker
 
     enum class FrameWarning {
         NO_OVERLAP,
@@ -25,79 +31,138 @@ class SphereCaptureController(
     @Volatile var state = State.IDLE
         private set
 
+    @Volatile var lastCoverage: Float = 0f
+        private set
+
+    @Volatile var lastSolidAngleCoverage: Float = 0f
+        private set
+
+    @Volatile var lastPreviewBitmap: Bitmap? = null
+        private set
+
     @Volatile private var continuousCapture = false
     private var lastCaptureTimeMs = 0L
+    private var lastMotionQuat: FloatArray? = null
+    private var lastMotionTimeMs = 0L
     private var frameCount = 0
 
-    fun startSession(fovH: Float = 65f, fovV: Float = 50f) {
-        SphereNative.reset()
-        SphereNative.init(EQ_W, EQ_H, fovH, fovV)
+    init {
+        stitchWorker.onResult = { result ->
+            handleStitchResult(result)
+        }
+    }
+
+    fun startSession(
+        fovH: Float = 65f,
+        fovV: Float = 50f,
+        distortion: LensDistortion = LensDistortion.NONE
+    ) {
+        operations.reset()
+        val ok = operations.init(EQ_W, EQ_H, fovH, fovV, distortion)
+        if (!ok) {
+            Log.e(TAG, "Sphere native init failed — is vision_sphere loaded?")
+        }
         state = State.CAPTURING
         frameCount = 0
         continuousCapture = false
+        lastCoverage = 0f
+        lastSolidAngleCoverage = 0f
+        lastPreviewBitmap = null
+        lastMotionQuat = null
+        lastMotionTimeMs = 0L
+        orientationTracker.clockSync.reset()
         Log.i(TAG, "Sphere session started (fov=${fovH}x${fovV})")
     }
 
     /**
      * Add a single frame (photo mode tap).
-     * @param frameTimestampNanos the camera frame's capture timestamp
-     *        (elapsedRealtimeNanos); if >0, the quaternion is interpolated
-     *        from IMU history at that exact instant, eliminating pipeline lag.
      */
     fun captureFrame(bitmap: Bitmap, frameTimestampNanos: Long = 0) {
         if (state != State.CAPTURING) return
-        val quat = if (frameTimestampNanos > 0)
-            orientationTracker.getQuaternionAt(frameTimestampNanos)
-        else
-            orientationTracker.getQuaternion()
+        val imuQuat = orientationTracker.getQuaternionForCameraFrame(frameTimestampNanos)
+        val quat = extrinsicCalibration.applyToImu(imuQuat)
         if (frameCount == 0) {
-            Log.i(TAG, "First frame: ${bitmap.width}x${bitmap.height}, quat=[${quat[0]}, ${quat[1]}, ${quat[2]}, ${quat[3]}]")
+            Log.i(
+                TAG,
+                "First frame: ${bitmap.width}x${bitmap.height}, quat=[${quat[0]}, ${quat[1]}, ${quat[2]}, ${quat[3]}]"
+            )
         }
-        val accepted = SphereNative.addFrame(bitmap, quat)
-        if (accepted) {
-            frameCount++
-        }
-        onCoverageUpdate(SphereNative.getCoverage())
-        checkFrameAlignment()
+        stitchWorker.submit(bitmap, quat)
     }
 
-    private fun checkFrameAlignment() {
-        val info = SphereNative.getLastFrameInfo() ?: return
-        if (info.isFirstFrame) return
-
-        when {
-            info.wasRejected -> {
-                Log.w(TAG, "Frame ${info.frameIndex}: REJECTED (SSD=${info.residualSSD}, " +
-                        "overlap=${info.overlapCount}/${info.totalSamples})")
-                onFrameWarning?.invoke(FrameWarning.ALIGNMENT_FAILED)
-            }
-            info.hasLowOverlap -> {
-                Log.w(TAG, "Frame ${info.frameIndex}: low overlap ${info.overlapCount}/${info.totalSamples} " +
-                        "(${(info.overlapRatio * 100).toInt()}%)")
-                onFrameWarning?.invoke(FrameWarning.NO_OVERLAP)
-            }
-            info.hasExcessiveShift -> {
-                Log.w(TAG, "Frame ${info.frameIndex}: excessive alignment shift ${info.alignmentOffsetDeg}°")
-                onFrameWarning?.invoke(FrameWarning.EXCESSIVE_SHIFT)
-            }
+    private fun handleStitchResult(result: SphereStitchResult) {
+        if (result.accepted) {
+            frameCount++
+            onFrameAccepted?.invoke()
+            Log.i(
+                TAG,
+                "Frame accepted (#$frameCount): coverage=${result.coverage} solid=${result.solidAngleCoverage} " +
+                    "preview=${result.previewBitmap?.width}x${result.previewBitmap?.height}"
+            )
+        } else {
+            Log.w(TAG, "Frame rejected — preview unchanged (coverage=${result.coverage})")
+        }
+        lastCoverage = result.coverage
+        lastSolidAngleCoverage = result.solidAngleCoverage
+        val preview = result.previewBitmap ?: lastPreviewBitmap
+        if (result.previewBitmap != null) {
+            lastPreviewBitmap = result.previewBitmap
+        }
+        onCoverageUpdate(result.coverage, result.solidAngleCoverage, preview)
+        if (result.accepted && preview == null) {
+            Log.e(TAG, "Frame accepted but preview bitmap is null — native stitch may have failed")
+        }
+        result.frameInfo?.let { info ->
+            SphereAlignmentPolicy.classifyWarning(info)?.let { onFrameWarning?.invoke(it) }
+        }
+        if (BuildConfig.DEBUG && result.ranOnMainThread) {
+            Log.e(TAG, "Sphere stitch ran on main thread — this should never happen")
         }
     }
 
     /**
      * Feed a frame during continuous capture (video mode).
-     * Throttles to ~5 fps to avoid overloading.
+     * Uses adaptive throttling based on angular velocity.
      */
     fun feedContinuousFrame(bitmap: Bitmap, frameTimestampNanos: Long = 0) {
         if (state != State.CAPTURING || !continuousCapture) return
         val now = System.currentTimeMillis()
-        if (now - lastCaptureTimeMs < CONTINUOUS_INTERVAL_MS) return
-        lastCaptureTimeMs = now
-        captureFrame(bitmap, frameTimestampNanos)
+        val imuQuat = orientationTracker.getQuaternionForCameraFrame(frameTimestampNanos)
+        val quat = extrinsicCalibration.applyToImu(imuQuat)
+        val angularVel = estimateAngularVelocity(quat, now)
+        when (
+            SphereAdaptiveThrottler.evaluate(
+                now,
+                lastCaptureTimeMs,
+                angularVel,
+                stitchWorker.isBusy
+            )
+        ) {
+            SphereAdaptiveThrottler.Decision.ACCEPT -> {
+                lastCaptureTimeMs = now
+                captureFrame(bitmap, frameTimestampNanos)
+            }
+            SphereAdaptiveThrottler.Decision.SKIP_FAST_PAN ->
+                onFrameWarning?.invoke(FrameWarning.EXCESSIVE_SHIFT)
+            SphereAdaptiveThrottler.Decision.SKIP_STATIONARY,
+            SphereAdaptiveThrottler.Decision.SKIP_THROTTLE -> Unit
+        }
+    }
+
+    private fun estimateAngularVelocity(currentQuat: FloatArray, nowMs: Long): Double {
+        val prev = lastMotionQuat
+        val prevMs = lastMotionTimeMs
+        lastMotionQuat = currentQuat.copyOf()
+        lastMotionTimeMs = nowMs
+        if (prev == null || prevMs == 0L) return 0.0
+        return SphereMotionEstimator.angularVelocityDegPerSec(prev, currentQuat, nowMs - prevMs)
     }
 
     fun startContinuousCapture() {
         continuousCapture = true
         lastCaptureTimeMs = 0L
+        lastMotionQuat = null
+        lastMotionTimeMs = 0L
         Log.i(TAG, "Continuous capture started")
     }
 
@@ -108,34 +173,43 @@ class SphereCaptureController(
 
     val isContinuousCapturing get() = continuousCapture
 
-    /** Finish capture and transition to preview state. */
-    fun finishCapture() {
-        if (state != State.CAPTURING) return
+    fun finishCapture(): Boolean {
+        if (state != State.CAPTURING) return false
+        if (!SphereCoverageFormatter.canFinish(lastSolidAngleCoverage)) {
+            onFrameWarning?.invoke(FrameWarning.NO_OVERLAP)
+            return false
+        }
         continuousCapture = false
-        state = State.PREVIEW
-        Log.i(TAG, "Capture finished, $frameCount frames, coverage=${SphereNative.getCoverage()}")
-        val equirect = SphereNative.getEquirectBitmap(EQ_W, EQ_H)
-        if (equirect != null) onPreviewReady(equirect)
+        stitchWorker.runWhenIdle {
+            operations.refineSeams()
+            state = State.PREVIEW
+            Log.i(TAG, "Capture finished, $frameCount frames, coverage=$lastCoverage solid=$lastSolidAngleCoverage")
+            val equirect = operations.getEquirectBitmap(EQ_W, EQ_H)
+            if (equirect != null) onPreviewReady(equirect)
+        }
+        return true
     }
 
-    /** Get current equirectangular preview (downscaled for display). */
-    fun getPreviewBitmap(): Bitmap? {
-        val full = SphereNative.getEquirectBitmap(EQ_W, EQ_H) ?: return null
-        return Bitmap.createScaledBitmap(full, PREVIEW_W, PREVIEW_H, true)
-    }
+    fun getPreviewBitmap(): Bitmap? = lastPreviewBitmap
 
-    /** Get full-resolution equirectangular for saving. */
-    fun getFullEquirect(): Bitmap? = SphereNative.getEquirectBitmap(EQ_W, EQ_H)
+    fun getFullEquirect(): Bitmap? {
+        operations.refineSeams()
+        return operations.getEquirectBitmap(EQ_W, EQ_H)
+    }
 
     fun resetSession() {
-        SphereNative.reset()
+        operations.reset()
         state = State.IDLE
         frameCount = 0
         continuousCapture = false
+        lastCoverage = 0f
+        lastSolidAngleCoverage = 0f
+        lastPreviewBitmap = null
     }
 
     fun release() {
-        SphereNative.release()
+        stitchWorker.shutdown()
+        operations.release()
         state = State.IDLE
     }
 
@@ -143,8 +217,5 @@ class SphereCaptureController(
         private const val TAG = "SphereCaptureCtrl"
         const val EQ_W = 4096
         const val EQ_H = 2048
-        private const val PREVIEW_W = 1024
-        private const val PREVIEW_H = 512
-        private const val CONTINUOUS_INTERVAL_MS = 200L // ~5 fps
     }
 }

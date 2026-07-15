@@ -43,6 +43,8 @@ static constexpr int64_t TIME_BUDGET_US = 150000; // 150ms
 
 // Residual SSD above this threshold (after alignment) means poor match
 static constexpr double REJECT_SSD_THRESH = 8000.0;
+static constexpr double REJECT_SSD_RELAXED = REJECT_SSD_THRESH * 1.35;
+static constexpr int TILE_GAIN_N = 8;
 
 // Per-pixel mismatch rejection during splatting (squared per-channel thresholds)
 static constexpr float MISMATCH_SOFT_SQ  = 35.0f * 35.0f;  // ~1225
@@ -99,11 +101,81 @@ static int sFrameIndex = 0;
 static int sLastOverlapCount = 0;
 static int sLastTotalSamples = 0;
 static float sLastAlignOffset = 0.f;
+static float sLastRollOffset = 0.f;
 static float sLastResidualSSD = 0.f;
 static int sLastRejected = 0;
+static int sShiftX = 0;
+static int sShiftY = 0;
+
+static float distK1 = 0.f, distK2 = 0.f, distP1 = 0.f, distP2 = 0.f;
+
+static inline void undistortNorm(double& nx, double& ny) {
+    if (distK1 == 0.f && distK2 == 0.f && distP1 == 0.f && distP2 == 0.f) return;
+    double x = nx, y = ny;
+    double ux = x, uy = y;
+    for (int i = 0; i < 5; i++) {
+        double r2 = ux * ux + uy * uy;
+        double radial = 1.0 + distK1 * r2 + distK2 * r2 * r2;
+        double dx = 2.0 * distP1 * ux * uy + distP2 * (r2 + 2.0 * ux * ux);
+        double dy = distP1 * (r2 + 2.0 * uy * uy) + 2.0 * distP2 * ux * uy;
+        ux = (x - dx) / radial;
+        uy = (y - dy) / radial;
+    }
+    nx = ux;
+    ny = uy;
+}
+
+static inline void pixelToRay(int fx, int fy, int frameW, int frameH,
+                              double tanH, double tanV,
+                              double& rx, double& ry, double& rz) {
+    double nx = ((double)fx / (frameW - 1) - 0.5) * 2.0 * tanH;
+    double ny = (0.5 - (double)fy / (frameH - 1)) * 2.0 * tanV;
+    undistortNorm(nx, ny);
+    double len = std::sqrt(nx * nx + ny * ny + 1.0);
+    rx = nx / len;
+    ry = ny / len;
+    rz = -1.0 / len;
+}
 
 static inline int clampI(int v, int lo, int hi) {
     return v < lo ? lo : (v > hi ? hi : v);
+}
+
+static inline float bilinearTileGain(const float* tileGains, int channel,
+                                     int fx, int fy, int frameW, int frameH) {
+    double u = (double)fx / std::max(1, frameW - 1) * TILE_GAIN_N;
+    double v = (double)fy / std::max(1, frameH - 1) * TILE_GAIN_N;
+    int x0 = clampI((int)u, 0, TILE_GAIN_N - 1);
+    int y0 = clampI((int)v, 0, TILE_GAIN_N - 1);
+    int x1 = std::min(TILE_GAIN_N - 1, x0 + 1);
+    int y1 = std::min(TILE_GAIN_N - 1, y0 + 1);
+    double tx = u - x0, ty = v - y0;
+    auto at = [&](int tx, int ty) -> float {
+        return tileGains[(ty * TILE_GAIN_N + tx) * 3 + channel];
+    };
+    return static_cast<float>(
+        (1.0 - tx) * (1.0 - ty) * at(x0, y0) +
+        tx * (1.0 - ty) * at(x1, y0) +
+        (1.0 - tx) * ty * at(x0, y1) +
+        tx * ty * at(x1, y1));
+}
+
+static float computeSolidAngleCoverageLocked() {
+    constexpr int GW = 32, GH = 16;
+    if (eqW == 0 || eqH == 0) return 0.f;
+    int filled = 0;
+    for (int gy = 0; gy < GH; gy++) {
+        for (int gx = 0; gx < GW; gx++) {
+            int x0 = gx * eqW / GW, x1 = (gx + 1) * eqW / GW;
+            int y0 = gy * eqH / GH, y1 = (gy + 1) * eqH / GH;
+            float maxW = 0.f;
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++)
+                    maxW = std::max(maxW, eqWeight[y * eqW + x]);
+            if (maxW > 0.05f) filled++;
+        }
+    }
+    return static_cast<float>(filled) / (GW * GH);
 }
 
 static inline void splatPixel(int ex, int ey, float r, float g, float b, float w) {
@@ -115,18 +187,89 @@ static inline void splatPixel(int ex, int ey, float r, float g, float b, float w
     eqWeight[idx] += w;
 }
 
+// Weight-gradient seam blend (export / finish pass — S12 multiband lite).
+static void refineSeamsLocked(int radius = 12) {
+    if (eqW == 0 || eqH == 0) return;
+    const int sz = eqW * eqH;
+    std::vector<float> nr(sz, 0.f), ng(sz, 0.f), nb(sz, 0.f);
+    for (int i = 0; i < sz; i++) {
+        if (eqWeight[i] > 0.f) {
+            float inv = 1.f / eqWeight[i];
+            nr[i] = eqR[i] * inv;
+            ng[i] = eqG[i] * inv;
+            nb[i] = eqB[i] * inv;
+        }
+    }
+    const float sigma = static_cast<float>(radius) * 0.5f;
+    const float invSigma2 = 1.f / (2.f * sigma * sigma);
+
+    for (int y = radius; y < eqH - radius; y++) {
+        for (int x = 0; x < eqW; x++) {
+            int idx = y * eqW + x;
+            if (eqWeight[idx] < 0.05f) continue;
+
+            float wCenter = eqWeight[idx];
+            float maxGrad = 0.f;
+            for (int dy = -radius; dy <= radius; dy += 4) {
+                int ny = y + dy;
+                if (ny < 0 || ny >= eqH) continue;
+                for (int dx = -radius; dx <= radius; dx += 4) {
+                    int nx = (x + dx + eqW) % eqW;
+                    maxGrad = std::max(maxGrad, std::abs(eqWeight[ny * eqW + nx] - wCenter));
+                }
+            }
+            if (maxGrad < 0.3f) continue;
+
+            float sr = 0.f, sg = 0.f, sb = 0.f, sw = 0.f;
+            for (int dy = -radius; dy <= radius; dy++) {
+                int ny = y + dy;
+                if (ny < 0 || ny >= eqH) continue;
+                for (int dx = -radius; dx <= radius; dx++) {
+                    int nx = (x + dx + eqW) % eqW;
+                    int j = ny * eqW + nx;
+                    if (eqWeight[j] < 0.05f) continue;
+                    float d2 = static_cast<float>(dx * dx + dy * dy);
+                    float gw = std::exp(-d2 * invSigma2);
+                    sr += nr[j] * gw;
+                    sg += ng[j] * gw;
+                    sb += nb[j] * gw;
+                    sw += gw;
+                }
+            }
+            if (sw > 0.f) {
+                nr[idx] = sr / sw;
+                ng[idx] = sg / sw;
+                nb[idx] = sb / sw;
+            }
+        }
+    }
+
+    for (int i = 0; i < sz; i++) {
+        if (eqWeight[i] > 0.f) {
+            eqR[i] = nr[i] * eqWeight[i];
+            eqG[i] = ng[i] * eqWeight[i];
+            eqB[i] = nb[i] * eqWeight[i];
+        }
+    }
+}
+
 // ── JNI functions ───────────────────────────────────────────────────────
 
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeInit(
-    JNIEnv*, jobject, jint width, jint height, jfloat fovH, jfloat fovV) {
+    JNIEnv*, jobject, jint width, jint height, jfloat fovH, jfloat fovV,
+    jfloat k1, jfloat k2, jfloat p1, jfloat p2) {
     std::lock_guard<std::mutex> lock(sphereMutex);
     eqW = width;
     eqH = height;
     storedFovH = fovH;
     storedFovV = fovV;
+    distK1 = k1;
+    distK2 = k2;
+    distP1 = p1;
+    distP2 = p2;
     int sz = eqW * eqH;
     eqR.assign(sz, 0.f);
     eqG.assign(sz, 0.f);
@@ -134,7 +277,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeInit(
     eqWeight.assign(sz, 0.f);
     sFrameIndex = 0;
     sLastRejected = 0;
-    LOGI("Sphere init: %dx%d  fov=%.1f x %.1f", eqW, eqH, fovH, fovV);
+    sLastRollOffset = 0.f;
+    LOGI("Sphere init: %dx%d  fov=%.1f x %.1f  dist k1=%.4f", eqW, eqH, fovH, fovV, k1);
     return JNI_TRUE;
 }
 
@@ -148,6 +292,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     if (eqW == 0 || eqH == 0) return JNI_FALSE;
 
     auto t0 = SteadyClock::now();
+    sShiftX = 0;
+    sShiftY = 0;
 
     jint* pixels = env->GetIntArrayElements(jPixels, nullptr);
     if (!pixels) return JNI_FALSE;
@@ -168,6 +314,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     struct OverlapSample {
         float newR, newG, newB;
         double rx, ry, rz;
+        int fx, fy;
     };
 
     constexpr int SAMPLE_STEP = 8;
@@ -178,12 +325,10 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     int totalSamples = 0;
 
     for (int fy = 0; fy < frameH; fy += SAMPLE_STEP) {
-        double ny = (0.5 - (double)fy / (frameH - 1)) * 2.0 * tanV;
         for (int fx = 0; fx < frameW; fx += SAMPLE_STEP) {
             totalSamples++;
-            double nx = ((double)fx / (frameW - 1) - 0.5) * 2.0 * tanH;
-            double len = std::sqrt(nx * nx + ny * ny + 1.0);
-            double rx = nx / len, ry = ny / len, rz = -1.0 / len;
+            double rx, ry, rz;
+            pixelToRay(fx, fy, frameW, frameH, tanH, tanV, rx, ry, rz);
             double wx, wy, wz;
             quatRotate(q, rx, ry, rz, wx, wy, wz);
             double lon = std::atan2(wx, wy);
@@ -205,7 +350,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
                 sumNewR += nr;
                 sumNewG += ng;
                 sumNewB += nb;
-                overlap.push_back({nr, ng, nb, rx, ry, rz});
+                overlap.push_back({nr, ng, nb, rx, ry, rz, fx, fy});
             }
         }
     }
@@ -228,10 +373,11 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     if (overlap.size() > 50) {
 
         // SSD evaluator with pre-computed rays
-        auto computeRotSSD = [&](double dyaw, double dpitch, int subsample) -> double {
+        auto computeRotSSD = [&](double dyaw, double dpitch, double droll, int subsample) -> double {
             Quat qY = quatFromAxisAngle(0, 0, 1, dyaw);
             Quat qP = quatFromAxisAngle(1, 0, 0, dpitch);
-            Quat qC = quatMul(qY, quatMul(qP, q));
+            Quat qR = quatFromAxisAngle(0, 0, 1, droll);
+            Quat qC = quatMul(qY, quatMul(qP, quatMul(qR, q)));
 
             double ssd = 0.0;
             int count = 0;
@@ -258,8 +404,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             return ssd / count;
         };
 
-        double baselineSSD = computeRotSSD(0, 0, 1);
-        double bestDyaw = 0, bestDpitch = 0;
+        double baselineSSD = computeRotSSD(0, 0, 0, 1);
+        double bestDyaw = 0, bestDpitch = 0, bestDroll = 0;
         double bestSSD = baselineSSD;
 
         auto parabolicMin = [](double sm, double s0, double sp) -> double {
@@ -274,10 +420,20 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             constexpr double S = 1.0 * DEG2RAD;
             for (double dp = -R; dp <= R; dp += S)
                 for (double dy = -R; dy <= R; dy += S) {
-                    double s = computeRotSSD(dy, dp, 4);
+                    double s = computeRotSSD(dy, dp, 0, 4);
                     if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
                 }
             alignLevelsCompleted = 1;
+        }
+
+        // Roll search ±5° (1° step) with best yaw/pitch
+        if (elapsedUs(t0) < TIME_BUDGET_US * 35 / 100) {
+            constexpr double R = 5.0 * DEG2RAD;
+            constexpr double S = 1.0 * DEG2RAD;
+            for (double dr = -R; dr <= R; dr += S) {
+                double s = computeRotSSD(bestDyaw, bestDpitch, dr, 4);
+                if (s < bestSSD) { bestSSD = s; bestDroll = dr; }
+            }
         }
 
         // Level 1: ±1.5° with 0.25° step
@@ -288,7 +444,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             bestSSD = 1e18;
             for (double dp = sp - R; dp <= sp + R; dp += S)
                 for (double dy = sy - R; dy <= sy + R; dy += S) {
-                    double s = computeRotSSD(dy, dp, 2);
+                    double s = computeRotSSD(dy, dp, bestDroll, 2);
                     if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
                 }
             alignLevelsCompleted = 2;
@@ -302,7 +458,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             bestSSD = 1e18;
             for (double dp = sp - R; dp <= sp + R; dp += S)
                 for (double dy = sy - R; dy <= sy + R; dy += S) {
-                    double s = computeRotSSD(dy, dp, 1);
+                    double s = computeRotSSD(dy, dp, bestDroll, 1);
                     if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
                 }
             alignLevelsCompleted = 3;
@@ -312,10 +468,10 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         if (elapsedUs(t0) < TIME_BUDGET_US * 65 / 100) {
             constexpr double EPS = 0.02 * DEG2RAD;
             double sC = bestSSD;
-            double sL = computeRotSSD(bestDyaw - EPS, bestDpitch, 1);
-            double sR = computeRotSSD(bestDyaw + EPS, bestDpitch, 1);
-            double sU = computeRotSSD(bestDyaw, bestDpitch - EPS, 1);
-            double sD = computeRotSSD(bestDyaw, bestDpitch + EPS, 1);
+            double sL = computeRotSSD(bestDyaw - EPS, bestDpitch, bestDroll, 1);
+            double sR = computeRotSSD(bestDyaw + EPS, bestDpitch, bestDroll, 1);
+            double sU = computeRotSSD(bestDyaw, bestDpitch - EPS, bestDroll, 1);
+            double sD = computeRotSSD(bestDyaw, bestDpitch + EPS, bestDroll, 1);
             bestDyaw   += parabolicMin(sL, sC, sR) * EPS;
             bestDpitch += parabolicMin(sU, sC, sD) * EPS;
             alignLevelsCompleted = 4;
@@ -329,20 +485,74 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             bestSSD = 1e18;
             for (double dp = sp - R; dp <= sp + R; dp += S)
                 for (double dy = sy - R; dy <= sy + R; dy += S) {
-                    double s = computeRotSSD(dy, dp, 1);
+                    double s = computeRotSSD(dy, dp, bestDroll, 1);
                     if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
                 }
 
             constexpr double EPS2 = 0.005 * DEG2RAD;
             double sC2 = bestSSD;
-            double sL2 = computeRotSSD(bestDyaw - EPS2, bestDpitch, 1);
-            double sR2 = computeRotSSD(bestDyaw + EPS2, bestDpitch, 1);
-            double sU2 = computeRotSSD(bestDyaw, bestDpitch - EPS2, 1);
-            double sD2 = computeRotSSD(bestDyaw, bestDpitch + EPS2, 1);
+            double sL2 = computeRotSSD(bestDyaw - EPS2, bestDpitch, bestDroll, 1);
+            double sR2 = computeRotSSD(bestDyaw + EPS2, bestDpitch, bestDroll, 1);
+            double sU2 = computeRotSSD(bestDyaw, bestDpitch - EPS2, bestDroll, 1);
+            double sD2 = computeRotSSD(bestDyaw, bestDpitch + EPS2, bestDroll, 1);
             bestDyaw   += parabolicMin(sL2, sC2, sR2) * EPS2;
             bestDpitch += parabolicMin(sU2, sC2, sD2) * EPS2;
-            bestSSD = computeRotSSD(bestDyaw, bestDpitch, 1);
+            bestSSD = computeRotSSD(bestDyaw, bestDpitch, bestDroll, 1);
             alignLevelsCompleted = 5;
+        }
+
+        // Phase 2b: frame-plane micro shift for parallax / IMU drift (S8 lite, no OpenCV)
+        if (elapsedUs(t0) < TIME_BUDGET_US * 78 / 100 && overlap.size() > 60) {
+            auto computeShiftSSD = [&](int shiftX, int shiftY) -> double {
+                Quat qY = quatFromAxisAngle(0, 0, 1, bestDyaw);
+                Quat qP = quatFromAxisAngle(1, 0, 0, bestDpitch);
+                Quat qR = quatFromAxisAngle(0, 0, 1, bestDroll);
+                Quat qC = quatMul(qY, quatMul(qP, quatMul(qR, q)));
+                double ssd = 0.0;
+                int count = 0;
+                for (const auto& s : overlap) {
+                    int sfx = clampI(s.fx + shiftX, 0, frameW - 1);
+                    int sfy = clampI(s.fy + shiftY, 0, frameH - 1);
+                    double rx, ry, rz;
+                    pixelToRay(sfx, sfy, frameW, frameH, tanH, tanV, rx, ry, rz);
+                    double wx, wy, wz;
+                    quatRotate(qC, rx, ry, rz, wx, wy, wz);
+                    double lon = std::atan2(wx, wy);
+                    double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
+                    int eqX = ((int)((lon / PI + 1.0) * 0.5 * eqW) + eqW) % eqW;
+                    int eqY = clampI((int)((0.5 - lat / PI) * eqH), 0, eqH - 1);
+                    int idx = eqY * eqW + eqX;
+                    if (eqWeight[idx] > 0.f) {
+                        float inv = 1.f / eqWeight[idx];
+                        double dr = s.newR * gainR - eqR[idx] * inv;
+                        double dg = s.newG * gainG - eqG[idx] * inv;
+                        double db = s.newB * gainB - eqB[idx] * inv;
+                        ssd += dr * dr + dg * dg + db * db;
+                        count++;
+                    }
+                }
+                if (count < 20) return 1e18;
+                return ssd / count;
+            };
+
+            double shiftBestSSD = bestSSD;
+            int bestSx = 0, bestSy = 0;
+            for (int sy = -10; sy <= 10; sy += 5) {
+                for (int sx = -10; sx <= 10; sx += 5) {
+                    double s = computeShiftSSD(sx, sy);
+                    if (s < shiftBestSSD) {
+                        shiftBestSSD = s;
+                        bestSx = sx;
+                        bestSy = sy;
+                    }
+                }
+            }
+            if (shiftBestSSD < bestSSD * 0.95) {
+                sShiftX = bestSx;
+                sShiftY = bestSy;
+                bestSSD = shiftBestSSD;
+                LOGI("Micro-shift: (%d,%d) SSD -> %.1f", bestSx, bestSy, bestSSD);
+            }
         }
 
         finalSSD = bestSSD;
@@ -354,11 +564,13 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         } else {
             Quat qY = quatFromAxisAngle(0, 0, 1, bestDyaw);
             Quat qP = quatFromAxisAngle(1, 0, 0, bestDpitch);
-            qCorrected = quatMul(qY, quatMul(qP, q));
+            Quat qR = quatFromAxisAngle(0, 0, 1, bestDroll);
+            qCorrected = quatMul(qY, quatMul(qP, quatMul(qR, q)));
 
-            double corrDeg = std::sqrt(bestDyaw * bestDyaw + bestDpitch * bestDpitch) * RAD2DEG;
-            LOGI("Align: yaw=%.3f° pitch=%.3f° (%.3f° total, SSD %.1f->%.1f, L%d, %zu samp)",
-                 bestDyaw * RAD2DEG, bestDpitch * RAD2DEG, corrDeg,
+            double corrDeg = std::sqrt(bestDyaw * bestDyaw + bestDpitch * bestDpitch + bestDroll * bestDroll) * RAD2DEG;
+            sLastRollOffset = static_cast<float>(bestDroll * RAD2DEG);
+            LOGI("Align: yaw=%.3f° pitch=%.3f° roll=%.3f° (%.3f° total, SSD %.1f->%.1f, L%d, %zu samp)",
+                 bestDyaw * RAD2DEG, bestDpitch * RAD2DEG, bestDroll * RAD2DEG, corrDeg,
                  baselineSSD, bestSSD, alignLevelsCompleted, overlap.size());
         }
 
@@ -393,11 +605,16 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
             }
         }
 
-        // Quality-based rejection
+        // Quality-based rejection with relaxed fallback for strong overlap
         if (finalSSD > REJECT_SSD_THRESH && sFrameIndex > 0) {
-            frameRejected = true;
-            LOGW("Frame %d REJECTED: SSD=%.1f (thresh=%.1f)",
-                 sFrameIndex + 1, finalSSD, REJECT_SSD_THRESH);
+            if (finalSSD <= REJECT_SSD_RELAXED && overlap.size() > 80) {
+                LOGI("Frame %d fallback ACCEPT: SSD=%.1f (relaxed %.1f)",
+                     sFrameIndex + 1, finalSSD, REJECT_SSD_RELAXED);
+            } else {
+                frameRejected = true;
+                LOGW("Frame %d REJECTED: SSD=%.1f (thresh=%.1f)",
+                     sFrameIndex + 1, finalSSD, REJECT_SSD_THRESH);
+            }
         }
     }
 
@@ -433,6 +650,44 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     int rejectedPixels = 0, totalOverlapPixels = 0;
     int minSplatY = eqH, maxSplatY = 0;
 
+    float tileGains[TILE_GAIN_N * TILE_GAIN_N * 3];
+    for (int i = 0; i < TILE_GAIN_N * TILE_GAIN_N * 3; i++) tileGains[i] = 1.f;
+    if (!overlap.empty()) {
+        double tExR[64] = {}, tExG[64] = {}, tExB[64] = {};
+        double tNewR[64] = {}, tNewG[64] = {}, tNewB[64] = {};
+        int tCount[64] = {};
+        for (const auto& s : overlap) {
+            double wx, wy, wz;
+            quatRotate(qCorrected, s.rx, s.ry, s.rz, wx, wy, wz);
+            double lon = std::atan2(wx, wy);
+            double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
+            int eqX = ((int)((lon / PI + 1.0) * 0.5 * eqW) + eqW) % eqW;
+            int eqY = clampI((int)((0.5 - lat / PI) * eqH), 0, eqH - 1);
+            int idx = eqY * eqW + eqX;
+            if (eqWeight[idx] <= 0.f) continue;
+            int tx = clampI(s.fx * TILE_GAIN_N / std::max(1, frameW), 0, TILE_GAIN_N - 1);
+            int ty = clampI(s.fy * TILE_GAIN_N / std::max(1, frameH), 0, TILE_GAIN_N - 1);
+            int t = ty * TILE_GAIN_N + tx;
+            float inv = 1.f / eqWeight[idx];
+            tExR[t] += eqR[idx] * inv;
+            tExG[t] += eqG[idx] * inv;
+            tExB[t] += eqB[idx] * inv;
+            tNewR[t] += s.newR;
+            tNewG[t] += s.newG;
+            tNewB[t] += s.newB;
+            tCount[t]++;
+        }
+        for (int t = 0; t < TILE_GAIN_N * TILE_GAIN_N; t++) {
+            if (tCount[t] < 2 || tNewR[t] < 1) continue;
+            tileGains[t * 3 + 0] = static_cast<float>(
+                std::max(0.5, std::min(2.0, tExR[t] / tNewR[t])));
+            tileGains[t * 3 + 1] = static_cast<float>(
+                std::max(0.5, std::min(2.0, tExG[t] / tNewG[t])));
+            tileGains[t * 3 + 2] = static_cast<float>(
+                std::max(0.5, std::min(2.0, tExB[t] / tNewB[t])));
+        }
+    }
+
     if (!frameRejected) {
         double featherX = frameW * 0.25;
         double featherY = frameH * 0.25;
@@ -440,12 +695,11 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         bool doMismatchCheck = (elapsedUs(t0) < TIME_BUDGET_US * 85 / 100);
 
         for (int fy = 0; fy < frameH; fy++) {
-            double ny = (0.5 - (double)fy / (frameH - 1)) * 2.0 * tanV;
             for (int fx = 0; fx < frameW; fx++) {
-                double nx = ((double)fx / (frameW - 1) - 0.5) * 2.0 * tanH;
-
-                double len = std::sqrt(nx*nx + ny*ny + 1.0);
-                double rx = nx / len, ry = ny / len, rz = -1.0 / len;
+                int sfx = clampI(fx + sShiftX, 0, frameW - 1);
+                int sfy = clampI(fy + sShiftY, 0, frameH - 1);
+                double rx, ry, rz;
+                pixelToRay(sfx, sfy, frameW, frameH, tanH, tanV, rx, ry, rz);
 
                 double wx, wy, wz;
                 quatRotate(qCorrected, rx, ry, rz, wx, wy, wz);
@@ -457,9 +711,12 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
                 double eqYf = (0.5 - lat / PI) * eqH;
 
                 int32_t p = pixels[fy * frameW + fx];
-                float pr = static_cast<float>((p >> 16) & 0xff) * static_cast<float>(gainR);
-                float pg = static_cast<float>((p >> 8) & 0xff) * static_cast<float>(gainG);
-                float pb = static_cast<float>(p & 0xff) * static_cast<float>(gainB);
+                float gR = bilinearTileGain(tileGains, 0, fx, fy, frameW, frameH);
+                float gG = bilinearTileGain(tileGains, 1, fx, fy, frameW, frameH);
+                float gB = bilinearTileGain(tileGains, 2, fx, fy, frameW, frameH);
+                float pr = static_cast<float>((p >> 16) & 0xff) * gR;
+                float pg = static_cast<float>((p >> 8) & 0xff) * gG;
+                float pb = static_cast<float>(p & 0xff) * gB;
 
                 double edgeDistX = std::min((double)fx, (double)(frameW - 1 - fx));
                 double edgeDistY = std::min((double)fy, (double)(frameH - 1 - fy));
@@ -474,6 +731,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
 
                     if (eqWeight[nearIdx] > 0.f) {
                         totalOverlapPixels++;
+                        float seamFeather = std::min(1.f, (MAX_ACCUM_WEIGHT - eqWeight[nearIdx]) / 1.5f);
+                        fw *= seamFeather;
                         float inv = 1.f / eqWeight[nearIdx];
                         float dr = pr - eqR[nearIdx] * inv;
                         float dg = pg - eqG[nearIdx] * inv;
@@ -555,6 +814,16 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
 
     env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT);
     return frameRejected ? JNI_FALSE : JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeRefineSeams(
+    JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    if (eqW == 0 || eqH == 0) return JNI_FALSE;
+    refineSeamsLocked(12);
+    LOGI("Sphere seams refined");
+    return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -715,19 +984,52 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetCoverage(
     return static_cast<float>(covered) / sz;
 }
 
+JNIEXPORT jfloat JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeGetSolidAngleCoverage(
+    JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    return computeSolidAngleCoverageLocked();
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeGetHoleMask(
+    JNIEnv* env, jobject, jintArray jPixels, jint outW, jint outH) {
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    if (eqW == 0 || eqH == 0 || outW <= 0 || outH <= 0) return JNI_FALSE;
+    jint* out = env->GetIntArrayElements(jPixels, nullptr);
+    if (!out) return JNI_FALSE;
+    constexpr int GW = 32, GH = 16;
+    for (int oy = 0; oy < outH; oy++) {
+        for (int ox = 0; ox < outW; ox++) {
+            int gx = ox * GW / outW;
+            int gy = oy * GH / outH;
+            int x0 = gx * eqW / GW, x1 = (gx + 1) * eqW / GW;
+            int y0 = gy * eqH / GH, y1 = (gy + 1) * eqH / GH;
+            float maxW = 0.f;
+            for (int y = y0; y < y1; y++)
+                for (int x = x0; x < x1; x++)
+                    maxW = std::max(maxW, eqWeight[y * eqW + x]);
+            out[oy * outW + ox] = (maxW > 0.05f) ? 0 : 0x88FF0000;
+        }
+    }
+    env->ReleaseIntArrayElements(jPixels, out, 0);
+    return JNI_TRUE;
+}
+
 JNIEXPORT jfloatArray JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeGetLastFrameInfo(
     JNIEnv* env, jobject) {
-    jfloatArray result = env->NewFloatArray(6);
-    float data[6] = {
+    jfloatArray result = env->NewFloatArray(7);
+    float data[7] = {
         static_cast<float>(sFrameIndex),
         static_cast<float>(sLastOverlapCount),
         static_cast<float>(sLastTotalSamples),
         sLastAlignOffset,
         sLastResidualSSD,
-        static_cast<float>(sLastRejected)
+        static_cast<float>(sLastRejected),
+        sLastRollOffset
     };
-    env->SetFloatArrayRegion(result, 0, 6, data);
+    env->SetFloatArrayRegion(result, 0, 7, data);
     return result;
 }
 

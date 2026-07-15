@@ -9,7 +9,8 @@ data class FrameAlignmentInfo(
     val totalSamples: Int,
     val alignmentOffsetDeg: Float,
     val residualSSD: Float,
-    val wasRejected: Boolean
+    val wasRejected: Boolean,
+    val rollOffsetDeg: Float = 0f
 ) {
     val overlapRatio: Float get() = if (totalSamples > 0) overlapCount.toFloat() / totalSamples else 0f
     val isFirstFrame: Boolean get() = frameIndex <= 1
@@ -38,9 +39,15 @@ object SphereNative {
 
     fun isAvailable() = loaded
 
-    fun init(eqW: Int = 4096, eqH: Int = 2048, fovH: Float = 65f, fovV: Float = 50f): Boolean {
+    fun init(
+        eqW: Int = 4096,
+        eqH: Int = 2048,
+        fovH: Float = 65f,
+        fovV: Float = 50f,
+        distortion: LensDistortion = LensDistortion.NONE
+    ): Boolean {
         if (!loaded) return false
-        return nativeInit(eqW, eqH, fovH, fovV)
+        return nativeInit(eqW, eqH, fovH, fovV, distortion.k1, distortion.k2, distortion.p1, distortion.p2)
     }
 
     fun addFrame(bitmap: Bitmap, quaternion: FloatArray): Boolean {
@@ -50,6 +57,11 @@ object SphereNative {
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
         return nativeAddFrame(pixels, w, h, quaternion[0], quaternion[1], quaternion[2], quaternion[3])
+    }
+
+    fun refineSeams(): Boolean {
+        if (!loaded) return false
+        return nativeRefineSeams()
     }
 
     fun getEquirectBitmap(eqW: Int = 4096, eqH: Int = 2048): Bitmap? {
@@ -84,6 +96,20 @@ object SphereNative {
         return nativeGetCoverage()
     }
 
+    fun getSolidAngleCoverage(): Float {
+        if (!loaded) return 0f
+        return nativeGetSolidAngleCoverage()
+    }
+
+    fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap? {
+        if (!loaded || outW <= 0 || outH <= 0) return null
+        val pixels = IntArray(outW * outH)
+        if (!nativeGetHoleMask(pixels, outW, outH)) return null
+        val bmp = Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(pixels, 0, outW, 0, 0, outW, outH)
+        return bmp
+    }
+
     fun getLastFrameInfo(): FrameAlignmentInfo? {
         if (!loaded) return null
         val data = nativeGetLastFrameInfo() ?: return null
@@ -94,7 +120,8 @@ object SphereNative {
             totalSamples = data[2].toInt(),
             alignmentOffsetDeg = data[3],
             residualSSD = data[4],
-            wasRejected = data[5].toInt() != 0
+            wasRejected = data[5].toInt() != 0,
+            rollOffsetDeg = if (data.size >= 7) data[6] else 0f
         )
     }
 
@@ -106,12 +133,18 @@ object SphereNative {
         if (loaded) nativeRelease()
     }
 
-    private external fun nativeInit(eqW: Int, eqH: Int, fovH: Float, fovV: Float): Boolean
+    private external fun nativeInit(
+        eqW: Int, eqH: Int, fovH: Float, fovV: Float,
+        k1: Float, k2: Float, p1: Float, p2: Float
+    ): Boolean
     private external fun nativeAddFrame(pixels: IntArray, w: Int, h: Int, qx: Float, qy: Float, qz: Float, qw: Float): Boolean
     private external fun nativeGetEquirect(pixelsOut: IntArray): Boolean
+    private external fun nativeRefineSeams(): Boolean
     private external fun nativeGetRectilinear(pixelsOut: IntArray, outW: Int, outH: Int, azimuth: Float, elevation: Float, fov: Float): Boolean
     private external fun nativeLoadEquirect(pixels: IntArray, w: Int, h: Int): Boolean
     private external fun nativeGetCoverage(): Float
+    private external fun nativeGetSolidAngleCoverage(): Float
+    private external fun nativeGetHoleMask(pixelsOut: IntArray, outW: Int, outH: Int): Boolean
     private external fun nativeGetLastFrameInfo(): FloatArray?
     private external fun nativeReset()
     private external fun nativeRelease()

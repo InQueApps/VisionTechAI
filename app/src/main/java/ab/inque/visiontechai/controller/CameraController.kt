@@ -1,5 +1,6 @@
 package ab.inque.visiontechai.controller
 
+import ab.inque.visiontechai.CameraFovCalculator
 import android.util.Log
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
@@ -93,12 +94,11 @@ class CameraController(
             val focalLengths = chars.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
             val sensorSize = chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
             if (focalLengths != null && focalLengths.isNotEmpty() && sensorSize != null) {
-                val fovH = (2.0 * Math.toDegrees(
-                    kotlin.math.atan((sensorSize.width / (2.0 * focalLengths[0])).toDouble())
-                )).toFloat()
-                val fovV = (2.0 * Math.toDegrees(
-                    kotlin.math.atan((sensorSize.height / (2.0 * focalLengths[0])).toDouble())
-                )).toFloat()
+                val (fovH, fovV) = CameraFovCalculator.fromSensor(
+                    sensorSize.width,
+                    sensorSize.height,
+                    focalLengths[0]
+                )
                 Log.i(TAG, "Camera FOV: ${fovH}° x ${fovV}°")
                 onFovDetected(fovH, fovV)
             }

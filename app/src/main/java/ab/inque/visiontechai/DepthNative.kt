@@ -8,13 +8,19 @@ import java.nio.ByteBuffer
  */
 object DepthNative {
 
+    @Volatile
+    private var loaded = false
+
     init {
         try {
             System.loadLibrary("vision_depth")
+            loaded = true
         } catch (e: UnsatisfiedLinkError) {
             // Native lib not built or ABI mismatch; processor will fall back to Kotlin path
         }
     }
+
+    fun isAvailable(): Boolean = loaded
 
     /**
      * Renders raw depth buffer to ARGB greyscale pixels (light = close, dark = far).

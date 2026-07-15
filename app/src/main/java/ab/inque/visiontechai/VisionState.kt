@@ -6,7 +6,9 @@ package ab.inque.visiontechai
 data class VisionState(
     var mode: VisionMode = VisionMode.NONE,
     var params: ProcessorParams = ProcessorParams(),
-    var isSliderExpanded: Boolean = false
+    var isSliderExpanded: Boolean = false,
+    var lastAnalysisWidth: Int = 0,
+    var lastAnalysisHeight: Int = 0
 ) {
     val nightVisionIntensity: Float get() = params.nightVisionIntensity
     val edgeDetectionSensitivity: Float get() = params.edgeDetectionSensitivity

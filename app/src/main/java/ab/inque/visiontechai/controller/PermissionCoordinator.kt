@@ -1,5 +1,6 @@
 package ab.inque.visiontechai.controller
 
+import ab.inque.visiontechai.PermissionDenialMessage
 import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
@@ -29,16 +30,7 @@ class PermissionCoordinator(
         }
         val denied = permissions.filterValues { !it }.keys
         Log.w(TAG, "Permissions denied: $denied")
-        val message = when {
-            denied.contains(Manifest.permission.CAMERA) ->
-                "Camera permission is required for this app to function."
-            denied.contains(Manifest.permission.RECORD_AUDIO) ->
-                "Audio recording permission is required for video recording."
-            denied.any { it.contains("MEDIA") } ->
-                "Media access permission is required to save photos and videos."
-            else -> "Required permissions were not granted. App cannot function properly."
-        }
-        Toast.makeText(activity, message, Toast.LENGTH_LONG).show()
+        Toast.makeText(activity, PermissionDenialMessage.forDenied(denied), Toast.LENGTH_LONG).show()
         showExplanationDialog()
     }
 

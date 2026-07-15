@@ -20,6 +20,8 @@ object EdgeDetectionNative {
         }
     }
 
+    fun isAvailable(): Boolean = loaded
+
     fun detectEdges(bitmap: Bitmap, sensitivity: Float): Bitmap? {
         if (!loaded) return null
         val w = bitmap.width

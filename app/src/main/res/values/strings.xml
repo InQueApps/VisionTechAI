@@ -1,6 +1,8 @@
 <resources>
     <string name="app_name">PRISM AI</string>
     <string name="contact_us_chooser">Send feedback</string>
+    <string name="contact_us_email">inqueapps@gmail.com</string>
+    <string name="contact_us_subject">PRISM AI feedback</string>
     <string name="translation_off">Off</string>
     <string name="translation_en_es">English → Spanish</string>
 </resources>

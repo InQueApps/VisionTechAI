@@ -5,13 +5,19 @@ package ab.inque.visiontechai
  */
 object VideoNative {
 
+    @Volatile
+    private var loaded = false
+
     init {
         try {
             System.loadLibrary("vision_video")
+            loaded = true
         } catch (_: UnsatisfiedLinkError) {
             // Native lib not built; recorder falls back to ImageUtils.bitmapToI420
         }
     }
+
+    fun isAvailable(): Boolean = loaded
 
     /**
      * Converts ARGB pixels (e.g. from Bitmap.getPixels) to I420 in [outI420].

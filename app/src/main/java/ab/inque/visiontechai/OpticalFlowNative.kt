@@ -20,6 +20,8 @@ object OpticalFlowNative {
         }
     }
 
+    fun isAvailable(): Boolean = loaded
+
     fun processOpticalFlow(
         bitmap: Bitmap,
         downscale: Int,

@@ -47,6 +47,7 @@ import ab.inque.visiontechai.controller.CameraController
 import ab.inque.visiontechai.controller.PermissionCoordinator
 import ab.inque.visiontechai.controller.PipelineResultDispatcher
 import ab.inque.visiontechai.controller.SphereSessionController
+import ab.inque.visiontechai.controller.SphereUiCoordinator
 import ab.inque.visiontechai.controller.VisionModeController
 import ab.inque.visiontechai.databinding.ActivityMainBinding
 import ab.inque.visiontechai.ui.VisionOverlayHost
@@ -85,6 +86,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var visionModeController: VisionModeController
     private lateinit var pipelineDispatcher: PipelineResultDispatcher
     private lateinit var sphereSession: SphereSessionController
+    private lateinit var sphereUiCoordinator: SphereUiCoordinator
     private var cameraFovH = 65f
     private var cameraFovV = 50f
 
@@ -184,22 +186,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Text Translation Enabled", Toast.LENGTH_SHORT).show()
             }
         }
-        binding.sphereButton.setOnClickListener {
-            if (visionState.mode == VisionMode.SPHERE) {
-                sphereSession.exit()
-            } else {
-                sphereSession.enter()
-            }
-        }
-        binding.sphereDoneButton.setOnClickListener {
-            sphereSession.finishCapture()
-        }
-        binding.sphereSaveButton.setOnClickListener {
-            sphereSession.saveEquirectangular()
-        }
-        binding.sphereCloseButton.setOnClickListener {
-            sphereSession.exit()
-        }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
         }
@@ -213,7 +199,7 @@ class MainActivity : AppCompatActivity() {
             toggleInfoPanel()
         }
         binding.contactUsButton.setOnClickListener {
-            openContactEmail()
+            ContactEmailLauncher.open(this)
         }
         binding.recordButton.setOnClickListener {
             if (visionState.mode == VisionMode.SPHERE) {
@@ -713,8 +699,21 @@ class MainActivity : AppCompatActivity() {
             orientationTracker = orientationTracker,
             setVisionMode = { visionModeController.setVisionMode(it) },
             getCameraFovH = { cameraFovH },
-            getCameraFovV = { cameraFovV }
+            getCameraFovV = { cameraFovV },
+            getAnalysisWidth = { visionState.lastAnalysisWidth },
+            getAnalysisHeight = { visionState.lastAnalysisHeight },
+            getDisplayRotationDegrees = {
+                when (windowManager.defaultDisplay.rotation) {
+                    android.view.Surface.ROTATION_90 -> 90
+                    android.view.Surface.ROTATION_180 -> 180
+                    android.view.Surface.ROTATION_270 -> 270
+                    else -> 0
+                }
+            }
         )
+
+        sphereUiCoordinator = SphereUiCoordinator(binding, visionState, sphereSession)
+        sphereUiCoordinator.bind()
 
         pipelineDispatcher = PipelineResultDispatcher(
             visionState = visionState,
@@ -723,6 +722,7 @@ class MainActivity : AppCompatActivity() {
             sphereControllerProvider = { sphereSession.controller },
             sphereCaptureNextFrame = { sphereSession.captureNextFrame },
             clearSphereCaptureNextFrame = { sphereSession.captureNextFrame = false },
+            onSphereRawFrame = { bitmap, ts -> sphereSession.onRawFrame(bitmap, ts) },
             isRecordingProvider = { isRecording },
             processedVideoRecorderProvider = { processedVideoRecorder }
         )
@@ -1376,19 +1376,6 @@ class MainActivity : AppCompatActivity() {
     private fun hideLangSettingsPanel() {
         binding.langSettingsPanel.visibility = View.GONE
         binding.infoButton.text = "ℹ"
-    }
-
-    private fun openContactEmail() {
-        // To: inqueapps@gmail.com; Subject only. From is the user's email (not set).
-        val uri = Uri.parse("mailto:inqueapps@gmail.com").buildUpon()
-            .appendQueryParameter("subject", "PRISM AI feedback")
-            .build()
-        val intent = Intent(Intent.ACTION_SENDTO).apply { data = uri }
-        try {
-            startActivity(Intent.createChooser(intent, getString(R.string.contact_us_chooser)))
-        } catch (e: Exception) {
-            Toast.makeText(this, "No email app available", Toast.LENGTH_SHORT).show()
-        }
     }
 
     private fun switchCamera() {

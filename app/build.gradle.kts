@@ -28,8 +28,7 @@ android {
             }
         }
         ndk {
-            // Play Console (API 35): ship ARM only. x86/x86_64 emulator ABIs can pull in
-            // third-party .so files (TFLite, ML Kit) that fail 16 KB page alignment checks.
+            // Play Console (API 35): ship ARM only. Debug adds x86_64 for emulator testing.
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
     }
@@ -44,6 +43,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            ndk {
+                abiFilters += listOf("x86_64", "x86")
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -111,4 +115,7 @@ dependencies {
     testImplementation("androidx.test:core:1.6.1")
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation("androidx.test:rules:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }

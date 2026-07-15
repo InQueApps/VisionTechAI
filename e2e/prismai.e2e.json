@@ -1,0 +1,26 @@
+{
+  "name": "PRISM AI (VisionTechAI)",
+  "packageId": "ab.inque.prismai",
+  "projectDir": ".",
+  "gradleModule": "app",
+  "requiresArmNative": true,
+  "note": "Canonical skill copy: Work/skills/android-instrumented-e2e/apps/prismai.e2e.json",
+  "testSuites": {
+    "smoke": ["ab.inque.visiontechai.ExampleInstrumentedTest"],
+    "ui": [
+      "ab.inque.visiontechai.MainActivityModeSwitchTest",
+      "ab.inque.visiontechai.VisionWorkflowE2ETest"
+    ],
+    "native": [
+      "ab.inque.visiontechai.SphereStitchE2ETest",
+      "ab.inque.visiontechai.SphereGoldenImageTest"
+    ],
+    "all": [
+      "ab.inque.visiontechai.ExampleInstrumentedTest",
+      "ab.inque.visiontechai.MainActivityModeSwitchTest",
+      "ab.inque.visiontechai.VisionWorkflowE2ETest",
+      "ab.inque.visiontechai.SphereStitchE2ETest",
+      "ab.inque.visiontechai.SphereGoldenImageTest"
+    ]
+  }
+}
