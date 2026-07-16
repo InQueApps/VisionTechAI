@@ -32,12 +32,18 @@ $Suites = @{
     ui     = @("ab.inque.visiontechai.MainActivityModeSwitchTest",
                "ab.inque.visiontechai.VisionWorkflowE2ETest")
     native = @("ab.inque.visiontechai.SphereStitchE2ETest",
-               "ab.inque.visiontechai.SphereGoldenImageTest")
+               "ab.inque.visiontechai.SphereGoldenImageTest",
+               "ab.inque.visiontechai.SpherePerfE2ETest",
+               "ab.inque.visiontechai.SphereArtifactE2ETest",
+               "ab.inque.visiontechai.SphereMuddinessE2ETest")
     all    = @("ab.inque.visiontechai.ExampleInstrumentedTest",
                "ab.inque.visiontechai.MainActivityModeSwitchTest",
                "ab.inque.visiontechai.VisionWorkflowE2ETest",
                "ab.inque.visiontechai.SphereStitchE2ETest",
-               "ab.inque.visiontechai.SphereGoldenImageTest")
+               "ab.inque.visiontechai.SphereGoldenImageTest",
+               "ab.inque.visiontechai.SpherePerfE2ETest",
+               "ab.inque.visiontechai.SphereArtifactE2ETest",
+               "ab.inque.visiontechai.SphereMuddinessE2ETest")
 }
 
 function Get-Emulator {

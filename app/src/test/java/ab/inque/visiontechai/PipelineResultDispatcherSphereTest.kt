@@ -114,8 +114,14 @@ class PipelineResultDispatcherSphereTest {
         captureNext = true
         val raw = Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888)
         createDispatcher().dispatch(pipelineResult(raw))
-        assertEquals(before + 1, ops.captureCount)
         assertFalse(captureNext)
+        // Capture runs on the stitch worker's background executor; await it.
+        val deadline = System.currentTimeMillis() + 3000
+        while (ops.captureCount < before + 1 && System.currentTimeMillis() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertEquals(before + 1, ops.captureCount)
     }
 
     @Test

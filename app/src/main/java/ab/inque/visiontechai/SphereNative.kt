@@ -59,6 +59,29 @@ object SphereNative {
         return nativeAddFrame(pixels, w, h, quaternion[0], quaternion[1], quaternion[2], quaternion[3])
     }
 
+    /**
+     * Fast stitch (no alignment) gated by minimum edge overlap.
+     * Returns [STITCH_ACCEPTED], [STITCH_REJECTED], or [STITCH_LOW_OVERLAP].
+     */
+    fun addFrameFast(bitmap: Bitmap, quaternion: FloatArray, overlapGate: Float): Int {
+        if (!loaded || quaternion.size < 4) return STITCH_REJECTED
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        return nativeAddFrameFast(
+            pixels, w, h,
+            quaternion[0], quaternion[1], quaternion[2], quaternion[3],
+            overlapGate
+        )
+    }
+
+    /** Re-align newly added frames and rebuild the panorama. */
+    fun refinePending(): Boolean {
+        if (!loaded) return false
+        return nativeRefinePending()
+    }
+
     fun refineSeams(): Boolean {
         if (!loaded) return false
         return nativeRefineSeams()
@@ -67,7 +90,7 @@ object SphereNative {
     fun getEquirectBitmap(eqW: Int = 4096, eqH: Int = 2048): Bitmap? {
         if (!loaded) return null
         val pixels = IntArray(eqW * eqH)
-        if (!nativeGetEquirect(pixels)) return null
+        if (!nativeGetEquirect(pixels, eqW, eqH)) return null
         val bmp = Bitmap.createBitmap(eqW, eqH, Bitmap.Config.ARGB_8888)
         bmp.setPixels(pixels, 0, eqW, 0, 0, eqW, eqH)
         return bmp
@@ -138,7 +161,9 @@ object SphereNative {
         k1: Float, k2: Float, p1: Float, p2: Float
     ): Boolean
     private external fun nativeAddFrame(pixels: IntArray, w: Int, h: Int, qx: Float, qy: Float, qz: Float, qw: Float): Boolean
-    private external fun nativeGetEquirect(pixelsOut: IntArray): Boolean
+    private external fun nativeAddFrameFast(pixels: IntArray, w: Int, h: Int, qx: Float, qy: Float, qz: Float, qw: Float, overlapGate: Float): Int
+    private external fun nativeRefinePending(): Boolean
+    private external fun nativeGetEquirect(pixelsOut: IntArray, outW: Int, outH: Int): Boolean
     private external fun nativeRefineSeams(): Boolean
     private external fun nativeGetRectilinear(pixelsOut: IntArray, outW: Int, outH: Int, azimuth: Float, elevation: Float, fov: Float): Boolean
     private external fun nativeLoadEquirect(pixels: IntArray, w: Int, h: Int): Boolean

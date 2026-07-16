@@ -86,6 +86,8 @@ class SphereSessionController(
                             "Slow down — too much movement between frames"
                         SphereCaptureController.FrameWarning.ALIGNMENT_FAILED ->
                             "Frame skipped — could not align with panorama"
+                        SphereCaptureController.FrameWarning.INSUFFICIENT_OVERLAP ->
+                            "Pan slower — not enough overlap with previous frames"
                     }
                     Toast.makeText(activity, msg, Toast.LENGTH_SHORT).show()
                 }
@@ -186,14 +188,7 @@ class SphereSessionController(
     }
 
     fun finishCapture() {
-        val started = controller?.finishCapture() ?: false
-        if (!started) {
-            Toast.makeText(
-                activity,
-                "Need ${(SphereCoverageFormatter.MIN_SOLID_ANGLE_TO_FINISH * 100).toInt()}% sphere coverage to finish",
-                Toast.LENGTH_SHORT
-            ).show()
-        }
+        controller?.finishCapture()
     }
 
     fun saveEquirectangular() {

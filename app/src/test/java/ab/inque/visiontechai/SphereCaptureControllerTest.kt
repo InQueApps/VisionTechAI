@@ -115,13 +115,21 @@ class SphereCaptureControllerTest {
     }
 
     @Test
-    fun finishCapture_blockedBelow85PercentSolidAngle() {
+    fun finishCapture_allowedAtAnyCoverage() {
         controller.startSession()
-        ops.solidAngle = 0.5f
-        submitFrameAndAwait()
-        assertFalse(controller.finishCapture())
-        assertEquals(SphereCaptureController.State.CAPTURING, controller.state)
-        assertFalse(previewReady)
+        ops.solidAngle = 0.1f
+        submitFrameAndAwait(shutdownExecutor = false)
+        assertTrue(controller.finishCapture())
+        val deadline = System.currentTimeMillis() + 5000
+        while (!previewReady && System.currentTimeMillis() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        executor.shutdown()
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
+        assertTrue(previewReady)
     }
 
     @Test
@@ -130,12 +138,17 @@ class SphereCaptureControllerTest {
         ops.solidAngle = 0.9f
         submitFrameAndAwait(shutdownExecutor = false)
         assertTrue(controller.finishCapture())
-        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        val deadline = System.currentTimeMillis() + 5000
+        while (!previewReady && System.currentTimeMillis() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
         executor.shutdown()
-        assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
         Shadows.shadowOf(Looper.getMainLooper()).idle()
         assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
         assertTrue(previewReady)
+        assertNotNull(controller.getFullEquirect())
     }
 
     @Test

@@ -23,7 +23,8 @@ class SphereCaptureController(
     enum class FrameWarning {
         NO_OVERLAP,
         EXCESSIVE_SHIFT,
-        ALIGNMENT_FAILED
+        ALIGNMENT_FAILED,
+        INSUFFICIENT_OVERLAP
     }
 
     enum class State { IDLE, CAPTURING, PREVIEW }
@@ -39,6 +40,8 @@ class SphereCaptureController(
 
     @Volatile var lastPreviewBitmap: Bitmap? = null
         private set
+
+    @Volatile private var lastFullEquirect: Bitmap? = null
 
     @Volatile private var continuousCapture = false
     private var lastCaptureTimeMs = 0L
@@ -68,6 +71,7 @@ class SphereCaptureController(
         lastCoverage = 0f
         lastSolidAngleCoverage = 0f
         lastPreviewBitmap = null
+        lastFullEquirect = null
         lastMotionQuat = null
         lastMotionTimeMs = 0L
         orientationTracker.clockSync.reset()
@@ -91,6 +95,32 @@ class SphereCaptureController(
     }
 
     private fun handleStitchResult(result: SphereStitchResult) {
+        // Background refinement finished: refresh coverage + preview, no frame accounting.
+        if (result.refined) {
+            lastCoverage = result.coverage
+            lastSolidAngleCoverage = result.solidAngleCoverage
+            result.previewBitmap?.let { lastPreviewBitmap = it }
+            onCoverageUpdate(
+                result.coverage,
+                result.solidAngleCoverage,
+                result.previewBitmap ?: lastPreviewBitmap
+            )
+            Log.i(TAG, "Panorama refined: coverage=${result.coverage} solid=${result.solidAngleCoverage}")
+            return
+        }
+
+        // Frame gated for insufficient overlap: tell the user to pan slower.
+        if (result.rejectedForOverlap) {
+            Log.w(TAG, "Frame gated — insufficient overlap (pan slower)")
+            onFrameWarning?.invoke(FrameWarning.INSUFFICIENT_OVERLAP)
+            lastCoverage = result.coverage
+            lastSolidAngleCoverage = result.solidAngleCoverage
+            val preview = result.previewBitmap ?: lastPreviewBitmap
+            if (result.previewBitmap != null) lastPreviewBitmap = result.previewBitmap
+            onCoverageUpdate(result.coverage, result.solidAngleCoverage, preview)
+            return
+        }
+
         if (result.accepted) {
             frameCount++
             onFrameAccepted?.invoke()
@@ -173,29 +203,31 @@ class SphereCaptureController(
 
     val isContinuousCapturing get() = continuousCapture
 
+    fun isStitchBusy(): Boolean = stitchWorker.isBusy
+
     fun finishCapture(): Boolean {
         if (state != State.CAPTURING) return false
-        if (!SphereCoverageFormatter.canFinish(lastSolidAngleCoverage)) {
-            onFrameWarning?.invoke(FrameWarning.NO_OVERLAP)
-            return false
-        }
         continuousCapture = false
-        stitchWorker.runWhenIdle {
-            operations.refineSeams()
+        stitchWorker.runFinishGeneration(EQ_W, EQ_H) { result ->
+            if (BuildConfig.DEBUG && result.ranOnMainThread) {
+                Log.e(TAG, "Finish generation ran on main thread — this should never happen")
+            }
+            lastFullEquirect = result.equirect
             state = State.PREVIEW
-            Log.i(TAG, "Capture finished, $frameCount frames, coverage=$lastCoverage solid=$lastSolidAngleCoverage")
-            val equirect = operations.getEquirectBitmap(EQ_W, EQ_H)
-            if (equirect != null) onPreviewReady(equirect)
+            Log.i(
+                TAG,
+                "Capture finished in ${result.durationMs}ms, $frameCount frames, " +
+                    "coverage=$lastCoverage solid=$lastSolidAngleCoverage"
+            )
+            result.equirect?.let { onPreviewReady(it) }
         }
         return true
     }
 
     fun getPreviewBitmap(): Bitmap? = lastPreviewBitmap
 
-    fun getFullEquirect(): Bitmap? {
-        operations.refineSeams()
-        return operations.getEquirectBitmap(EQ_W, EQ_H)
-    }
+    /** Returns the full equirect from the last finish, or null if not yet generated. */
+    fun getFullEquirect(): Bitmap? = lastFullEquirect
 
     fun resetSession() {
         operations.reset()
@@ -205,6 +237,7 @@ class SphereCaptureController(
         lastCoverage = 0f
         lastSolidAngleCoverage = 0f
         lastPreviewBitmap = null
+        lastFullEquirect = null
     }
 
     fun release() {

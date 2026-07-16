@@ -96,6 +96,49 @@ static float storedFovH = 0, storedFovV = 0;
 static std::vector<float> eqR, eqG, eqB, eqWeight;
 static std::mutex sphereMutex;
 
+// ── Incremental coverage tracking (F1: avoids full-buffer scans per frame) ──
+static constexpr int SA_GW = 32, SA_GH = 16;      // solid-angle grid resolution
+static constexpr float SA_FILL_THRESH = 0.05f;    // per-pixel weight to count a cell
+static int64_t sCoveredCount = 0;                 // eq pixels with weight > 0
+static std::vector<int> sGridFilled;              // filled-pixel count per grid cell
+static int sGridFilledCells = 0;                  // grid cells with ≥1 filled pixel
+
+static inline void resetCoverageCountersLocked() {
+    sCoveredCount = 0;
+    sGridFilledCells = 0;
+    sGridFilled.assign(SA_GW * SA_GH, 0);
+}
+
+// Full recompute from the weight buffer (used after direct buffer loads).
+static void recomputeCoverageCountersLocked() {
+    resetCoverageCountersLocked();
+    if (eqW == 0 || eqH == 0) return;
+    for (int y = 0; y < eqH; y++) {
+        int gy = y * SA_GH / eqH;
+        for (int x = 0; x < eqW; x++) {
+            float w = eqWeight[y * eqW + x];
+            if (w > 0.f) sCoveredCount++;
+            if (w > SA_FILL_THRESH) {
+                int cell = gy * SA_GW + (x * SA_GW / eqW);
+                if (sGridFilled[cell]++ == 0) sGridFilledCells++;
+            }
+        }
+    }
+}
+
+// ── Frame store for two-phase (fast + background refine) stitching ──────
+struct StoredFrame {
+    std::vector<int32_t> px;   // downscaled RGB pixels
+    int w = 0, h = 0;
+    Quat refinedQuat = {0, 0, 0, 1};
+    bool locked = false;       // locked frames are re-splatted but not re-aligned
+    bool refined = false;      // true once the frame has been aligned at least once
+};
+static std::vector<StoredFrame> sFrames;
+static constexpr int REALIGN_WINDOW = 40;  // most recent N frames get re-aligned
+// Keep enough resolution for refine rebuilds — 384px thumbnails made output muddy.
+static constexpr int STORE_MAX_DIM = 1280;
+
 // Per-frame alignment metrics
 static int sFrameIndex = 0;
 static int sLastOverlapCount = 0;
@@ -160,35 +203,25 @@ static inline float bilinearTileGain(const float* tileGains, int channel,
         tx * ty * at(x1, y1));
 }
 
-static float computeSolidAngleCoverageLocked() {
-    constexpr int GW = 32, GH = 16;
-    if (eqW == 0 || eqH == 0) return 0.f;
-    int filled = 0;
-    for (int gy = 0; gy < GH; gy++) {
-        for (int gx = 0; gx < GW; gx++) {
-            int x0 = gx * eqW / GW, x1 = (gx + 1) * eqW / GW;
-            int y0 = gy * eqH / GH, y1 = (gy + 1) * eqH / GH;
-            float maxW = 0.f;
-            for (int y = y0; y < y1; y++)
-                for (int x = x0; x < x1; x++)
-                    maxW = std::max(maxW, eqWeight[y * eqW + x]);
-            if (maxW > 0.05f) filled++;
-        }
-    }
-    return static_cast<float>(filled) / (GW * GH);
-}
-
 static inline void splatPixel(int ex, int ey, float r, float g, float b, float w) {
     if (ex < 0 || ex >= eqW || ey < 0 || ey >= eqH) return;
     int idx = ey * eqW + ex;
+    float before = eqWeight[idx];
+    float after = before + w;
+    // Incremental coverage bookkeeping on weight-threshold transitions.
+    if (before == 0.f && after > 0.f) sCoveredCount++;
+    if (before <= SA_FILL_THRESH && after > SA_FILL_THRESH) {
+        int cell = (ey * SA_GH / eqH) * SA_GW + (ex * SA_GW / eqW);
+        if (sGridFilled[cell]++ == 0) sGridFilledCells++;
+    }
     eqR[idx] += r * w;
     eqG[idx] += g * w;
     eqB[idx] += b * w;
-    eqWeight[idx] += w;
+    eqWeight[idx] = after;
 }
 
-// Weight-gradient seam blend (export / finish pass — S12 multiband lite).
-static void refineSeamsLocked(int radius = 12) {
+// Weight-gradient seam blend — only at sharp weight discontinuities (narrow seams).
+static void refineSeamsLocked(int radius = 3) {
     if (eqW == 0 || eqH == 0) return;
     const int sz = eqW * eqH;
     std::vector<float> nr(sz, 0.f), ng(sz, 0.f), nb(sz, 0.f);
@@ -218,13 +251,13 @@ static void refineSeamsLocked(int radius = 12) {
                     maxGrad = std::max(maxGrad, std::abs(eqWeight[ny * eqW + nx] - wCenter));
                 }
             }
-            if (maxGrad < 0.3f) continue;
+            if (maxGrad < 1.2f) continue;
 
             float sr = 0.f, sg = 0.f, sb = 0.f, sw = 0.f;
-            for (int dy = -radius; dy <= radius; dy++) {
+            for (int dy = -radius; dy <= radius; dy += 2) {
                 int ny = y + dy;
                 if (ny < 0 || ny >= eqH) continue;
-                for (int dx = -radius; dx <= radius; dx++) {
+                for (int dx = -radius; dx <= radius; dx += 2) {
                     int nx = (x + dx + eqW) % eqW;
                     int j = ny * eqW + nx;
                     if (eqWeight[j] < 0.05f) continue;
@@ -275,6 +308,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeInit(
     eqG.assign(sz, 0.f);
     eqB.assign(sz, 0.f);
     eqWeight.assign(sz, 0.f);
+    resetCoverageCountersLocked();
+    sFrames.clear();
     sFrameIndex = 0;
     sLastRejected = 0;
     sLastRollOffset = 0.f;
@@ -282,25 +317,37 @@ Java_ab_inque_visiontechai_SphereNative_nativeInit(
     return JNI_TRUE;
 }
 
-JNIEXPORT jboolean JNICALL
-Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
-    JNIEnv* env, jobject,
-    jintArray jPixels, jint frameW, jint frameH,
-    jfloat qx, jfloat qy, jfloat qz, jfloat qw) {
+// Outcome of a single stitch attempt.
+struct FrameOutcome {
+    bool accepted = false;
+    bool rejectedOverlap = false;
+    int overlapCount = 0;
+    int totalSamples = 0;
+    float overlapRatio = 0.f;
+    double finalSSD = 0.0;
+    Quat corrected = {0, 0, 0, 1};
+};
 
-    std::lock_guard<std::mutex> lock(sphereMutex);
-    if (eqW == 0 || eqH == 0) return JNI_FALSE;
+/**
+ * Core stitch: optionally aligns and then splats one frame into the global
+ * equirect accumulation buffers. Caller must hold sphereMutex and owns `pixels`.
+ *
+ *  doAlign      — run the (expensive) multi-level rotational alignment search.
+ *  allowReject  — allow frame-level rejection (quality / very-low-overlap).
+ *  overlapGate  — if >0 and not the first frame, reject when the fraction of the
+ *                 frame overlapping existing content is below this threshold.
+ */
+static FrameOutcome processFrameLocked(
+    const int32_t* pixels, int frameW, int frameH,
+    Quat q, bool doAlign, bool allowReject, float overlapGate) {
 
+    FrameOutcome outcome{};
     auto t0 = SteadyClock::now();
     sShiftX = 0;
     sShiftY = 0;
 
-    jint* pixels = env->GetIntArrayElements(jPixels, nullptr);
-    if (!pixels) return JNI_FALSE;
-
-    Quat q = { qx, qy, qz, qw };
     double qlen = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
-    if (qlen < 1e-9) { env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT); return JNI_FALSE; }
+    if (qlen < 1e-9) return outcome;
     q.x /= qlen; q.y /= qlen; q.z /= qlen; q.w /= qlen;
 
     double halfFovH = storedFovH * 0.5 * DEG2RAD;
@@ -364,13 +411,35 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
 
     int64_t phase1Us = elapsedUs(t0);
 
+    // ── Overlap gate: require sufficient edge overlap with existing content ──
+    // Forces the user to pan slowly enough that consecutive frames share area.
+    float overlapRatio = totalSamples > 0
+        ? static_cast<float>(overlap.size()) / totalSamples : 0.f;
+    if (overlapGate > 0.f && sFrameIndex > 0 && overlapRatio < overlapGate) {
+        sFrameIndex++;
+        sLastOverlapCount = static_cast<int>(overlap.size());
+        sLastTotalSamples = totalSamples;
+        sLastAlignOffset = 0.f;
+        sLastResidualSSD = 0.f;
+        sLastRollOffset = 0.f;
+        sLastRejected = 1;
+        LOGW("Frame %d gated: overlap %.1f%% < %.1f%% (pan slower)",
+             sFrameIndex, overlapRatio * 100.f, overlapGate * 100.f);
+        outcome.accepted = false;
+        outcome.rejectedOverlap = true;
+        outcome.overlapCount = static_cast<int>(overlap.size());
+        outcome.totalSamples = totalSamples;
+        outcome.overlapRatio = overlapRatio;
+        return outcome;
+    }
+
     // ── Phase 2: Rotational alignment (time-budgeted) ──
     Quat qCorrected = q;
     double finalSSD = 0.0;
     bool frameRejected = false;
     int alignLevelsCompleted = 0;
 
-    if (overlap.size() > 50) {
+    if (doAlign && overlap.size() > 50) {
 
         // SSD evaluator with pre-computed rays
         auto computeRotSSD = [&](double dyaw, double dpitch, double droll, int subsample) -> double {
@@ -606,7 +675,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         }
 
         // Quality-based rejection with relaxed fallback for strong overlap
-        if (finalSSD > REJECT_SSD_THRESH && sFrameIndex > 0) {
+        if (allowReject && finalSSD > REJECT_SSD_THRESH && sFrameIndex > 0) {
             if (finalSSD <= REJECT_SSD_RELAXED && overlap.size() > 80) {
                 LOGI("Frame %d fallback ACCEPT: SSD=%.1f (relaxed %.1f)",
                      sFrameIndex + 1, finalSSD, REJECT_SSD_RELAXED);
@@ -639,7 +708,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     sLastResidualSSD = static_cast<float>(finalSSD);
     sLastRejected = frameRejected ? 1 : 0;
 
-    if (sFrameIndex > 1 && sLastOverlapCount < 20) {
+    if (allowReject && sFrameIndex > 1 && sLastOverlapCount < 20) {
         LOGW("Frame %d: very low overlap (%d/%d)",
              sFrameIndex, sLastOverlapCount, totalSamples);
         frameRejected = true;
@@ -689,13 +758,17 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
     }
 
     if (!frameRejected) {
-        double featherX = frameW * 0.25;
-        double featherY = frameH * 0.25;
+        double featherX = frameW * 0.10;
+        double featherY = frameH * 0.10;
         float mismatchSqRange = MISMATCH_HARD_SQ - MISMATCH_SOFT_SQ;
-        bool doMismatchCheck = (elapsedUs(t0) < TIME_BUDGET_US * 85 / 100);
+        // Fast path skips per-pixel mismatch rejection and weight capping
+        // but still splats every pixel (stride-1) to avoid gap artifacts.
+        const int splatStep = 1;
+        const bool doMismatchCheck = doAlign &&
+            (elapsedUs(t0) < TIME_BUDGET_US * 85 / 100);
 
-        for (int fy = 0; fy < frameH; fy++) {
-            for (int fx = 0; fx < frameW; fx++) {
+        for (int fy = 0; fy < frameH; fy += splatStep) {
+            for (int fx = 0; fx < frameW; fx += splatStep) {
                 int sfx = clampI(fx + sShiftX, 0, frameW - 1);
                 int sfy = clampI(fy + sShiftY, 0, frameH - 1);
                 double rx, ry, rz;
@@ -781,7 +854,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
         // Prevents early frames from dominating in high-overlap regions.
         // Capping preserves the average color (both numerator and denominator
         // scale equally) but ensures new frames always contribute ≥ ~20%.
-        if (minSplatY <= maxSplatY) {
+        // Phase 4 weight capping: full-quality path only (refine rebuild applies it).
+        if (doAlign && minSplatY <= maxSplatY) {
             for (int y = minSplatY; y <= maxSplatY; y++) {
                 for (int x = 0; x < eqW; x++) {
                     int idx = y * eqW + x;
@@ -812,8 +886,139 @@ Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
          (long long)(totalUs - phase1Us - phase2Us), (long long)totalUs,
          alignLevelsCompleted, overlap.size());
 
+    outcome.accepted = !frameRejected;
+    outcome.rejectedOverlap = false;
+    outcome.overlapCount = static_cast<int>(overlap.size());
+    outcome.totalSamples = totalSamples;
+    outcome.overlapRatio = overlapRatio;
+    outcome.finalSSD = finalSSD;
+    outcome.corrected = qCorrected;
+    return outcome;
+}
+
+// Store an accepted frame (downscaled) for later background re-alignment.
+static void storeFrameForRefine(const int32_t* pixels, int frameW, int frameH, Quat q) {
+    int outW = frameW, outH = frameH;
+    if (std::max(frameW, frameH) > STORE_MAX_DIM) {
+        double s = (double)STORE_MAX_DIM / std::max(frameW, frameH);
+        outW = std::max(1, (int)std::lround(frameW * s));
+        outH = std::max(1, (int)std::lround(frameH * s));
+    }
+    StoredFrame f;
+    f.w = outW;
+    f.h = outH;
+    f.refinedQuat = q;
+    f.locked = false;
+    f.px.resize((size_t)outW * outH);
+    for (int y = 0; y < outH; y++) {
+        int sy = (outH == frameH) ? y : clampI((int)((y + 0.5) * frameH / outH), 0, frameH - 1);
+        for (int x = 0; x < outW; x++) {
+            int sx = (outW == frameW) ? x : clampI((int)((x + 0.5) * frameW / outW), 0, frameW - 1);
+            f.px[(size_t)y * outW + x] = pixels[(size_t)sy * frameW + sx];
+        }
+    }
+    sFrames.push_back(std::move(f));
+    // Lock frames older than the re-align window: they stay in the panorama
+    // (re-splatted with their last refined quaternion) but are no longer
+    // re-aligned, bounding background refinement cost.
+    if ((int)sFrames.size() > REALIGN_WINDOW) {
+        sFrames[sFrames.size() - 1 - REALIGN_WINDOW].locked = true;
+    }
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeAddFrame(
+    JNIEnv* env, jobject,
+    jintArray jPixels, jint frameW, jint frameH,
+    jfloat qx, jfloat qy, jfloat qz, jfloat qw) {
+
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    if (eqW == 0 || eqH == 0) return JNI_FALSE;
+    jint* pixels = env->GetIntArrayElements(jPixels, nullptr);
+    if (!pixels) return JNI_FALSE;
+    FrameOutcome o = processFrameLocked(
+        reinterpret_cast<const int32_t*>(pixels), frameW, frameH,
+        Quat{qx, qy, qz, qw}, /*doAlign=*/true, /*allowReject=*/true, /*overlapGate=*/0.f);
     env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT);
-    return frameRejected ? JNI_FALSE : JNI_TRUE;
+    return o.accepted ? JNI_TRUE : JNI_FALSE;
+}
+
+// Fast path: splat immediately using the raw IMU quaternion (no alignment),
+// gated by minimum edge overlap. Stores the frame for background refinement.
+// Returns: 1 = accepted, 0 = rejected (quality), 2 = rejected (low overlap).
+JNIEXPORT jint JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeAddFrameFast(
+    JNIEnv* env, jobject,
+    jintArray jPixels, jint frameW, jint frameH,
+    jfloat qx, jfloat qy, jfloat qz, jfloat qw, jfloat overlapGate) {
+
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    if (eqW == 0 || eqH == 0) return 0;
+    jint* pixels = env->GetIntArrayElements(jPixels, nullptr);
+    if (!pixels) return 0;
+    Quat q{qx, qy, qz, qw};
+    FrameOutcome o = processFrameLocked(
+        reinterpret_cast<const int32_t*>(pixels), frameW, frameH,
+        q, /*doAlign=*/false, /*allowReject=*/true, /*overlapGate=*/overlapGate);
+    jint result;
+    if (o.rejectedOverlap) {
+        result = 2;
+    } else if (o.accepted) {
+        double l = std::sqrt(q.x*q.x + q.y*q.y + q.z*q.z + q.w*q.w);
+        if (l > 1e-9) { q.x/=l; q.y/=l; q.z/=l; q.w/=l; }
+        storeFrameForRefine(reinterpret_cast<const int32_t*>(pixels), frameW, frameH, q);
+        result = 1;
+    } else {
+        result = 0;
+    }
+    env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT);
+    return result;
+}
+
+// Background refinement: rebuild the panorama from stored frames with full
+// alignment (unlocked frames) then seam-blend. Regenerates the equirect.
+JNIEXPORT jboolean JNICALL
+Java_ab_inque_visiontechai_SphereNative_nativeRefinePending(
+    JNIEnv*, jobject) {
+
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    if (eqW == 0 || eqH == 0 || sFrames.empty()) return JNI_FALSE;
+
+    // Only rebuild when at least one frame still needs alignment; otherwise the
+    // panorama is already up to date and a rebuild would be wasted work.
+    bool anyDirty = false;
+    for (const auto& f : sFrames) {
+        if (!f.locked && !f.refined) { anyDirty = true; break; }
+    }
+    if (!anyDirty) return JNI_FALSE;
+
+    std::fill(eqR.begin(), eqR.end(), 0.f);
+    std::fill(eqG.begin(), eqG.end(), 0.f);
+    std::fill(eqB.begin(), eqB.end(), 0.f);
+    std::fill(eqWeight.begin(), eqWeight.end(), 0.f);
+    resetCoverageCountersLocked();
+    sFrameIndex = 0;
+    sLastRejected = 0;
+    sLastRollOffset = 0.f;
+
+    auto tRefine = SteadyClock::now();
+    int aligned = 0;
+    for (auto& f : sFrames) {
+        // Re-align only dirty (not-yet-refined) frames; already-refined and
+        // locked frames are just re-splatted with their stored quaternion.
+        bool doAlign = !f.locked && !f.refined;
+        FrameOutcome o = processFrameLocked(
+            f.px.data(), f.w, f.h, f.refinedQuat,
+            doAlign, /*allowReject=*/false, /*overlapGate=*/0.f);
+        if (doAlign) {
+            if (o.accepted) f.refinedQuat = o.corrected;
+            aligned++;
+        }
+        f.refined = true;
+    }
+    LOGI("Refine rebuild: %zu frames (%d re-aligned) in %lldus",
+         sFrames.size(), aligned, (long long)elapsedUs(tRefine));
+    return JNI_TRUE;
 }
 
 JNIEXPORT jboolean JNICALL
@@ -821,62 +1026,140 @@ Java_ab_inque_visiontechai_SphereNative_nativeRefineSeams(
     JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lock(sphereMutex);
     if (eqW == 0 || eqH == 0) return JNI_FALSE;
-    refineSeamsLocked(12);
+    refineSeamsLocked(3);
     LOGI("Sphere seams refined");
     return JNI_TRUE;
 }
 
+static inline int32_t sampleEquirectRgb(int sx, int sy) {
+    int idx = sy * eqW + sx;
+    if (eqWeight[idx] > 0.f) {
+        float inv = 1.f / eqWeight[idx];
+        int r = clampI(static_cast<int>(eqR[idx] * inv), 0, 255);
+        int g = clampI(static_cast<int>(eqG[idx] * inv), 0, 255);
+        int b = clampI(static_cast<int>(eqB[idx] * inv), 0, 255);
+        return (r << 16) | (g << 8) | b;
+    }
+    return 0;
+}
+
+static void fillEquirectGaps(int32_t* out, int w, int h) {
+    // Multiple passes to propagate color into stride-2 gaps and larger holes.
+    for (int pass = 0; pass < 3; pass++) {
+        bool filled = false;
+        for (int y = 0; y < h; y++) {
+            for (int x = 0; x < w; x++) {
+                int idx = y * w + x;
+                if (out[idx] != 0) continue;
+                int sumR = 0, sumG = 0, sumB = 0, count = 0;
+                for (int dy = -1; dy <= 1; dy++) {
+                    int ny = y + dy;
+                    if (ny < 0 || ny >= h) continue;
+                    for (int dx = -1; dx <= 1; dx++) {
+                        if (dx == 0 && dy == 0) continue;
+                        int nx = (x + dx + w) % w;
+                        int32_t p = out[ny * w + nx];
+                        if (p != 0) {
+                            sumR += (p >> 16) & 0xff;
+                            sumG += (p >> 8) & 0xff;
+                            sumB += p & 0xff;
+                            count++;
+                        }
+                    }
+                }
+                if (count >= 2) {
+                    out[idx] = static_cast<int32_t>(0xff000000 |
+                        ((sumR / count) << 16) | ((sumG / count) << 8) | (sumB / count));
+                    filled = true;
+                }
+            }
+        }
+        if (!filled) break;
+    }
+    // Final pass: fill any remaining holes with the dark fallback.
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            int idx = y * w + x;
+            if (out[idx] == 0) {
+                out[idx] = static_cast<int32_t>(0xff1a1a2e);
+            }
+        }
+    }
+}
+
 JNIEXPORT jboolean JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeGetEquirect(
-    JNIEnv* env, jobject, jintArray jOut) {
+    JNIEnv* env, jobject, jintArray jOut, jint outW, jint outH) {
     std::lock_guard<std::mutex> lock(sphereMutex);
-    int sz = eqW * eqH;
-    if (sz == 0) return JNI_FALSE;
-    if (env->GetArrayLength(jOut) < sz) return JNI_FALSE;
+    if (eqW == 0 || eqH == 0 || outW <= 0 || outH <= 0) return JNI_FALSE;
+    if (env->GetArrayLength(jOut) < outW * outH) return JNI_FALSE;
 
     jint* out = env->GetIntArrayElements(jOut, nullptr);
     if (!out) return JNI_FALSE;
 
-    for (int i = 0; i < sz; i++) {
-        if (eqWeight[i] > 0.f) {
-            float inv = 1.f / eqWeight[i];
-            int r = clampI(static_cast<int>(eqR[i] * inv), 0, 255);
-            int g = clampI(static_cast<int>(eqG[i] * inv), 0, 255);
-            int b = clampI(static_cast<int>(eqB[i] * inv), 0, 255);
-            out[i] = static_cast<int32_t>(0xff000000 | (r << 16) | (g << 8) | b);
-        } else {
-            out[i] = 0;
+    if (outW == eqW && outH == eqH) {
+        int sz = eqW * eqH;
+        for (int i = 0; i < sz; i++) {
+            int32_t rgb = sampleEquirectRgb(i % eqW, i / eqW);
+            out[i] = rgb != 0
+                ? static_cast<int32_t>(0xff000000 | rgb)
+                : 0;
         }
-    }
+        fillEquirectGaps(reinterpret_cast<int32_t*>(out), eqW, eqH);
+    } else {
+        for (int y = 0; y < outH; y++) {
+            double eqYf = (y + 0.5) * eqH / outH - 0.5;
+            for (int x = 0; x < outW; x++) {
+                double eqXf = (x + 0.5) * eqW / outW - 0.5;
 
-    // Fill isolated gaps
-    for (int y = 0; y < eqH; y++) {
-        for (int x = 0; x < eqW; x++) {
-            int idx = y * eqW + x;
-            if (out[idx] != 0) continue;
-            int sumR = 0, sumG = 0, sumB = 0, count = 0;
-            for (int dy = -1; dy <= 1; dy++) {
-                int ny = y + dy;
-                if (ny < 0 || ny >= eqH) continue;
-                for (int dx = -1; dx <= 1; dx++) {
-                    if (dx == 0 && dy == 0) continue;
-                    int nx = (x + dx + eqW) % eqW;
-                    int32_t p = out[ny * eqW + nx];
-                    if (p != 0) {
-                        sumR += (p >> 16) & 0xff;
-                        sumG += (p >> 8) & 0xff;
-                        sumB += p & 0xff;
-                        count++;
-                    }
+                int x0 = static_cast<int>(std::floor(eqXf));
+                int y0 = static_cast<int>(std::floor(eqYf));
+                double fx = eqXf - x0;
+                double fy = eqYf - y0;
+
+                int x1 = (x0 + 1) % eqW;
+                if (x0 < 0) x0 += eqW;
+                x0 = x0 % eqW;
+                int y1 = std::min(y0 + 1, eqH - 1);
+                y0 = clampI(y0, 0, eqH - 1);
+
+                int32_t p00 = sampleEquirectRgb(x0, y0);
+                int32_t p10 = sampleEquirectRgb(x1, y0);
+                int32_t p01 = sampleEquirectRgb(x0, y1);
+                int32_t p11 = sampleEquirectRgb(x1, y1);
+
+                if (p00 == 0 && p10 == 0 && p01 == 0 && p11 == 0) {
+                    out[y * outW + x] = static_cast<int32_t>(0xff1a1a2e);
+                    continue;
                 }
-            }
-            if (count >= 5) {
-                out[idx] = static_cast<int32_t>(0xff000000 |
-                    ((sumR / count) << 16) | ((sumG / count) << 8) | (sumB / count));
-            } else {
-                out[idx] = static_cast<int32_t>(0xff1a1a2e);
+
+                // Weight-aware bilinear: skip zero-weight samples to avoid
+                // blending real color with black (which causes dark line artifacts).
+                double w00 = (p00 != 0) ? (1.0 - fx) * (1.0 - fy) : 0.0;
+                double w10 = (p10 != 0) ? fx * (1.0 - fy) : 0.0;
+                double w01 = (p01 != 0) ? (1.0 - fx) * fy : 0.0;
+                double w11 = (p11 != 0) ? fx * fy : 0.0;
+                double wSum = w00 + w10 + w01 + w11;
+                if (wSum < 1e-9) {
+                    out[y * outW + x] = static_cast<int32_t>(0xff1a1a2e);
+                    continue;
+                }
+                double invW = 1.0 / wSum;
+                int r = clampI(static_cast<int>(
+                    (w00 * ((p00 >> 16) & 0xff) + w10 * ((p10 >> 16) & 0xff) +
+                     w01 * ((p01 >> 16) & 0xff) + w11 * ((p11 >> 16) & 0xff)) * invW), 0, 255);
+                int g = clampI(static_cast<int>(
+                    (w00 * ((p00 >> 8) & 0xff) + w10 * ((p10 >> 8) & 0xff) +
+                     w01 * ((p01 >> 8) & 0xff) + w11 * ((p11 >> 8) & 0xff)) * invW), 0, 255);
+                int b = clampI(static_cast<int>(
+                    (w00 * (p00 & 0xff) + w10 * (p10 & 0xff) +
+                     w01 * (p01 & 0xff) + w11 * (p11 & 0xff)) * invW), 0, 255);
+
+                out[y * outW + x] = static_cast<int32_t>(0xff000000 | (r << 16) | (g << 8) | b);
             }
         }
+        // Fill stride-2 gaps in the downscaled output as well.
+        fillEquirectGaps(reinterpret_cast<int32_t*>(out), outW, outH);
     }
 
     env->ReleaseIntArrayElements(jOut, out, 0);
@@ -935,33 +1218,49 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetRectilinear(
             int y1 = std::min(y0 + 1, eqH - 1);
             y0 = clampI(y0, 0, eqH - 1);
 
-            auto sample = [&](int sx, int sy) -> int32_t {
+            auto sampleHasWeight = [&](int sx, int sy) -> bool {
+                return eqWeight[sy * eqW + sx] > 0.f;
+            };
+            auto sampleRgb = [&](int sx, int sy) -> int32_t {
                 int idx = sy * eqW + sx;
-                if (eqWeight[idx] > 0.f) {
-                    float inv = 1.f / eqWeight[idx];
-                    int r = clampI(static_cast<int>(eqR[idx] * inv), 0, 255);
-                    int g = clampI(static_cast<int>(eqG[idx] * inv), 0, 255);
-                    int b = clampI(static_cast<int>(eqB[idx] * inv), 0, 255);
-                    return (r << 16) | (g << 8) | b;
-                }
-                return 0x1a1a2e;
+                float inv = 1.f / eqWeight[idx];
+                int r = clampI(static_cast<int>(eqR[idx] * inv), 0, 255);
+                int g = clampI(static_cast<int>(eqG[idx] * inv), 0, 255);
+                int b = clampI(static_cast<int>(eqB[idx] * inv), 0, 255);
+                return (r << 16) | (g << 8) | b;
             };
 
-            int32_t p00 = sample(x0, y0);
-            int32_t p10 = sample(x1, y0);
-            int32_t p01 = sample(x0, y1);
-            int32_t p11 = sample(x1, y1);
+            bool h00 = sampleHasWeight(x0, y0);
+            bool h10 = sampleHasWeight(x1, y0);
+            bool h01 = sampleHasWeight(x0, y1);
+            bool h11 = sampleHasWeight(x1, y1);
 
-            auto lerp = [](int a, int b, double t) -> int {
-                return clampI(static_cast<int>(a + (b - a) * t), 0, 255);
-            };
+            if (!h00 && !h10 && !h01 && !h11) {
+                out[y * outW + x] = static_cast<int32_t>(0xff1a1a2e);
+                continue;
+            }
 
-            int r = lerp(lerp((p00>>16)&0xff, (p10>>16)&0xff, fx),
-                         lerp((p01>>16)&0xff, (p11>>16)&0xff, fx), fy);
-            int g = lerp(lerp((p00>>8)&0xff, (p10>>8)&0xff, fx),
-                         lerp((p01>>8)&0xff, (p11>>8)&0xff, fx), fy);
-            int b = lerp(lerp(p00&0xff, p10&0xff, fx),
-                         lerp(p01&0xff, p11&0xff, fx), fy);
+            int32_t p00 = h00 ? sampleRgb(x0, y0) : 0;
+            int32_t p10 = h10 ? sampleRgb(x1, y0) : 0;
+            int32_t p01 = h01 ? sampleRgb(x0, y1) : 0;
+            int32_t p11 = h11 ? sampleRgb(x1, y1) : 0;
+
+            double w00 = h00 ? (1.0 - fx) * (1.0 - fy) : 0.0;
+            double w10 = h10 ? fx * (1.0 - fy) : 0.0;
+            double w01 = h01 ? (1.0 - fx) * fy : 0.0;
+            double w11 = h11 ? fx * fy : 0.0;
+            double wSum = w00 + w10 + w01 + w11;
+            double invW = 1.0 / wSum;
+
+            int r = clampI(static_cast<int>(
+                (w00 * ((p00 >> 16) & 0xff) + w10 * ((p10 >> 16) & 0xff) +
+                 w01 * ((p01 >> 16) & 0xff) + w11 * ((p11 >> 16) & 0xff)) * invW), 0, 255);
+            int g = clampI(static_cast<int>(
+                (w00 * ((p00 >> 8) & 0xff) + w10 * ((p10 >> 8) & 0xff) +
+                 w01 * ((p01 >> 8) & 0xff) + w11 * ((p11 >> 8) & 0xff)) * invW), 0, 255);
+            int b = clampI(static_cast<int>(
+                (w00 * (p00 & 0xff) + w10 * (p10 & 0xff) +
+                 w01 * (p01 & 0xff) + w11 * (p11 & 0xff)) * invW), 0, 255);
 
             out[y * outW + x] = static_cast<int32_t>(0xff000000 | (r << 16) | (g << 8) | b);
         }
@@ -975,20 +1274,18 @@ JNIEXPORT jfloat JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeGetCoverage(
     JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lock(sphereMutex);
-    int sz = eqW * eqH;
+    int64_t sz = static_cast<int64_t>(eqW) * eqH;
     if (sz == 0) return 0.f;
-    int covered = 0;
-    for (int i = 0; i < sz; i++) {
-        if (eqWeight[i] > 0.f) covered++;
-    }
-    return static_cast<float>(covered) / sz;
+    // F1: cached incremental count, maintained in splatPixel.
+    return static_cast<float>(sCoveredCount) / sz;
 }
 
 JNIEXPORT jfloat JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeGetSolidAngleCoverage(
     JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lock(sphereMutex);
-    return computeSolidAngleCoverageLocked();
+    // F1: cached incremental grid-cell count.
+    return static_cast<float>(sGridFilledCells) / (SA_GW * SA_GH);
 }
 
 JNIEXPORT jboolean JNICALL
@@ -998,18 +1295,14 @@ Java_ab_inque_visiontechai_SphereNative_nativeGetHoleMask(
     if (eqW == 0 || eqH == 0 || outW <= 0 || outH <= 0) return JNI_FALSE;
     jint* out = env->GetIntArrayElements(jPixels, nullptr);
     if (!out) return JNI_FALSE;
-    constexpr int GW = 32, GH = 16;
+    // F1: read the incremental fill grid (O(cells)) instead of scanning the
+    // full weight buffer. Grid resolution matches SA_GW x SA_GH.
     for (int oy = 0; oy < outH; oy++) {
+        int gy = oy * SA_GH / outH;
         for (int ox = 0; ox < outW; ox++) {
-            int gx = ox * GW / outW;
-            int gy = oy * GH / outH;
-            int x0 = gx * eqW / GW, x1 = (gx + 1) * eqW / GW;
-            int y0 = gy * eqH / GH, y1 = (gy + 1) * eqH / GH;
-            float maxW = 0.f;
-            for (int y = y0; y < y1; y++)
-                for (int x = x0; x < x1; x++)
-                    maxW = std::max(maxW, eqWeight[y * eqW + x]);
-            out[oy * outW + ox] = (maxW > 0.05f) ? 0 : 0x88FF0000;
+            int gx = ox * SA_GW / outW;
+            bool filled = sGridFilled[gy * SA_GW + gx] > 0;
+            out[oy * outW + ox] = filled ? 0 : 0x88FF0000;
         }
     }
     env->ReleaseIntArrayElements(jPixels, out, 0);
@@ -1058,6 +1351,7 @@ Java_ab_inque_visiontechai_SphereNative_nativeLoadEquirect(
     }
 
     env->ReleaseIntArrayElements(jPixels, pixels, JNI_ABORT);
+    recomputeCoverageCountersLocked();
     LOGI("Sphere loaded equirect: %dx%d", eqW, eqH);
     return JNI_TRUE;
 }
@@ -1073,6 +1367,8 @@ Java_ab_inque_visiontechai_SphereNative_nativeReset(
         std::memset(eqB.data(), 0, sz * sizeof(float));
         std::memset(eqWeight.data(), 0, sz * sizeof(float));
     }
+    resetCoverageCountersLocked();
+    sFrames.clear();
     sFrameIndex = 0;
     sLastRejected = 0;
     LOGI("Sphere reset");
@@ -1082,6 +1378,7 @@ JNIEXPORT void JNICALL
 Java_ab_inque_visiontechai_SphereNative_nativeRelease(
     JNIEnv*, jobject) {
     std::lock_guard<std::mutex> lock(sphereMutex);
+    sFrames.clear(); sFrames.shrink_to_fit();
     eqR.clear(); eqR.shrink_to_fit();
     eqG.clear(); eqG.shrink_to_fit();
     eqB.clear(); eqB.shrink_to_fit();

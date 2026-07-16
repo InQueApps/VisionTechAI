@@ -116,6 +116,38 @@ class SphereStitchWorkerTest {
         worker.shutdown()
     }
 
+    @Test
+    fun runFinishGeneration_deliversOffMainThread() {
+        val ops = FakeOps()
+        val executor = Executors.newSingleThreadExecutor()
+        val worker = SphereStitchWorker(operations = ops, executor = executor)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var finish: SphereFinishResult? = null
+        worker.submit(
+            Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            floatArrayOf(0f, 0f, 0f, 1f)
+        )
+        val submitDeadline = System.currentTimeMillis() + 3000
+        while (ops.addCount < 1 && System.currentTimeMillis() < submitDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        worker.runFinishGeneration(64, 32) { result ->
+            finish = result
+            latch.countDown()
+        }
+        val finishDeadline = System.currentTimeMillis() + 3000
+        while (finish == null && System.currentTimeMillis() < finishDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertNotNull(finish)
+        assertFalse(finish!!.ranOnMainThread)
+        assertNotNull(finish!!.equirect)
+        worker.shutdown()
+        executor.shutdown()
+    }
+
     private class HoleMaskOps : FakeOps() {
         override fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap =
             Bitmap.createBitmap(outW, outH, Bitmap.Config.ARGB_8888).apply {

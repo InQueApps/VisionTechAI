@@ -1,12 +1,14 @@
 # PRISM AI — Test Plan
 
 **Total JVM tests:** 131 (`./gradlew test`)  
-**Instrumented (ARM):** `SphereStitchE2ETest` (7) + `SphereGoldenImageTest` (3) + `ExampleInstrumentedTest` (1) = **11**
+**Instrumented (ARM):** `SphereStitchE2ETest` (7+) + `SphereGoldenImageTest` (3) + `SpherePerfE2ETest` + `SphereArtifactE2ETest` + `SphereMuddinessE2ETest` + `SphereRoundTripE2ETest` + `SphereStitchDiagnosticTest` (non-gating) + `ExampleInstrumentedTest` (1)
 
 Run all sphere JNI tests locally:
 ```bash
+.\scripts\test.ps1 -Instrumented -Suite native
+# or
 ./gradlew connectedAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest
+  -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.SphereRoundTripE2ETest
 ```
 
 ---
@@ -32,7 +34,7 @@ Every shipped sphere feature (Phases A–F) maps to at least one automated test.
 | `SphereStitchWorker` (off-main, drop-if-busy) | S5 | `SphereStitchWorkerTest` | JVM |
 | `SphereStitchWorker` hole-mask preview | S12 | `SphereStitchWorkerTest` | JVM |
 | `SphereCaptureController` state machine | — | `SphereCaptureControllerTest` | JVM |
-| `SphereCaptureController` 85% finish gate | S12 | `SphereCaptureControllerTest` | JVM |
+| `SphereCaptureController` finish at any coverage | — | `SphereCaptureControllerTest` | JVM |
 | `SphereCaptureController` continuous throttle | S6 | `SphereCaptureControllerTest` | JVM |
 | `SpherePreviewBinder` + stitch → ImageView | preview | `SpherePreviewIntegrationTest` | JVM |
 | `SphereSessionController` photo → preview pixel | preview | `SphereSessionControllerPreviewTest` | JVM |
@@ -51,6 +53,11 @@ Every shipped sphere feature (Phases A–F) maps to at least one automated test.
 | `SphereNative` frame info / rectilinear | S2 | `SphereStitchE2ETest` | ARM |
 | `SphereNative` solid-angle + hole mask JNI | S9, S12 | `SphereStitchE2ETest` | ARM |
 | Golden stitch regression | S13 | `SphereGoldenImageTest` | ARM |
+| Two-phase fast + refine | — | `SphereStitchE2ETest`, `SpherePerfE2ETest` | ARM |
+| Black-line / gap artifacts | — | `SphereArtifactE2ETest` | ARM |
+| Muddy output (sharpness) | — | `SphereMuddinessE2ETest` | ARM |
+| Round-trip stitch fidelity | — | `SphereRoundTripE2ETest` | ARM |
+| Phase timings (diagnostic) | — | `SphereStitchDiagnosticTest` | ARM |
 | Native tile gain + seam feather | S7 | `SphereGoldenImageTest` (checksum) | ARM |
 
 ### App-wide vision — covered (pure Kotlin)
@@ -112,7 +119,7 @@ Every shipped sphere feature (Phases A–F) maps to at least one automated test.
 | Workflow | Trigger | Command |
 |----------|---------|---------|
 | `android-test.yml` | all push/PR | `./gradlew test` (131 JVM) |
-| `android-sphere-e2e.yml` | sphere paths | `SphereStitchE2ETest` + `SphereGoldenImageTest` on ARM emulator |
+| `android-sphere-e2e.yml` | sphere paths | native suite on ARM emulator (extend path filter for new `Sphere*E2ETest`) |
 
 ---
 

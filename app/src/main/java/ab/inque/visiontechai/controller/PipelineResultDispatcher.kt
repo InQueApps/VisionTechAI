@@ -57,13 +57,15 @@ class PipelineResultDispatcher(
                     sphereController.captureFrame(raw, ts)
                 }
                 sphereController.feedContinuousFrame(raw, ts)
-                binding.sphereCoverageText.text =
-                    SphereCoverageFormatter.format(
-                        sphereController.lastCoverage,
-                        sphereController.lastSolidAngleCoverage
-                    )
-                sphereController.lastPreviewBitmap?.let { preview ->
-                    SpherePreviewBinder.apply(binding.spherePreviewImage, preview)
+                if (!sphereController.isStitchBusy()) {
+                    binding.sphereCoverageText.text =
+                        SphereCoverageFormatter.format(
+                            sphereController.lastCoverage,
+                            sphereController.lastSolidAngleCoverage
+                        )
+                    sphereController.lastPreviewBitmap?.let { preview ->
+                        SpherePreviewBinder.apply(binding.spherePreviewImage, preview)
+                    }
                 }
             }
         }

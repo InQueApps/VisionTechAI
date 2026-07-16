@@ -1,5 +1,37 @@
 # PRISM AI Changelog (skills)
 
+## 2026-07-15 — Two-phase fast stitch, quality fixes, round-trip E2E
+
+### Architecture
+- **Two-phase pipeline:** `addFrameFast` (immediate splat + overlap gate) + debounced `refinePending` (900 ms idle) + `runFinishGeneration` off main thread.
+- **Removed 85% coverage finish gate** — user can export sphere at any coverage.
+- **Finish path:** `refineSeams` no longer called on save (was blurring entire overlap regions).
+
+### Native (`sphere_jni.cpp`)
+- F1 incremental coverage: O(1) `getCoverage` / `getSolidAngleCoverage`.
+- `STORE_MAX_DIM` 384 → **1280** (refine rebuild was muddy at thumbnail res).
+- Edge feather 25% → **10%**; seam blur radius 12 → **3** with higher gradient threshold.
+- Stride-1 splat on fast path (stride-2 caused black line artifacts).
+- Weight-aware bilinear + multi-pass gap fill on equirect export.
+
+### Instrumented tests (ARM)
+- `SpherePerfE2ETest` — latency gates (tap p95 < 500 ms, addFrameFast p95 < 50 ms).
+- `SphereStitchDiagnosticTest` — non-gating phase timings via logcat.
+- `SphereArtifactE2ETest` — black-line / gap artifact detection.
+- `SphereMuddinessE2ETest` — Laplacian sharpness, refine/seam retention.
+- `SphereRoundTripE2ETest` — stitch → rectilinear → PSNR / hue round-trip.
+- `SphereImageMetrics` — shared quality metrics helper.
+- `SphereE2EMatchers` — UI sphere workflow matchers.
+
+### Docs
+- [SPHERE_FAST_STITCH_PLAN.md](../../sphere/SPHERE_FAST_STITCH_PLAN.md) — perf diagnosis + F1–F3 plan.
+- [SPHERE_TWO_PHASE_PERF_AND_TEST.md](../../sphere/SPHERE_TWO_PHASE_PERF_AND_TEST.md) — test gates.
+- Updated skill files with quaternion conventions and quality lesson table.
+
+### Measured (OnePlus A6013, post-fix)
+- `addFrameFast` ~32 ms (was ~74 ms); coverage query < 0.1 ms (was 33 ms).
+- Photo tap submit→result ~66–92 ms (was 14–22 s).
+
 ## 2026-07-15 — Sphere capture regression fix (R1–R6)
 
 ### Fixed
