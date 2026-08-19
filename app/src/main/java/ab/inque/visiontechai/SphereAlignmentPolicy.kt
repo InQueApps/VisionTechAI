@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.panorama.FrameAlignmentInfo
+
+
 import ab.inque.visiontechai.SphereCaptureController.FrameWarning
 
 /**

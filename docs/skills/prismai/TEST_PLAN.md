@@ -1,134 +1,57 @@
-# PRISM AI — Test Plan
+# Test plan — sphere regression matrix
 
-**Total JVM tests:** 131 (`./gradlew test`)  
-**Instrumented (ARM):** `SphereStitchE2ETest` (7+) + `SphereGoldenImageTest` (3) + `SpherePerfE2ETest` + `SphereArtifactE2ETest` + `SphereMuddinessE2ETest` + `SphereRoundTripE2ETest` + `SphereStitchDiagnosticTest` (non-gating) + `ExampleInstrumentedTest` (1)
+Thresholds are defined in `SphereRefinePolicy.kt`. Update tests when changing policy.
 
-Run all sphere JNI tests locally:
-```bash
-.\scripts\test.ps1 -Instrumented -Suite native
-# or
-./gradlew connectedAndroidTest \
-  -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.SphereRoundTripE2ETest
-```
+## Fast path (L1) — run first on any native change
 
----
+| ID | Test | Gate |
+|----|------|------|
+| R1 | `fastRefine_noRegression` | ghost Δ ≤ 0.02, corr ≥ 0.88 |
+| A1–A4 | Fast align + preview + global | SSD, reject, IMU parity |
+| E1–E4 | Exposure + seams + stored gains | luminance, sharpness |
 
-## Feature → test traceability
+## Refine / global (L2)
 
-Every shipped sphere feature (Phases A–F) maps to at least one automated test. App-wide vision features are covered where logic is pure Kotlin; JNI/ML paths rely on manual QA unless noted.
+| ID | Test | Gate | Status |
+|----|------|------|--------|
+| R2 | IMU-parity | no regression | ✅ |
+| R3 | global, 4 noisy frames | ghost Δ ≤ 0.02 | ✅ |
+| R4 | global, 8 frames, 2× refine | boundary corr | ✅ |
+| **R5** | **periodic mid-capture** | — | ❌ not implemented |
+| R6 | global + `refineSeams()` | corr ≥ 0.95 | ✅ |
+| R7 | global, 2 frames | ghost Δ ≤ 0.12 | ✅ |
+| G1 | sparse graph | overlap SSD ↓ | ✅ |
 
-### Sphere stitching (Phases A–F) — fully covered
+## Finish / export (SAVE path)
 
-| Feature / module | Gap | Test class | Layer |
-|------------------|-----|------------|-------|
-| `QuaternionMath` (SLERP, rotate) | — | `QuaternionMathTest` | JVM |
-| `QuaternionMath.multiply` | S4 | `QuaternionMathMultiplyTest` | JVM |
-| `SphereProjectionMath` | S1 | `SphereProjectionMathTest` | JVM |
-| `FrameAlignmentInfo` metrics | — | `FrameAlignmentInfoTest` | JVM |
-| `SphereAlignmentPolicy` warnings | — | `FrameAlignmentInfoTest` | JVM |
-| `SphereCaptureThrottler` (legacy 5 fps) | S6 | `SphereCaptureThrottlerTest` | JVM |
-| `SphereAdaptiveThrottler` | S6 | `SphereAdaptiveThrottlerTest` | JVM |
-| `SphereMotionEstimator` | S6 | `SphereMotionEstimatorTest` | JVM |
-| `ImuCameraClockSync` | S11 | `ImuCameraClockSyncTest` | JVM |
-| `OrientationQuaternionHistory` | S11 | `OrientationQuaternionHistoryTest` | JVM |
-| `SphereStitchWorker` (off-main, drop-if-busy) | S5 | `SphereStitchWorkerTest` | JVM |
-| `SphereStitchWorker` hole-mask preview | S12 | `SphereStitchWorkerTest` | JVM |
-| `SphereCaptureController` state machine | — | `SphereCaptureControllerTest` | JVM |
-| `SphereCaptureController` finish at any coverage | — | `SphereCaptureControllerTest` | JVM |
-| `SphereCaptureController` continuous throttle | S6 | `SphereCaptureControllerTest` | JVM |
-| `SpherePreviewBinder` + stitch → ImageView | preview | `SpherePreviewIntegrationTest` | JVM |
-| `SphereSessionController` photo → preview pixel | preview | `SphereSessionControllerPreviewTest` | JVM |
-| `PipelineResultDispatcher` sphere HUD | S9 | `PipelineResultDispatcherSphereTest` | JVM |
-| `EffectiveFovCalculator` | S3, S10 | `EffectiveFovCalculatorTest` | JVM |
-| `SphereFovHelper` | S10 | `SphereFovHelperTest` | JVM |
-| `SphereExtrinsicCalibration` | S4 | `SphereExtrinsicCalibrationTest` | JVM |
-| `LensDistortion` / undistort | S1 | `LensDistortionTest` | JVM |
-| `TileGainMap` | S7 | `TileGainMapTest` | JVM |
-| `SolidAngleCoverage` + hole mask | S9, S12 | `SolidAngleCoverageTest` | JVM |
-| `SphereCoverageFormatter` | S9, S12 | `SphereCoverageFormatterTest` | JVM |
-| `SphereHoleOverlay` | S12 | `SphereHoleOverlayTest` | JVM |
-| `SphereAlignmentFallback` | S8 | `SphereAlignmentFallbackTest` | JVM |
-| `SphereXmpMetadata` (GPano export) | — | `SphereXmpMetadataTest` | JVM |
-| `SphereNative` init/add/coverage | — | `SphereStitchE2ETest` | ARM |
-| `SphereNative` frame info / rectilinear | S2 | `SphereStitchE2ETest` | ARM |
-| `SphereNative` solid-angle + hole mask JNI | S9, S12 | `SphereStitchE2ETest` | ARM |
-| Golden stitch regression | S13 | `SphereGoldenImageTest` | ARM |
-| Two-phase fast + refine | — | `SphereStitchE2ETest`, `SpherePerfE2ETest` | ARM |
-| Black-line / gap artifacts | — | `SphereArtifactE2ETest` | ARM |
-| Muddy output (sharpness) | — | `SphereMuddinessE2ETest` | ARM |
-| Round-trip stitch fidelity | — | `SphereRoundTripE2ETest` | ARM |
-| Phase timings (diagnostic) | — | `SphereStitchDiagnosticTest` | ARM |
-| Native tile gain + seam feather | S7 | `SphereGoldenImageTest` (checksum) | ARM |
+| ID | Test | Gate | Status |
+|----|------|------|--------|
+| S38 | `SphereFinishE2ETest` | corr ≥ 0.75, ghost Δ ≤ 0.05 | 🟡 emulator |
+| — | `SphereSaveExportE2ETest` | export bitmap non-null, dims | ✅ emulator |
+| — | `SphereSessionSaveE2ETest` | UI SAVE workflow | device only |
+| RW1–RW5 | `SphereRealWorldE2ETest` | ghost Δ ≤ 0.05, band corr ≥ 0.90 | 🟡 |
 
-### App-wide vision — covered (pure Kotlin)
+## Lifecycle (unit)
 
-| Feature / module | Test class |
-|------------------|------------|
-| `VisionMode` | `VisionModeTest` |
-| `VisionModeTransitions` | `VisionModeTransitionsTest` |
-| `VisionOverlayHost` | `VisionOverlayHostTest` |
-| `MediaCapturePolicy` | `MediaCapturePolicyTest` |
-| `VisionAnalysisPipeline` | `VisionAnalysisPipelineTest` |
-| `PipelineResult` | `PipelineResultTest` |
-| `Yolo11OutputParser` | `Yolo11OutputParserTest` |
-| `ObjectDetectionOverlay` | `ObjectDetectionOverlayTest` |
-| `HdScaleMapper` | `HdScaleMapperTest` |
-| `ImageUtils` | `ImageUtilsTest` |
-| `ImageResampleUtils` | `ImageResampleUtilsTest` |
-| `FrameProcessorAdapters` | `FrameProcessorAdaptersTest` |
-| `ProcessorParams` | `ProcessorParamsTest` |
-| `TranslationLanguages` | `TranslationLanguagesTest` |
-| `TranslationExportFormatter` | `TranslationExportFormatterTest` |
+| Test | Covers |
+|------|--------|
+| `SphereSessionControllerSaveTest` | PREVIEW guard, session retention on dismiss |
+| `SphereCaptureControllerTest` | Queued export callbacks |
+| `SphereRefinePolicyTest` | Periodic refine threshold |
 
-### Not automated (documented deferrals)
+## Recommended run order
 
-| Feature | Reason | Tracking |
-|---------|--------|----------|
-| `SphereSessionController` enter/exit/save/MediaStore | Activity + MediaStore | G2 |
-| `SphereViewerView` OpenGL | GPU surface; manual QA | — |
-| `MainActivity` mode orchestration | Large activity; partial via dispatcher + preview tests | G1 |
-| `CameraController` / `VisionModeController` / permissions | CameraX lifecycle | G4 |
-| `OrientationTracker` sensor fusion | Hardware sensors | G4 |
-| Depth / segmentation / optical flow / night vision JNI | ML golden outputs | G3 |
-| Video recording (`ProcessedVideoRecorder`) | Encoder surface | G5 |
-| `SavedMediaActivity` | UI gallery | G6 |
-| ORB feature fallback (S8 full) | OpenCV not integrated | S8 in GAPS |
-| Multiband / Laplacian seam blend (S12 v2) | Only edge feather shipped | S12 in GAPS |
-| Per-device lens distortion (S1) | Always `LensDistortion.NONE` in session | S1 in GAPS |
-| Seam brightness ΔL* instrumented | Needs golden assets | SPHERE_TEST_PLAN |
-| Kotlin vs JNI ray parity | `SphereProjectionParityTest` planned | deferred |
-| Sphere CI on preview/dispatcher paths | Path filter on `Sphere*.kt` only | G7 |
+1. `./gradlew test` (JVM)
+2. Native fast change → R1 class method only
+3. Global/finish change → A4 + R7 + `SphereFinishE2ETest`
+4. Lifecycle/export → `SphereSessionControllerSaveTest` + `SphereSaveExportE2ETest`
+5. Before release → full ARM device suite + planar roundtrip
 
----
+## Success metrics (product)
 
-## Test class index (by count)
-
-| Area | Classes | ~Tests |
-|------|---------|--------|
-| **Sphere** | 26 | ~62 |
-| YOLO / pipeline | 4 | ~15 |
-| Overlay / modes | 4 | ~12 |
-| HD / image | 3 | ~10 |
-| Translation | 2 | ~5 |
-| Misc | 2 | ~3 |
-
----
-
-## CI
-
-| Workflow | Trigger | Command |
-|----------|---------|---------|
-| `android-test.yml` | all push/PR | `./gradlew test` (131 JVM) |
-| `android-sphere-e2e.yml` | sphere paths | native suite on ARM emulator (extend path filter for new `Sphere*E2ETest`) |
-
----
-
-## Adding a new feature — checklist
-
-1. Extract pure logic to a testable Kotlin `object` / class when possible.
-2. Add a `*Test.kt` in `app/src/test/...` (Robolectric for Android types).
-3. If JNI is involved, add/extend `androidTest/.../Sphere*E2ETest.kt`.
-4. Update this file's traceability table and [CHANGELOG.md](CHANGELOG.md).
-5. Run `./gradlew test` before PR.
-
-Manual release checklist: [../../sphere/SPHERE_TEST_PLAN.md](../../sphere/SPHERE_TEST_PLAN.md#manual-qa-checklist).
+| Metric | Target | Current |
+|--------|--------|---------|
+| Seam visibility (1–5) | ≤ 2 tripod | Manual QA |
+| Frame reject rate | < 10% | Not instrumented (S25) |
+| `addFrame` p95 | < 50 ms | Not instrumented (S25) |
+| Coverage vs holes | Overlay + 85% gate | ✅ |

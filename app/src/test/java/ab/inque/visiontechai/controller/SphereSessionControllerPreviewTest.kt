@@ -1,6 +1,6 @@
 package ab.inque.visiontechai.controller
 
-import ab.inque.visiontechai.LensDistortion
+import ab.inque.robotics.math.LensDistortion
 import ab.inque.visiontechai.OrientationTracker
 import ab.inque.visiontechai.R
 import ab.inque.visiontechai.SphereCaptureController

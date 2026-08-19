@@ -1,141 +1,31 @@
-# PRISM AI Changelog (skills)
+# Changelog — agent skills
 
-## 2026-07-15 — Two-phase fast stitch, quality fixes, round-trip E2E
+## 2026-07-26 (gap closure)
 
-### Architecture
-- **Two-phase pipeline:** `addFrameFast` (immediate splat + overlap gate) + debounced `refinePending` (900 ms idle) + `runFinishGeneration` off main thread.
-- **Removed 85% coverage finish gate** — user can export sphere at any coverage.
-- **Finish path:** `refineSeams` no longer called on save (was blurring entire overlap regions).
+- **Native:** S17 L2b liveRecency + stored exposure; S27 bundle polish; S30 depth warp retain; S32 `hasRefineWorkPending`; S34 dual intrinsic; S36 overlap bank rebuild hooks.
+- **Kotlin:** Camera2 focal scale seed; depth on all capture frames; `VideoNative` in `ImageUtils.bitmapToI420`.
+- **Tests:** `TextLineClustererGoldenTest`; planar replay emulator skip (S47); CI trim-caches (S48).
+- **GAPS.md:** All items marked closed.
 
-### Native (`sphere_jni.cpp`)
-- F1 incremental coverage: O(1) `getCoverage` / `getSolidAngleCoverage`.
-- `STORE_MAX_DIM` 384 → **1280** (refine rebuild was muddy at thumbnail res).
-- Edge feather 25% → **10%**; seam blur radius 12 → **3** with higher gradient threshold.
-- Stride-1 splat on fast path (stride-2 caused black line artifacts).
-- Weight-aware bilinear + multi-pass gap fill on equirect export.
+## 2026-07-26
 
-### Instrumented tests (ARM)
-- `SpherePerfE2ETest` — latency gates (tap p95 < 500 ms, addFrameFast p95 < 50 ms).
-- `SphereStitchDiagnosticTest` — non-gating phase timings via logcat.
-- `SphereArtifactE2ETest` — black-line / gap artifact detection.
-- `SphereMuddinessE2ETest` — Laplacian sharpness, refine/seam retention.
-- `SphereRoundTripE2ETest` — stitch → rectilinear → PSNR / hue round-trip.
-- `SphereImageMetrics` — shared quality metrics helper.
-- `SphereE2EMatchers` — UI sphere workflow matchers.
+- **SphereSessionSaveE2ETest:** Fixed main-thread deadlock (stitch off `onActivity` + `waitForIdleSync`); passes on device.
+- **S35:** Toast when background alignment polish updates the viewer after DONE.
+- **CI:** Added `SphereSessionSaveE2ETest` to sphere E2E workflow (4096 test skips on emulator).
 
-### Docs
-- [SPHERE_FAST_STITCH_PLAN.md](../../sphere/SPHERE_FAST_STITCH_PLAN.md) — perf diagnosis + F1–F3 plan.
-- [SPHERE_TWO_PHASE_PERF_AND_TEST.md](../../sphere/SPHERE_TWO_PHASE_PERF_AND_TEST.md) — test gates.
-- Updated skill files with quaternion conventions and quality lesson table.
+## 2026-07-25
 
-### Measured (OnePlus A6013, post-fix)
-- `addFrameFast` ~32 ms (was ~74 ms); coverage query < 0.1 ms (was 33 ms).
-- Photo tap submit→result ~66–92 ms (was 14–22 s).
+- Created in-repo skill docs under `docs/skills/` (canonical for this workspace).
+- **GAPS.md:** Full three-layer audit — stitching S1–S35 summary, lifecycle S36–S45, CI S46–S50.
+- Documented SAVE/export lifecycle fixes (S36a–S36h) from production bug investigation.
+- Identified open gaps: runtime SAVE quality gate (S39), CI save E2E (S46), export progress UI (S43).
 
-## 2026-07-15 — Sphere capture regression fix (R1–R6)
+## 2026-07-21
 
-### Fixed
-- Restored immediate "Frame added to sphere" on tap
-- `SphereAlignmentPolicy` warns on rejected frame 1
-- `lastRawFrameTimestampNanos` passed to `captureFrame`
-- Removed `pendingPhotoCaptureToast`, `markPendingPhotoCapture`, `onFrameAccepted`
-- Documented regression analysis in `GAPS.md`
+- Critical refine/overlap sprint analysis in `docs/sphere/SPHERE_GAPS.md`.
+- G0 global pose refine; IMU-parity L2; dual compositing (S17).
 
-## 2026-07-15 — Critical / high / medium gaps
+## 2026-07-20
 
-### Sphere quality
-- **S1** `LensDistortionStore` — per-device profiles + prefs; wired in `SphereSessionController`
-- **S8** Native micro-shift search (±10 px) for parallax lite
-- **S12** `nativeRefineSeams` — weight-gradient blend on finish/save
-
-### App architecture & tests
-- `SphereUiCoordinator`, `ContactEmailLauncher`, `CameraFovCalculator`, `PermissionDenialMessage`
-- `NativeModuleAvailability` + `isAvailable()` on vision JNI modules
-- Espresso `MainActivityModeSwitchTest`; JVM tests for G4/G6
-- Widened `android-sphere-e2e.yml` path filters
-
-### Tests
-- JVM: 131 → **146** passing
-
-## 2026-07-15 — Gap reanalysis + preview pipeline
-
-### Docs
-- Rewrote [GAPS.md](GAPS.md) — 131 JVM tests; new G4–G7; S1/S8/S12 partial status
-- Synced [SPHERE_GAPS.md](../../sphere/SPHERE_GAPS.md) with Phases A–F reality
-- [TEST_PLAN.md](TEST_PLAN.md) — preview integration tests, expanded deferrals
-
-### Code (preview fix, prior)
-- `SpherePreviewBinder`, `SpherePreviewIntegrationTest`, `SphereSessionControllerPreviewTest`
-- Contact Us → `inqueapps@gmail.com`
-
-### Tests
-- JVM: 125 → **131** passing
-
-## 2026-07-14 — Test coverage audit (sphere + integration)
-
-### Added
-- `SphereCaptureControllerTest` — state machine, dual coverage, 85% finish gate, continuous throttle
-- `PipelineResultDispatcherSphereTest` — sphere HUD + capture-next-frame wiring
-- `FrameAlignmentInfoTest` — low-overlap + clean-frame policy cases
-- `SphereStitchWorkerTest` — hole-mask preview compositing
-- `SphereStitchE2ETest` — solid-angle coverage + hole mask JNI cases
-- Full **feature → test traceability** table in `TEST_PLAN.md`
-
-### Tests
-- JVM: 112 → **125** passing
-- Instrumented sphere: 8 → **10** cases
-
-## 2026-07-14 — Sphere Phases D–F
-
-### Added
-- `TileGainMap` — 8×8 per-tile RGB gain (Kotlin mirror of native)
-- `SolidAngleCoverage` — 32×16 grid fraction + hole mask ARGB
-- `SphereHoleOverlay` — composite red hints on live preview
-- `SphereCoverageFormatter` — dual area/sphere HUD; 85% finish gate
-- `SphereAlignmentFallback` — relaxed SSD policy (1.35× threshold, 80+ overlap)
-- JNI: tile gain splat, seam feather, `nativeGetSolidAngleCoverage`, `nativeGetHoleMask`
-- `SphereGoldenImageTest` — synthetic stitch checksum + coverage/mask e2e
-- `.github/workflows/android-sphere-e2e.yml` — ARM emulator sphere tests
-- Unit tests: `TileGainMapTest`, `SolidAngleCoverageTest`, `SphereCoverageFormatterTest`, `SphereAlignmentFallbackTest`, `SphereHoleOverlayTest`
-
-### Changed
-- `SphereStitchWorker` — solid-angle coverage + hole mask on preview
-- `SphereCaptureController` — `lastSolidAngleCoverage`; finish blocked < 85%
-- `PipelineResultDispatcher` / `SphereSessionController` — dual coverage text
-
-### Tests
-- JVM: 100 → **112** passing
-
-## 2026-07-14 — Sphere Phase C
-
-### Added
-- `EffectiveFovCalculator` — sensor FOV + analysis size + rotation → frame FOV
-- `SphereExtrinsicCalibration` — persistent IMU offset quaternion (`SharedPreferences`)
-- `LensDistortion` / `LensDistortionMath` — Brown–Conrady undistort in Kotlin + JNI
-- `QuaternionMath.multiply` — Hamilton product for extrinsic apply
-- `FrameAlignmentInfo.rollOffsetDeg` — native roll alignment metric
-- Unit tests: `EffectiveFovCalculatorTest`, `SphereExtrinsicCalibrationTest`, `LensDistortionTest`, `QuaternionMathMultiplyTest`
-
-### Changed
-- `sphere_jni.cpp` — distortion coeffs on init; `pixelToRay` helper; roll in SSD alignment
-- `SphereNative.init` — accepts `LensDistortion` (k1, k2, p1, p2)
-- `SphereSessionController` — analysis dimensions + display rotation for FOV; extrinsic apply
-- `VisionState` — tracks `lastAnalysisWidth/Height`
-- `PipelineResultDispatcher` — updates analysis dimensions each frame
-
-### Tests
-- JVM: 89 → **100** passing
-
-## 2026-07-14 — Sphere Phase B
-
-### Added
-- `SphereStitchWorker`, `SphereAdaptiveThrottler`, `ImuCameraClockSync`, etc.
-- JVM: 74 → 89 tests
-
-## 2026-07-14 — Sphere Phase A
-
-- Extracted sphere math helpers; `SphereStitchE2ETest`; 57 → 74 JVM tests
-
-## 2026-07 — Sprint 1 / Play / CI
-
-- Controllers extracted; 16 KB page support; GitHub Actions `./gradlew test`
+- `SphereProductionStitchPipeline` as single export path.
+- Pre-finish drain on DONE; background export at 4096².

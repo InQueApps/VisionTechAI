@@ -1,5 +1,9 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.math.QuaternionMath
+import ab.inque.robotics.panorama.SphereNative
+
+
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.util.Log
@@ -113,6 +117,30 @@ class SphereMuddinessE2ETest {
         assertTrue(
             "refinePending made output muddy (retention=${"%.3f".format(retention)}, min=$MIN_REFINE_SHARPNESS_RETENTION)",
             retention >= MIN_REFINE_SHARPNESS_RETENTION
+        )
+    }
+
+    @Test
+    fun refineSeamsLight_doesNotOverBlur() {
+        val frame = checkerboardBitmap()
+        val quats = listOf(
+            floatArrayOf(0f, 0f, 0f, 1f),
+            QuaternionMath.fromAxisAngle(0.0, 0.0, 1.0, Math.toRadians(20.0)),
+            QuaternionMath.fromAxisAngle(0.0, 0.0, 1.0, Math.toRadians(40.0)),
+        )
+        for (q in quats) {
+            SphereNative.addFrame(frame, q)
+        }
+
+        val sharpBefore = measureEquirectSharpness("beforeSeamLight")
+        SphereNative.refineSeams(light = true)
+        val sharpAfter = measureEquirectSharpness("afterSeamLight")
+
+        val retention = SphereImageMetrics.sharpnessRetentionRatio(sharpBefore, sharpAfter)
+        Log.i(TAG, "refineSeamsLight sharpness retention=${"%.3f".format(retention)}")
+        assertTrue(
+            "refineSeamsLight over-blurred output (retention=${"%.3f".format(retention)}, min=$MIN_SEAM_SHARPNESS_RETENTION)",
+            retention >= MIN_SEAM_SHARPNESS_RETENTION
         )
     }
 

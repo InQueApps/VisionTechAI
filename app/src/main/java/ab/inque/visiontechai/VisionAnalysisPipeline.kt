@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.detection.DetectionResult
+
+
 import android.graphics.Bitmap
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -15,7 +18,9 @@ data class PipelineResult(
     val detections: List<DetectionResult>?,
     val imageHeight: Int = 0,
     val imageWidth: Int = 0,
-    val frameTimestampNanos: Long = 0
+    val frameTimestampNanos: Long = 0,
+    /** CameraX clockwise rotation applied to [rawBitmap] in [ImageUtils.yuvToBitmap]. */
+    val imageRotationDegrees: Int = 0
 )
 
 /**
@@ -36,18 +41,23 @@ class VisionAnalysisPipeline(
     fun createAnalyzer(callback: (PipelineResult) -> Unit): ImageAnalysis.Analyzer {
         return ImageAnalysis.Analyzer { image ->
             val frameTs = image.imageInfo.timestamp
+            val rotationDegrees = image.imageInfo.rotationDegrees
             val bitmap = ImageUtils.yuvToBitmap(image)
             if (bitmap == null) {
                 image.close()
                 return@Analyzer
             }
-            callback(processFrame(bitmap, frameTs))
+            callback(processFrame(bitmap, frameTs, rotationDegrees))
             image.close()
         }
     }
 
     /** Frame logic extracted for unit tests (no [ImageProxy] required). */
-    internal fun processFrame(bitmap: Bitmap, frameTimestampNanos: Long): PipelineResult {
+    internal fun processFrame(
+        bitmap: Bitmap,
+        frameTimestampNanos: Long,
+        imageRotationDegrees: Int = 0
+    ): PipelineResult {
         val state = getState()
 
         frameCount++
@@ -86,7 +96,8 @@ class VisionAnalysisPipeline(
             detections = detections,
             imageHeight = bitmap.height,
             imageWidth = bitmap.width,
-            frameTimestampNanos = frameTimestampNanos
+            frameTimestampNanos = frameTimestampNanos,
+            imageRotationDegrees = imageRotationDegrees
         )
     }
 }

@@ -46,6 +46,10 @@ Additional capabilities:
 ./gradlew testDebugUnitTest
 ```
 
+## Testing
+
+See **[README_test.md](README_test.md)** for JVM unit tests, device E2E, robotics C++ host tests (`scripts/test-robotics-cpp.ps1`), and the planar roundtrip stitch workflow (`scripts/stitch_planar_roundtrip.py`).
+
 ### ML models
 
 YOLO and MiDaS model files are not committed to git. Add them under `app/src/main/assets/` before using object detection or depth modes:

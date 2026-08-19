@@ -18,6 +18,7 @@ import androidx.test.espresso.assertion.ViewAssertions.matches
 
 import androidx.test.espresso.matcher.ViewMatchers.withId
 
+import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.rules.ActivityScenarioRule
 
 import ab.inque.visiontechai.controller.SphereSessionController
@@ -259,33 +260,26 @@ object SphereE2EMatchers {
 
 
     fun waitForStitchIdle(
-
         activityRule: ActivityScenarioRule<MainActivity>,
-
         timeoutMs: Long = 30_000
-
     ) {
+        waitForStitchIdle(activityRule.scenario, timeoutMs)
+    }
 
+    fun waitForStitchIdle(
+        scenario: ActivityScenario<MainActivity>,
+        timeoutMs: Long = 30_000
+    ) {
         val deadline = System.currentTimeMillis() + timeoutMs
-
         while (System.currentTimeMillis() < deadline) {
-
             var busy = true
-
-            activityRule.scenario.onActivity { activity ->
-
+            scenario.onActivity { activity ->
                 busy = sphereSession(activity)?.controller?.isStitchBusy() == true
-
             }
-
             if (!busy) return
-
             Thread.sleep(250)
-
         }
-
         throw AssertionError("Sphere stitch worker did not become idle within ${timeoutMs}ms")
-
     }
 
 

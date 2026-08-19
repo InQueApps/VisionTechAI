@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.detection.DetectionResult
+
+
 import android.graphics.Bitmap
 import android.graphics.Color
 import org.junit.Assert.assertEquals

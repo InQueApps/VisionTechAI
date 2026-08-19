@@ -1,5 +1,11 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.math.LensDistortion
+import ab.inque.robotics.panorama.RefineStats
+import ab.inque.robotics.panorama.FrameAlignmentInfo
+import ab.inque.robotics.panorama.SphereNative
+
+
 import android.graphics.Bitmap
 
 /** Result of a fast-path stitch attempt. */
@@ -26,21 +32,58 @@ interface SphereStitchOperations {
      * or [STITCH_LOW_OVERLAP]. Default delegates to [addFrame] for test fakes.
      */
     fun addFrameFast(bitmap: Bitmap, quaternion: FloatArray, overlapGate: Float): Int =
-        if (addFrame(bitmap, quaternion)) STITCH_ACCEPTED else STITCH_REJECTED
+        addFrameFast(bitmap, quaternion, overlapGate, null)
+
+    fun addFrameFast(
+        bitmap: Bitmap,
+        quaternion: FloatArray,
+        overlapGate: Float,
+        nearnessMap: FloatArray?
+    ): Int = if (addFrame(bitmap, quaternion)) STITCH_ACCEPTED else STITCH_REJECTED
 
     /**
      * Background refinement: re-align newly added frames and rebuild the
      * panorama. Returns true if the buffer changed (a refreshed preview is
      * warranted). Default is a no-op for test fakes.
      */
-    fun refinePending(): Boolean = false
+    fun refinePending(applyGlobalPose: Boolean = false): Boolean = false
+
+    /** S32: true when native refine would change the panorama (dirty frames or finish upgrade). */
+    fun hasRefineWorkPending(applyGlobalPose: Boolean = false): Boolean = true
+
+    /** I3: seed overlap-bank focal scale before first frame (Camera2-derived). */
+    fun setSessionFocalScale(scale: Float): Boolean = false
+
+    /** Layer 2: global pose graph + equirect rebuild. */
+    fun refineGlobalPose(): Boolean = refinePending(applyGlobalPose = true)
+
+    /** Layer 3: overlap-bank intrinsic pass + rebuild. */
+    fun refineIntrinsics(): Boolean = false
+
+    /** Chained pose + motion-warp refine on stored frames (offline replay pass). */
+    fun refineStoredPoses(): Boolean = false
+
+    /** Clear equirect and rebuild every stored frame with full visual alignment. */
+    fun rebuildFullAlign(): Boolean = false
+
+    /**
+     * Resize internal equirect to export resolution and resplat stored frames
+     * (no photometric align — poses already refined at capture resolution).
+     */
+    fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean = false
+
+    fun setGlobalRefinePasses(passes: Int) {}
+
+    fun setFastFinishRefine(enabled: Boolean) {}
 
     fun getCoverage(): Float
     fun getSolidAngleCoverage(): Float
     fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap?
     fun getLastFrameInfo(): FrameAlignmentInfo?
     fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap?
-    fun refineSeams(): Boolean = true
+    fun refineSeams(light: Boolean = false): Boolean = true
+    fun getLastRefineStats(): RefineStats? = null
+    fun getSessionDistortionK1(): Float = 0f
     fun reset()
     fun release()
 }
@@ -58,9 +101,38 @@ object SphereNativeOperations : SphereStitchOperations {
         SphereNative.addFrame(bitmap, quaternion)
 
     override fun addFrameFast(bitmap: Bitmap, quaternion: FloatArray, overlapGate: Float): Int =
-        SphereNative.addFrameFast(bitmap, quaternion, overlapGate)
+        addFrameFast(bitmap, quaternion, overlapGate, null)
 
-    override fun refinePending(): Boolean = SphereNative.refinePending()
+    override fun addFrameFast(
+        bitmap: Bitmap,
+        quaternion: FloatArray,
+        overlapGate: Float,
+        nearnessMap: FloatArray?
+    ): Int = SphereNative.addFrameFast(bitmap, quaternion, overlapGate, nearnessMap)
+
+    override fun refinePending(applyGlobalPose: Boolean): Boolean =
+        SphereNative.refinePending(applyGlobalPose)
+
+    override fun hasRefineWorkPending(applyGlobalPose: Boolean): Boolean =
+        SphereNative.hasRefineWorkPending(applyGlobalPose)
+
+    override fun setSessionFocalScale(scale: Float): Boolean =
+        SphereNative.setSessionFocalScale(scale)
+
+    override fun refineGlobalPose(): Boolean = SphereNative.refinePending(applyGlobalPose = true)
+
+    override fun refineIntrinsics(): Boolean = SphereNative.refineIntrinsicsPending()
+
+    override fun refineStoredPoses(): Boolean = SphereNative.refineStoredPoses()
+
+    override fun rebuildFullAlign(): Boolean = SphereNative.rebuildFullAlign()
+
+    override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean =
+        SphereNative.prepareExportEquirect(exportW, exportH)
+
+    override fun setGlobalRefinePasses(passes: Int) = SphereNative.setGlobalRefinePasses(passes)
+
+    override fun setFastFinishRefine(enabled: Boolean) = SphereNative.setFastFinishRefine(enabled)
 
     override fun getCoverage(): Float = SphereNative.getCoverage()
 
@@ -74,7 +146,11 @@ object SphereNativeOperations : SphereStitchOperations {
     override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap? =
         SphereNative.getEquirectBitmap(eqW, eqH)
 
-    override fun refineSeams(): Boolean = SphereNative.refineSeams()
+    override fun refineSeams(light: Boolean): Boolean = SphereNative.refineSeams(light)
+
+    override fun getLastRefineStats(): RefineStats? = SphereNative.getLastRefineStats()
+
+    override fun getSessionDistortionK1(): Float = SphereNative.getSessionDistortionK1()
 
     override fun reset() = SphereNative.reset()
 

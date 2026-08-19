@@ -29,19 +29,42 @@ $EMULATOR = Join-Path $SDK "emulator\emulator.exe"
 
 $Suites = @{
     smoke  = @("ab.inque.visiontechai.ExampleInstrumentedTest")
-    ui     = @("ab.inque.visiontechai.MainActivityModeSwitchTest",
+    ui     = @("ab.inque.visiontechai.SphereStitchE2ETest#nativeLibrary_isAvailable",
+               "ab.inque.visiontechai.MainActivityModeSwitchTest",
                "ab.inque.visiontechai.VisionWorkflowE2ETest")
-    native = @("ab.inque.visiontechai.SphereStitchE2ETest",
+    native = @("ab.inque.visiontechai.RoboticsCppUnitTest",
+               "ab.inque.visiontechai.SphereStitchE2ETest",
                "ab.inque.visiontechai.SphereGoldenImageTest",
                "ab.inque.visiontechai.SpherePerfE2ETest",
+               "ab.inque.visiontechai.SphereWarpE2ETest",
+               "ab.inque.visiontechai.SphereGhostingE2ETest",
+               "ab.inque.visiontechai.SphereRefineOverlapE2ETest",
+               "ab.inque.visiontechai.SphereFinishE2ETest",
+               "ab.inque.visiontechai.SphereRealWorldE2ETest",
+               "ab.inque.visiontechai.SpherePlanarReplayE2ETest",
+               "ab.inque.visiontechai.SphereAlignmentE2ETest",
+               "ab.inque.visiontechai.SphereExposureSeamE2ETest",
+               "ab.inque.visiontechai.SphereIntrinsicOverlapE2ETest",
+               "ab.inque.visiontechai.SphereSphericalProjectionE2ETest",
                "ab.inque.visiontechai.SphereArtifactE2ETest",
                "ab.inque.visiontechai.SphereMuddinessE2ETest")
     all    = @("ab.inque.visiontechai.ExampleInstrumentedTest",
+               "ab.inque.visiontechai.RoboticsCppUnitTest",
                "ab.inque.visiontechai.MainActivityModeSwitchTest",
                "ab.inque.visiontechai.VisionWorkflowE2ETest",
                "ab.inque.visiontechai.SphereStitchE2ETest",
                "ab.inque.visiontechai.SphereGoldenImageTest",
                "ab.inque.visiontechai.SpherePerfE2ETest",
+               "ab.inque.visiontechai.SphereWarpE2ETest",
+               "ab.inque.visiontechai.SphereGhostingE2ETest",
+               "ab.inque.visiontechai.SphereRefineOverlapE2ETest",
+               "ab.inque.visiontechai.SphereFinishE2ETest",
+               "ab.inque.visiontechai.SphereRealWorldE2ETest",
+               "ab.inque.visiontechai.SpherePlanarReplayE2ETest",
+               "ab.inque.visiontechai.SphereAlignmentE2ETest",
+               "ab.inque.visiontechai.SphereExposureSeamE2ETest",
+               "ab.inque.visiontechai.SphereIntrinsicOverlapE2ETest",
+               "ab.inque.visiontechai.SphereSphericalProjectionE2ETest",
                "ab.inque.visiontechai.SphereArtifactE2ETest",
                "ab.inque.visiontechai.SphereMuddinessE2ETest")
 }
@@ -92,6 +115,17 @@ function Start-Emulator {
         }
     } while ((Get-Date) -lt $deadline)
     throw "Emulator did not boot within 120s."
+}
+
+function Assert-VisionNativeLibsInApk {
+    $apk = Join-Path $ProjectRoot "app\build\outputs\apk\debug\app-debug.apk"
+    if (-not (Test-Path $apk)) {
+        throw "Debug APK not found at $apk"
+    }
+    $sphereLib = jar tf $apk 2>$null | Select-String "lib/arm64-v8a/libvision_sphere\.so"
+    if (-not $sphereLib) {
+        throw "libvision_sphere.so missing from debug APK - 360 preview will not work. Rebuild native code (CMakeLists Android guard)."
+    }
 }
 
 function Select-Device {
@@ -156,8 +190,11 @@ if ($runInstrumented) {
     Push-Location $ProjectRoot
     try {
         Write-Host "[E2E] Cleaning old install..." -ForegroundColor DarkGray
+        $prevEap = $ErrorActionPreference
+        $ErrorActionPreference = "SilentlyContinue"
         & $ADB -s $serial uninstall ab.inque.prismai 2>$null | Out-Null
-        & $ADB -s $serial uninstall ab.inque.visiontechai.test 2>$null | Out-Null
+        & $ADB -s $serial uninstall ab.inque.prismai.test 2>$null | Out-Null
+        $ErrorActionPreference = $prevEap
 
         Write-Host "[E2E] Disabling animations on emulator..." -ForegroundColor DarkGray
         & $ADB -s $serial shell settings put global window_animation_scale 0 2>$null
@@ -168,6 +205,7 @@ if ($runInstrumented) {
             Write-Host "[E2E] Building debug APKs..." -ForegroundColor Cyan
             & .\gradlew.bat :app:assembleDebug :app:assembleDebugAndroidTest --no-daemon
             if ($LASTEXITCODE -ne 0) { throw "Build failed." }
+            Assert-VisionNativeLibsInApk
 
             Write-Host "[E2E] Installing APKs..." -ForegroundColor Cyan
             & .\gradlew.bat :app:installDebug :app:installDebugAndroidTest --no-daemon
@@ -184,7 +222,11 @@ if ($runInstrumented) {
           "android.permission.READ_EXTERNAL_STORAGE",
           "android.permission.WRITE_EXTERNAL_STORAGE"
         ) | ForEach-Object {
-            & $ADB -s $serial shell pm grant ab.inque.prismai $_ 2>$null | Out-Null
+            try {
+                & $ADB -s $serial shell pm grant ab.inque.prismai $_ 2>$null | Out-Null
+            } catch {
+                # Some permissions are not grantable on all API levels; ignore.
+            }
         }
 
         Write-Host "[E2E] Running instrumented tests..." -ForegroundColor Cyan

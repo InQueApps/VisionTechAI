@@ -1,5 +1,9 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.detection.DetectionResult
+import ab.inque.robotics.vision.detection.Yolo11OutputParser
+
+
 import android.content.Context
 import android.graphics.*
 import android.os.SystemClock
@@ -11,12 +15,6 @@ import org.tensorflow.lite.support.image.TensorImage
 import org.tensorflow.lite.support.image.ops.ResizeOp
 import org.tensorflow.lite.support.tensorbuffer.TensorBuffer
 import java.nio.ByteBuffer
-
-data class DetectionResult(
-    val boundingBox: RectF,
-    val label: String,
-    val confidence: Float
-)
 
 class ObjectDetectionProcessor(
     private val context: Context,
@@ -46,39 +44,53 @@ class ObjectDetectionProcessor(
         .build()
 
     init {
-        debugLog( "Initializing ObjectDetectionProcessor...")
+        debugLog("Initializing ObjectDetectionProcessor...")
         initializeYOLO11n()
         loadClassLabels()
-        debugLog( "ObjectDetectionProcessor initialization complete. Ready: ${isYolo11nInitialized && yolo11nInterpreter != null}")
+        debugLog("ObjectDetectionProcessor initialization complete. Ready: ${isReady()}")
+    }
+
+    private fun assetExists(assetPath: String): Boolean = try {
+        context.assets.open(assetPath).use { true }
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun logMissingOptionalAsset(assetPath: String) {
+        Log.i(
+            TAG,
+            "Optional asset missing: $assetPath — add under app/src/main/assets/ to enable object detection (see README)"
+        )
     }
 
     private fun loadClassLabels() {
-        try {
-            debugLog( "Loading class labels from $CLASS_LABELS_FILE...")
-            val inputStream = context.assets.open(CLASS_LABELS_FILE)
-            classLabels = inputStream.bufferedReader().readLines()
-            inputStream.close()
-            debugLog( "Successfully loaded ${classLabels.size} class labels")
-            
-            // Log first few labels for verification
-            val previewLabels = classLabels.take(5).joinToString(", ")
-            debugLog( "Class labels preview: $previewLabels...")
-            
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to load class labels from $CLASS_LABELS_FILE: ${e.message}")
+        if (!assetExists(CLASS_LABELS_FILE)) {
+            logMissingOptionalAsset(CLASS_LABELS_FILE)
             classLabels = emptyList()
-            // Do not throw: allow app to run without labels (object detection will still work but show empty labels)
+            return
+        }
+        try {
+            debugLog("Loading class labels from $CLASS_LABELS_FILE...")
+            classLabels = context.assets.open(CLASS_LABELS_FILE).bufferedReader().use { it.readLines() }
+            debugLog("Successfully loaded ${classLabels.size} class labels")
+            val previewLabels = classLabels.take(5).joinToString(", ")
+            debugLog("Class labels preview: $previewLabels...")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load class labels from $CLASS_LABELS_FILE: ${e.message}")
+            classLabels = emptyList()
         }
     }
 
     private fun initializeYOLO11n() {
+        if (!assetExists(YOLO11N_MODEL_FILE)) {
+            logMissingOptionalAsset(YOLO11N_MODEL_FILE)
+            isYolo11nInitialized = false
+            yolo11nInterpreter = null
+            return
+        }
         try {
-            debugLog( "Loading YOLO11n model from $YOLO11N_MODEL_FILE...")
-            
-            // Check if model file exists
-            val modelInputStream = context.assets.open(YOLO11N_MODEL_FILE)
-            val modelBytes = modelInputStream.readBytes()
-            modelInputStream.close()
+            debugLog("Loading YOLO11n model from $YOLO11N_MODEL_FILE...")
+            val modelBytes = context.assets.open(YOLO11N_MODEL_FILE).use { it.readBytes() }
             
             debugLog( "Model file loaded successfully. Size: ${modelBytes.size} bytes")
             
@@ -107,17 +119,15 @@ class ObjectDetectionProcessor(
             debugLog( "Model output data type: ${outputTensor?.dataType()}")
             
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize YOLO11n detector: ${e.message}")
-            Log.e(TAG, "Stack trace: ${e.stackTraceToString()}")
+            Log.w(TAG, "Failed to initialize YOLO11n detector: ${e.message}")
             isYolo11nInitialized = false
             yolo11nInterpreter = null
-            // Do not throw: allow app to run without object detection (e.g. if yolo11n_float16.tflite is missing from assets)
         }
     }
 
     fun detectObjects(bitmap: Bitmap, imageRotation: Int = 0): List<DetectionResult> {
         if (!isReady()) {
-            Log.e(TAG, "YOLO11n model is not ready for detection")
+            debugLog("YOLO11n model is not ready for detection")
             return emptyList()
         }
 

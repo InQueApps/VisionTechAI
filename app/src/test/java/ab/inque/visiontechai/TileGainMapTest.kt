@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.image.TileGainMap
+
+
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test

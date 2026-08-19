@@ -34,7 +34,16 @@ android {
     }
     externalNativeBuild {
         cmake {
-            path = file("src/main/cpp/CMakeLists.txt")
+            path = file("src/robotics/cpp/CMakeLists.txt")
+        }
+    }
+
+    sourceSets {
+        getByName("main") {
+            java.srcDirs("src/main/java", "src/robotics/java")
+        }
+        getByName("test") {
+            java.srcDirs("src/test/java", "src/robotics/test/java")
         }
     }
 

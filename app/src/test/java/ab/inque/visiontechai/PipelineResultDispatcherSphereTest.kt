@@ -1,11 +1,16 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.math.LensDistortion
+import ab.inque.robotics.panorama.FrameAlignmentInfo
+
+
 import ab.inque.visiontechai.databinding.ActivityMainBinding
 import ab.inque.visiontechai.controller.PipelineResultDispatcher
 import ab.inque.visiontechai.ui.VisionOverlayHost
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.drawable.BitmapDrawable
 import android.os.Looper
 import android.view.LayoutInflater
 import androidx.constraintlayout.widget.ConstraintLayout
@@ -106,6 +111,19 @@ class PipelineResultDispatcherSphereTest {
             binding.sphereCoverageText.text
         )
         assertNotNull(binding.spherePreviewImage.drawable)
+        assertNotNull(binding.sphereCameraFeed.drawable)
+    }
+
+    @Test
+    fun dispatch_sphereMode_showsCenterSquareOnCameraFeed() {
+        val dispatcher = createDispatcher()
+        val raw = Bitmap.createBitmap(16, 12, Bitmap.Config.ARGB_8888)
+        dispatcher.dispatch(pipelineResult(raw, ts = 2L))
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        val drawable = binding.sphereCameraFeed.drawable as? BitmapDrawable
+        assertNotNull(drawable)
+        assertEquals(12, drawable!!.bitmap.width)
+        assertEquals(12, drawable.bitmap.height)
     }
 
     @Test

@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.detection.DetectionResult
+
+
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet

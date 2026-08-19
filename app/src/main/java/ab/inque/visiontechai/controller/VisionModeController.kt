@@ -3,7 +3,7 @@ package ab.inque.visiontechai.controller
 import android.view.View
 import android.widget.SeekBar
 import ab.inque.visiontechai.Constants
-import ab.inque.visiontechai.FrameAccumulatorNative
+import ab.inque.robotics.accumulate.FrameAccumulatorNative
 import ab.inque.visiontechai.HDFrameProcessor
 import ab.inque.visiontechai.OpticalFlowProcessor
 import ab.inque.visiontechai.ImageSegmentationProcessor

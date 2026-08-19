@@ -21,14 +21,29 @@ class SphereUiCoordinator(
                 sphereSession.enter()
             }
         }
+        binding.sphereCancelButton.setOnClickListener {
+            sphereSession.cancelCapture()
+        }
         binding.sphereDoneButton.setOnClickListener {
             sphereSession.finishCapture()
         }
         binding.sphereSaveButton.setOnClickListener {
             sphereSession.saveEquirectangular()
         }
+        binding.sphereAddMoreButton.setOnClickListener {
+            sphereSession.addMoreFrames()
+        }
         binding.sphereCloseButton.setOnClickListener {
-            sphereSession.exit()
+            sphereSession.closeViewerAndReset()
+        }
+        if (ab.inque.visiontechai.BuildConfig.DEBUG) {
+            binding.sphereDebugButton.setOnClickListener {
+                sphereSession.toggleDebugRecording()
+            }
+            binding.sphereDebugButton.setOnLongClickListener {
+                sphereSession.replayLastDebugSession()
+                true
+            }
         }
     }
 }

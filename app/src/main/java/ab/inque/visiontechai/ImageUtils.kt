@@ -1,5 +1,6 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.video.VideoNative
 import android.graphics.*
 import android.graphics.ImageFormat
 import android.util.Log
@@ -9,6 +10,14 @@ import java.nio.ByteBuffer
 
 object ImageUtils {
     private const val TAG = "ImageUtils"
+
+    /** Rotate bitmap to upright display orientation; swaps dimensions for 90°/270°. */
+    fun rotateToUpright(bitmap: Bitmap, rotationDegrees: Int): Bitmap {
+        val rotation = ((rotationDegrees % 360) + 360) % 360
+        if (rotation == 0) return bitmap
+        val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
+        return Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
+    }
 
     /**
      * Convert YUV ImageProxy to RGB Bitmap.
@@ -36,10 +45,7 @@ object ImageUtils {
                         val imageBytes = out.toByteArray()
                         val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
                         if (bitmap != null) {
-                            return if (rotation != 0) {
-                                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                                Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
-                            } else bitmap
+                            return if (rotation != 0) rotateToUpright(bitmap, rotation) else bitmap
                         }
                     } catch (e: Exception) {
                         continue
@@ -114,10 +120,7 @@ object ImageUtils {
                 }
             }
             bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            return if (rotation != 0) {
-                val matrix = Matrix().apply { postRotate(rotation.toFloat()) }
-                Bitmap.createBitmap(bitmap, 0, 0, width, height, matrix, true)
-            } else bitmap
+            return if (rotation != 0) rotateToUpright(bitmap, rotation) else bitmap
         } catch (e: Exception) {
             Log.e(TAG, "Manual YUV conversion failed: ${e.message}")
             e.printStackTrace()
@@ -209,6 +212,9 @@ object ImageUtils {
         require(outI420.size >= w * h * 3 / 2) { "I420 buffer too small" }
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        if (VideoNative.isAvailable() && VideoNative.argbToI420(pixels, w, h, outI420)) {
+            return
+        }
         val ySize = w * h
         val uvSize = (w / 2) * (h / 2)
         var yIdx = 0

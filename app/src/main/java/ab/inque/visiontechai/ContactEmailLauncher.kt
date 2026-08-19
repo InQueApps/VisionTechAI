@@ -15,8 +15,6 @@ object ContactEmailLauncher {
             .build()
         val intent = Intent(Intent.ACTION_SENDTO).apply {
             data = uri
-            putExtra(Intent.EXTRA_EMAIL, arrayOf(recipient))
-            putExtra(Intent.EXTRA_SUBJECT, subject)
         }
         try {
             context.startActivity(Intent.createChooser(intent, context.getString(R.string.contact_us_chooser)))

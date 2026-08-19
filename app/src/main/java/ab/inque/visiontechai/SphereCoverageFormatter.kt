@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.image.SolidAngleCoverage
+
+
 object SphereCoverageFormatter {
 
     const val MIN_SOLID_ANGLE_TO_FINISH = 0.85f

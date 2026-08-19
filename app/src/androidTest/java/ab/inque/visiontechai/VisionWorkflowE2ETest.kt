@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.panorama.SphereNative
+
+
 import androidx.test.espresso.Espresso.onView
 import androidx.test.espresso.Espresso.pressBack
 import androidx.test.espresso.IdlingPolicies
@@ -177,6 +180,12 @@ class VisionWorkflowE2ETest {
             "Final sphere buffer should contain stitched pixels",
             SphereE2EMatchers.bitmapHasStitchedContent(equirectAfterFirst!!)
         )
+        val regionFirst = SphereImageMetrics.findContentRegion(equirectAfterFirst)
+        val lapFirst = if (regionFirst != null) {
+            SphereImageMetrics.laplacianVariance(equirectAfterFirst, regionFirst)
+        } else {
+            0.0
+        }
 
         // --- Frame 2: second capture should not break pipeline ---
         // On a real device the user would physically rotate; on emulator the
@@ -207,6 +216,17 @@ class VisionWorkflowE2ETest {
             "Final sphere should still contain stitched pixels",
             SphereE2EMatchers.bitmapHasStitchedContent(equirectAfterSecond!!)
         )
+
+        val regionSecond = SphereImageMetrics.findContentRegion(equirectAfterSecond)
+        if (regionFirst != null && regionSecond != null && lapFirst > 1.0) {
+            val lapSecond = SphereImageMetrics.laplacianVariance(equirectAfterSecond, regionSecond)
+            val retention = SphereImageMetrics.sharpnessRetentionRatio(lapFirst, lapSecond)
+            assertTrue(
+                "Workflow sharpness retention must be ≥ " +
+                    "${SphereRefinePolicy.minWorkflowSharpnessRetention()} (was $retention)",
+                retention >= SphereRefinePolicy.minWorkflowSharpnessRetention()
+            )
+        }
 
         // Reset gyroscope and exit sphere mode.
         device.executeShellCommand("emu sensor set gyroscope 0:0:0")

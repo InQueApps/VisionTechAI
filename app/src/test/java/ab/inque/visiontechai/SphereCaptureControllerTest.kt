@@ -1,5 +1,9 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.math.LensDistortion
+import ab.inque.robotics.panorama.FrameAlignmentInfo
+
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -27,6 +31,7 @@ class SphereCaptureControllerTest {
         var solidAngle = 0.1f
         var areaCoverage = 0.1f
         var addCount = 0
+        var sessionK1 = 0f
 
         override fun init(
             eqW: Int,
@@ -48,6 +53,13 @@ class SphereCaptureControllerTest {
             FrameAlignmentInfo(addCount, 50, 200, 1f, 100f, false)
         override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
             Bitmap.createBitmap(8, 4, Bitmap.Config.ARGB_8888)
+        override fun refinePending(applyGlobalPose: Boolean): Boolean = true
+        override fun refineGlobalPose(): Boolean = true
+        override fun refineIntrinsics(): Boolean = true
+        override fun refineStoredPoses(): Boolean = true
+        override fun rebuildFullAlign(): Boolean = true
+        override fun refineSeams(light: Boolean): Boolean = true
+        override fun getSessionDistortionK1(): Float = sessionK1
         override fun reset() {
             addCount = 0
             solidAngle = 0.1f
@@ -152,6 +164,32 @@ class SphereCaptureControllerTest {
     }
 
     @Test
+    fun resumeCapture_fromPreview_returnsToCapturing() {
+        controller.startSession()
+        ops.solidAngle = 0.5f
+        submitFrameAndAwait(shutdownExecutor = false)
+        assertTrue(controller.finishCapture())
+        val deadline = System.currentTimeMillis() + 5000
+        while (controller.state != SphereCaptureController.State.PREVIEW &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
+        assertTrue(controller.resumeCapture())
+        assertEquals(SphereCaptureController.State.CAPTURING, controller.state)
+        executor.shutdown()
+        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun resumeCapture_fromCapturing_isNoOp() {
+        controller.startSession()
+        assertFalse(controller.resumeCapture())
+    }
+
+    @Test
     fun resetSession_returnsToIdle() {
         controller.startSession()
         ops.solidAngle = 0.9f
@@ -159,6 +197,90 @@ class SphereCaptureControllerTest {
         controller.resetSession()
         assertEquals(SphereCaptureController.State.IDLE, controller.state)
         assertEquals(0f, controller.lastSolidAngleCoverage, 0.001f)
+    }
+
+    @Test
+    fun finishCapture_notifiesIntrinsicsConverged() {
+        var persisted: LensDistortion? = null
+        previewReady = false
+        ops.sessionK1 = -0.06f
+        controller = SphereCaptureController(
+            orientationTracker,
+            calibration,
+            onCoverageUpdate = { _, _, _ -> },
+            onPreviewReady = { previewReady = true },
+            onIntrinsicsConverged = { persisted = it },
+            stitchWorker = worker,
+            operations = ops
+        )
+        controller.startSession()
+        submitFrameAndAwait(shutdownExecutor = false)
+        submitFrameAndAwait(shutdownExecutor = false)
+        assertTrue(controller.finishCapture())
+        val previewDeadline = System.currentTimeMillis() + 5000
+        while (!previewReady && System.currentTimeMillis() < previewDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertTrue(controller.startBackgroundFullExport())
+        val deadline = System.currentTimeMillis() + 30_000
+        while (
+            (!controller.isFullExportComplete() || persisted == null) &&
+            System.currentTimeMillis() < deadline
+        ) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        worker.shutdown()
+        assertTrue(worker.awaitTermination(30, TimeUnit.SECONDS))
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(controller.isFullExportComplete())
+        assertNotNull(persisted)
+        assertEquals(-0.06f, persisted!!.k1, 0.001f)
+    }
+
+    @Test
+    fun startBackgroundFullExport_deliversQueuedCallbacks() {
+        controller.startSession()
+        submitFrameAndAwait(shutdownExecutor = false)
+        submitFrameAndAwait(shutdownExecutor = false)
+        assertTrue(controller.finishCapture())
+        val previewDeadline = System.currentTimeMillis() + 5000
+        while (controller.state != SphereCaptureController.State.PREVIEW &&
+            System.currentTimeMillis() < previewDeadline
+        ) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        var first = false
+        var second = false
+        assertTrue(controller.startBackgroundFullExport { first = true })
+        assertTrue(controller.startBackgroundFullExport { second = true })
+        val deadline = System.currentTimeMillis() + 30_000
+        while ((!first || !second) && System.currentTimeMillis() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        worker.shutdown()
+        assertTrue(worker.awaitTermination(30, TimeUnit.SECONDS))
+        assertTrue(first)
+        assertTrue(second)
+    }
+
+    @Test
+    fun restartCapture_clearsFramesAndReturnsToCapturing() {
+        controller.startSession()
+        ops.solidAngle = 0.5f
+        submitFrameAndAwait()
+        assertTrue(controller.lastSolidAngleCoverage > 0f)
+
+        controller.restartCapture()
+
+        assertEquals(SphereCaptureController.State.CAPTURING, controller.state)
+        assertEquals(0f, controller.lastCoverage, 0.001f)
+        assertEquals(0f, controller.lastSolidAngleCoverage, 0.001f)
+        assertEquals(null, controller.getPreviewBitmap())
+        assertEquals(null, controller.getFullEquirect())
     }
 
     @Test

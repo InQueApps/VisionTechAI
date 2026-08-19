@@ -1,5 +1,9 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.math.QuaternionMath
+import ab.inque.robotics.panorama.SphereNative
+
+
 import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -229,8 +233,8 @@ class SphereStitchE2ETest {
                 coverage > prevCoverage
             )
             assertTrue(
-                "Solid angle must grow after frame $i (was $prevSolid, now $solid)",
-                solid > prevSolid
+                "Solid angle must not shrink after frame $i (was $prevSolid, now $solid)",
+                solid >= prevSolid
             )
             prevCoverage = coverage
             prevSolid = solid

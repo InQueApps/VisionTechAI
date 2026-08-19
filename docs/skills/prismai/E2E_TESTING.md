@@ -1,78 +1,63 @@
-# E2E testing (instrumented)
+# E2E testing — PRISM AI sphere
 
-Canonical skill: **[Work/skills/android-instrumented-e2e](../../../../skills/android-instrumented-e2e/SKILL.md)**
+## Prerequisites
 
-## Run PRISM AI workflows locally
+- ARM64 device or API 34 arm64 emulator (x86 is slow / OOM for heavy tests).
+- Native libs built: `./gradlew :app:assembleDebug :app:assembleDebugAndroidTest`
+- Set serial when multiple devices: `$env:ANDROID_SERIAL="emulator-5554"` (PowerShell).
 
-**Default: emulator** (auto-starts an ARM64 AVD from config if none is running).
-
-```powershell
-cd Work\skills\android-instrumented-e2e
-.\scripts\e2e-run.ps1 -Config apps\prismai.e2e.json -Suite ui
-```
-
-Physical device override:
+## Run a single test class
 
 ```powershell
-.\scripts\e2e-run.ps1 -Config apps\prismai.e2e.json -Suite ui -PreferPhysical -DeviceSerial <serial>
+adb shell am instrument -w `
+  -e class "ab.inque.visiontechai.SphereSaveExportE2ETest" `
+  ab.inque.prismai.test/androidx.test.runner.AndroidJUnitRunner
 ```
 
-## Run sphere JNI tests (repo `scripts/test.ps1`)
+Gradle (quote `-P` on Windows):
 
 ```powershell
-# From VisionTechAI repo root
-.\scripts\test.ps1 -Instrumented -Suite native
-
-# Individual suites
-.\scripts\test.ps1 -Instrumented -Class "ab.inque.visiontechai.SphereRoundTripE2ETest"
-.\scripts\test.ps1 -Instrumented -Class "ab.inque.visiontechai.SphereMuddinessE2ETest"
-.\scripts\test.ps1 -Instrumented -Class "ab.inque.visiontechai.SphereArtifactE2ETest"
-.\scripts\test.ps1 -Instrumented -Class "ab.inque.visiontechai.SpherePerfE2ETest"
-
-# Force emulator if Gradle picks a disconnected physical serial
-$env:ANDROID_SERIAL="emulator-5556"
-.\gradlew.bat ":app:connectedDebugAndroidTest" `
-  "-Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereRoundTripE2ETest"
+./gradlew connectedDebugAndroidTest `
+  "-Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereSaveExportE2ETest"
 ```
 
-### Native suite classes (`scripts/test.ps1 -Suite native`)
+## Test classes by purpose
 
-| Class | What it proves |
-|-------|----------------|
-| `SphereStitchE2ETest` | JNI init, add frame, coverage, two-phase fast+refine, golden pipeline |
-| `SphereGoldenImageTest` | Synthetic stitch checksum regression |
-| `SpherePerfE2ETest` | **Gating** latency budgets (addFrameFast p95, tap p95, finish off main) |
-| `SphereStitchDiagnosticTest` | **Non-gating** logcat phase timings — use for profiling |
-| `SphereArtifactE2ETest` | Black-line / gap artifacts (dark pixels vs bright neighbors) |
-| `SphereMuddinessE2ETest` | Sharpness retention (Laplacian), contrast, refine/seam mud |
-| `SphereRoundTripE2ETest` | Stitch → rectilinear extract → PSNR / hue vs source |
+| Class | What it validates | Device notes |
+|-------|-------------------|--------------|
+| `SphereStitchE2ETest` | Basic native stitch | CI |
+| `SphereGoldenImageTest` | Checksum regression | CI |
+| `SphereSaveExportE2ETest` | DONE → finish export, queued callbacks | 4096 tests skip emulator |
+| `SphereSessionSaveE2ETest` | Full UI session inject → SAVE | Skip emulator |
+| `SphereFinishE2ETest` | Worker finish correlation / ghost | Stripe gate may fail emulator |
+| `SpherePlanarReplayE2ETest` | Production pipeline replay | 300s+; ARM device |
+| `SphereRefineOverlapE2ETest` | R1–R7 gates | Run per-method on ARM |
+| `SphereRealWorldE2ETest` | Textured fixtures | Tight gates |
+| `MainActivityModeSwitchTest` | Mode switch lifecycle | CI |
+| `VisionWorkflowE2ETest` | CameraX sharpness | Device-dependent |
 
-**Note:** JNI tests use synthetic bitmaps (gradients, checkerboards), not the emulator camera. They validate projection math and pipeline quality. Live camera + sensors → `VisionWorkflowE2ETest`.
+## E2E gotchas
 
-## Workflow coverage (`VisionWorkflowE2ETest`)
+1. **Chain `worker.onResult`** — don't replace controller handler or `frameCount` stays 0.
+2. **Don't stitch on main thread** — deadlock with worker callbacks.
+3. **Test assets:** `InstrumentationRegistry.getInstrumentation().context.assets` (test APK).
+4. **Teardown:** `SphereNative.reset()` + `release()` + `System.gc()` in `@After`.
+5. **Emulator storage:** if `INSTALL_FAILED_INSUFFICIENT_STORAGE`, wipe data or `adb install -r`.
 
-| Workflow | Test method |
-|----------|-------------|
-| Launch | `workflow_launch_mainControlsVisible` |
-| Night vision | `workflow_nightVision_toggleAndSlider` |
-| IMG ED / COL / HD | `workflow_img_*` |
-| ROB OF / SEG / DF | `workflow_rob_*` |
-| Text translation | `workflow_textTranslation` |
-| Sphere | `workflow_sphere_enterAndExit`, `workflow_sphere_captureUpdatesPreview` |
-| Info panel | `workflow_infoPanel_toggle` |
-| Gallery | `workflow_gallery_opensSavedMedia` |
-| Full walkthrough | `allPrimaryWorkflows_sequentialWalkthrough` |
+## Logcat filters
 
-Config: [e2e/prismai.e2e.json](../../../e2e/prismai.e2e.json)
+```
+adb logcat -s SphereSessionCtrl SphereCaptureCtrl SphereStitchWorker sphere_jni
+```
 
-## Round-trip quality test pattern
+## CI
 
-To prove stitching places content correctly:
+`.github/workflows/android-sphere-e2e.yml` — only 4 classes today. See [GAPS.md S46](GAPS.md).
 
-1. Create frame with known hue/pattern at quaternion `q`.
-2. `SphereNative.addFrameFast` or `addFrame`.
-3. Compute view angles: rotate device forward `(0,0,-1)` by `q`, then `atan2(wx,wy)` / `asin(wz)` — see `SphereRoundTripE2ETest.quatToAzEl`.
-4. `getRectilinearBitmap(w, h, az, el, fovV)`.
-5. Compare: PSNR (center crop), `dominantHueAccuracy`, or `SphereImageMetrics.laplacianVariance`.
+## Planar roundtrip (host script)
 
-**Pitfall:** Z-axis azimuth spins do not change where the camera points; use X/Y rotations to aim at N/E/S/W on the sphere.
+```bash
+python scripts/stitch_planar_roundtrip.py --device <serial> --reextract
+```
+
+Compares device stitch output to reference equirect under `scripts/images/`.

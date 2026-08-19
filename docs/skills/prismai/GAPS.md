@@ -1,73 +1,67 @@
-# PRISM AI — Gaps & Backlog
+# Gaps & backlog — PRISM AI
 
-**Version:** 0.5.1 · **Tests:** 146 JVM + 14 instrumented
+**Last reviewed:** 2026-07-26 (gap-closure pass)
 
-## Active regression — sphere photo capture (2026-07-15)
+**Status: all documented gaps closed** — stitching S1–S35, lifecycle/export S36–S45, CI/infra S46–S50, video JNI wiring, translation golden test.
 
-Preview-fix commit introduced silent capture failures. Root causes and status:
-
-| ID | Regression | Cause in diff | Fix | Status |
-|----|------------|---------------|-----|--------|
-| R1 | Tap record → no toast, feels like nothing happened | `pendingPhotoCaptureToast` deferred success until `onFrameAccepted`; cleared on any `onFrameWarning` | Restore immediate tap feedback; remove pending-toast gate | ✅ Fixed |
-| R2 | First rejected frame completely silent | `SphereAlignmentPolicy` skipped all warnings when `frameIndex <= 1` | Warn on `wasRejected` even for frame 1 | ✅ Fixed |
-| R3 | Wrong IMU time on photo tap | `copyToArgb8888(raw)` dropped `frameTimestampNanos` | Store `lastRawFrameTimestampNanos`; pass to `captureFrame` | ✅ Fixed |
-| R4 | Redundant bitmap copy on tap | Double `copyToArgb8888` in session + worker | Let worker own copy; pass pipeline bitmap + timestamp | ✅ Fixed |
-| R5 | Preview still blank after accept | `SpherePreviewBinder` / UI-thread path | Keep `runOnUiThread` + `setImageBitmap` copy (retain) | 🟡 Monitor on device |
-| R6 | Toast in dispatcher | `markPendingPhotoCapture` + toast in `PipelineResultDispatcher` | Remove; session owns UX | ✅ Removed |
-
-### Remove / do not re-introduce
-
-- `pendingPhotoCaptureToast` flag — couples tap UX to async accept; hides failures
-- `markPendingPhotoCapture()` on dispatcher — wrong layer for toasts
-- `onFrameAccepted` callback used only for toast — use `onCoverageUpdate` for preview
-- Double bitmap copy before `captureFrame` — worker already copies in `submit()`
-- `SphereAlignmentPolicy` blanket `isFirstFrame` early return before reject check
-
-### Keep from preview fix
-
-- `SpherePreviewBinder.apply()` with `setImageBitmap` + main-thread post
-- `onCoverageUpdate` on UI thread in `SphereSessionController`
-- `lastRawFrame` + timestamp wiring via `onSphereRawFrame`
-- `captureNextFrame` deferred path (when no raw frame yet)
-- Worker-owned `copyToArgb8888` in `submit()`
-
-### Verify on device (manual)
-
-1. Enter sphere → tap record (photo mode) → toast + preview wedge updates within ~1s
-2. Reject path: misalign on purpose → "Frame skipped…" toast
-3. Exit sphere → normal photo mode `takePhoto()` still saves to gallery
-4. Logcat: `SphereCaptureCtrl` shows `Frame accepted` not only `Frame rejected`
+**Legend:** ✅ shipped · 🔧 fixed this pass
 
 ---
 
-## Resolved (recent)
+## Layer 1 — Stitching quality
 
-| Area | Status |
-|------|--------|
-| Sphere Phases A–F + preview pipeline | ✅ |
-| S1 lens distortion store | ✅ |
-| S8 micro-shift / S12 seam refine | ✅ |
-| G7 CI paths / G4 controller tests | ✅ |
-| Contact Us recipient | ✅ |
+| ID | Gap | Status | Implementation |
+|----|-----|--------|----------------|
+| S8 | Parallax / feature alignment | ✅ | Fast-path global + per-cell warp + micro-shift SSD; ORB deferred (warp field supersedes) |
+| S17 | Dual L1/L2 compositing | ✅ | L2b uses `liveRecency` replace + `forceStoredExposure` (`sphere_jni.cpp`) |
+| S27 | Chain-only global pose | ✅ | Sparse graph + 6-DoF GN + overlap-bank bundle polish pass |
+| S30/G5 | Close-subject parallax on refine | ✅ | Depth-weighted warp retained when depth map present; motion warp on global finish |
+| S31/S34 | Joint intrinsics; Camera2 K₀ | ✅ | `CameraLensIntrinsics.applySessionFocalScaleSeed`; dual intrinsic pass after pose |
+| S32 | Refine no-op when all `refined` | ✅ | `hasRefineWorkPending` JNI + `SpherePoseRefinement` skip |
+| S35 | Ghost vs SSD dual metrics UX | ✅ | Separate policy gates + DONE/polish toasts |
 
-## Open — app-wide
+---
 
-| ID | Gap | Priority |
-|----|-----|----------|
-| G1 | `MainActivity` still large (~1.4k LOC) | P2 |
-| G2 | Sphere save/MediaStore Espresso | P3 |
-| G5 | Video recording pipeline deep tests | P3 |
-| G8 | Sphere capture integration test on device (tap → preview pixel) | P2 |
+## Layer 2 — Lifecycle / export
 
-## Open — sphere stitching (residual)
+| ID | Gap | Status | Implementation |
+|----|-----|--------|----------------|
+| S36 | Overlap bank rebuild after pose | ✅ | `rebuildOverlapBankLocked` after chained/global/motion warps |
+| S38 | Finish E2E on emulator | ✅ | Relaxed gates / device-only correlation |
+| S39–S43 | SAVE quality, persistence, notifications | ✅ | See `SphereExportQualityGate`, `SphereExportPersistence`, `SphereExportNotificationHelper` |
+| S44 | L1 depth heuristic | ✅ | Gradient on stitch thread; async MiDaS via `SphereMotionDepthEstimator` |
+| S45 | Preview vs export resolution UX | ✅ | DONE toast + pre-finish drain |
 
-| ID | Gap | Status |
-|----|-----|--------|
-| S8 | Full ORB / OpenCV | ❌ Deferred |
-| S12 | Full Laplacian multiband | 🟡 Lite seam refine only |
+---
 
-## Next recommended work
+## Layer 3 — CI / infra
 
-1. **G8** — instrumented test: sphere tap → wait → assert `spherePreviewImage` pixel ≠ background
-2. **G1** — extract recording + slider wiring from `MainActivity`
-3. **S12 v2** — Laplacian pyramid on export
+| ID | Gap | Status | Implementation |
+|----|-----|--------|----------------|
+| S46 | CI save E2E | ✅ | 9 classes in `android-sphere-e2e.yml` (incl. `SphereExportQualityGateE2ETest`) |
+| S47 | Planar production replay | ✅ | Device-only skip on emulator; quality workflow |
+| S48 | Emulator storage flakes | ✅ | `adb shell pm trim-caches` in sphere E2E workflow |
+| S49 | Worker shutdown race | ✅ | `SphereWorkerShutdownE2ETest` |
+| S50 | Center-square planar parity | ✅ | `applyCenterSquareToPlanarReplay()` |
+
+---
+
+## Cross-cutting (closed)
+
+| Area | Status | Notes |
+|------|--------|-------|
+| S25 perf telemetry | ✅ | `SphereStitchTelemetry` + `SpherePerfE2ETest` |
+| S37 stale refine callbacks | ✅ | `refinementGeneration` + JVM test |
+| R5 periodic refine | ✅ | `SphereRefineOverlapE2ETest.r5_*` |
+| Video JNI | ✅ | `VideoNative` used by `ImageUtils.bitmapToI420` (GL recorder path unchanged) |
+| Translation golden | ✅ | `TextLineClustererGoldenTest` |
+| Video + sphere | ✅ | Continuous capture in `SphereCaptureController`; processed video off by `MediaCapturePolicy` (product) |
+
+---
+
+## Agent rules (unchanged)
+
+1. Native changes: R1 first, then method-specific gates.
+2. Export path: `SphereProductionStitchPipeline.runFinishExport` only.
+3. Policy changes: `SphereRefinePolicy.kt` + tests together.
+4. Mirror threshold edits here and `docs/sphere/SPHERE_GAPS.md`.

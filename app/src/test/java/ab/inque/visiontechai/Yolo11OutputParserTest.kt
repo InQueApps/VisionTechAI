@@ -1,5 +1,9 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.detection.DetectionResult
+import ab.inque.robotics.vision.detection.Yolo11OutputParser
+
+
 import android.graphics.RectF
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue

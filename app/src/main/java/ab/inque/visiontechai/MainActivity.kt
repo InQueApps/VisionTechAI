@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.accumulate.FrameAccumulatorNative
+
+
 import android.Manifest
 import android.content.ContentValues
 import android.content.Intent
@@ -709,11 +712,15 @@ class MainActivity : AppCompatActivity() {
                     android.view.Surface.ROTATION_270 -> 270
                     else -> 0
                 }
-            }
+            },
+            getUseFrontCamera = { useFrontCamera },
+            depthProcessor = depthEstimationProcessor
         )
 
         sphereUiCoordinator = SphereUiCoordinator(binding, visionState, sphereSession)
         sphereUiCoordinator.bind()
+
+        sphereSession.checkInterruptedExport()
 
         pipelineDispatcher = PipelineResultDispatcher(
             visionState = visionState,
@@ -722,7 +729,7 @@ class MainActivity : AppCompatActivity() {
             sphereControllerProvider = { sphereSession.controller },
             sphereCaptureNextFrame = { sphereSession.captureNextFrame },
             clearSphereCaptureNextFrame = { sphereSession.captureNextFrame = false },
-            onSphereRawFrame = { bitmap, ts -> sphereSession.onRawFrame(bitmap, ts) },
+            onSphereRawFrame = { bitmap, ts, rot -> sphereSession.onRawFrame(bitmap, ts, rot) },
             isRecordingProvider = { isRecording },
             processedVideoRecorderProvider = { processedVideoRecorder }
         )

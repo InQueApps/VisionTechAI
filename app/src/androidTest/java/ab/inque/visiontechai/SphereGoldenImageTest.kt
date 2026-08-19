@@ -1,8 +1,13 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.math.QuaternionMath
+import ab.inque.robotics.panorama.SphereNative
+
+
 import android.graphics.Bitmap
 import android.graphics.Color
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
@@ -33,18 +38,46 @@ class SphereGoldenImageTest {
     }
 
     @Test
+    fun goldenTexturedSession_producesStableChecksum() {
+        assumeTrue(SphereNative.isAvailable())
+        SphereNative.init(512, 256, 65f, 50f)
+        val gate = 0.10f
+        val base = SphereTestFixtures.indoorTexture(160, 120, seed = 42)
+        val quats = listOf(
+            floatArrayOf(0f, 0f, 0f, 1f),
+            QuaternionMath.fromAxisAngle(0.0, 0.0, 1.0, Math.toRadians(18.0)),
+            QuaternionMath.fromAxisAngle(0.0, 0.0, 1.0, Math.toRadians(36.0))
+        )
+        quats.forEachIndexed { i, q ->
+            val bmp = if (i == 0) base else SphereTestFixtures.shiftBitmap(base, 4 + i)
+            assertTrue(SphereNative.addFrameFast(bmp, q, gate) == 1)
+        }
+        assertTrue(SphereNative.refinePending(applyGlobalPose = true))
+        val equirect = SphereNative.getEquirectBitmap(512, 256)
+        assertNotNull(equirect)
+        val hash = SphereTestFixtures.downscaledSha256(equirect!!)
+        assertTrue(hash.isNotEmpty())
+        assertEquals(hash, SphereTestFixtures.downscaledSha256(equirect))
+        SphereNative.release()
+    }
+
+    @Test
     fun goldenStitch_producesStableChecksum() {
         assumeTrue(SphereNative.isAvailable())
         SphereNative.init(256, 128, 65f, 50f)
-        val frames = listOf(
-            solid(color = Color.RED) to floatArrayOf(0f, 0f, 0f, 1f),
-            solid(color = Color.GREEN) to QuaternionMath.fromAxisAngle(0.0, 1.0, 0.0, Math.toRadians(25.0)),
-            solid(color = Color.BLUE) to QuaternionMath.fromAxisAngle(0.0, 1.0, 0.0, Math.toRadians(50.0)),
-            solid(color = Color.YELLOW) to QuaternionMath.fromAxisAngle(0.0, 1.0, 0.0, Math.toRadians(75.0))
+        // Same scene content per frame so fast-path SSD alignment accepts overlaps.
+        val frame = solid(color = Color.RED)
+        val quats = listOf(
+            floatArrayOf(0f, 0f, 0f, 1f),
+            QuaternionMath.fromAxisAngle(0.0, 1.0, 0.0, Math.toRadians(25.0)),
+            QuaternionMath.fromAxisAngle(0.0, 1.0, 0.0, Math.toRadians(50.0)),
+            QuaternionMath.fromAxisAngle(0.0, 1.0, 0.0, Math.toRadians(75.0))
         )
-        for ((bmp, q) in frames) {
-            assertTrue(SphereNative.addFrame(bmp, q))
+        quats.forEachIndexed { index, q ->
+            val status = SphereNative.addFrameFast(frame, q, if (index == 0) 0f else 0.10f)
+            assertTrue("frame $index should be accepted (status=$status)", status == 1)
         }
+        assertTrue("refine should run", SphereNative.refinePending())
         val equirect = SphereNative.getEquirectBitmap(256, 128)
         assertNotNull(equirect)
         val hash = sha256(equirect!!)
@@ -53,10 +86,6 @@ class SphereGoldenImageTest {
         val hash2 = sha256(equirect)
         assertEquals(hash, hash2)
         SphereNative.release()
-    }
-
-    private fun assertEquals(a: String, b: String) {
-        org.junit.Assert.assertEquals(a, b)
     }
 
     @Test

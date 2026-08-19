@@ -47,11 +47,10 @@ Maintain `sCoveredCount` and an incremental 32×16 solid-angle grid inside `spla
 (increment on 0→>0 weight transition). `getCoverage`/`getSolidAngleCoverage` return
 cached O(1) values. Full recompute only after a refine rebuild.
 
-### F2 — Downscale splat in the fast path (74 ms → ~18 ms) ✅ target
+### F2 — Downscale splat in the fast path (74 ms → ~18 ms) ✅ shipped
 The live accumulation only needs preview quality. Splat a downscaled copy of the frame
-(cap longest side to `LIVE_SPLAT_DIM ≈ 320`). The full-resolution pixels are still
-stored (≤384 px) for the export-time refine, so final quality is unchanged. 4× fewer
-splat iterations.
+(cap longest side to `LIVE_SPLAT_DIM = 320`). Coarser equirect stride (`eqStep=2`) when
+`eqW > 2048`. Full-resolution pixels are stored for export-time refine.
 
 ### F3 — Fix refine scheduling & locking ✅ target
 - **Remove the every-8-frames immediate refine.** Keep only the idle debounce, raised to

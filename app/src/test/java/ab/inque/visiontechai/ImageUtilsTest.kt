@@ -54,6 +54,12 @@ class ImageUtilsTest {
     }
 
     @Test
+    fun rotateToUpright_zeroRotation_returnsSameBitmap() {
+        val src = solidBitmap(Color.RED, 8, 4)
+        assertTrue(src === ImageUtils.rotateToUpright(src, 0))
+    }
+
+    @Test
     fun bitmapToI420_writesExpectedBufferSize() {
         val bitmap = solidBitmap(Color.WHITE, 4, 4)
         val buffer = ByteArray(bitmap.width * bitmap.height * 3 / 2)

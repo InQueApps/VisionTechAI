@@ -1,7 +1,11 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.image.ImageOverlapMetrics
+
+
 import android.graphics.Bitmap
 import android.graphics.Color
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -140,6 +144,130 @@ object SphereImageMetrics {
         return after / before
     }
 
+    fun equirectOverlapCorrelation(bmpA: Bitmap, bmpB: Bitmap, region: Region): Double {
+        val w = bmpA.width
+        val h = bmpA.height
+        val pixelsA = IntArray(w * h)
+        val pixelsB = IntArray(w * h)
+        bmpA.getPixels(pixelsA, 0, w, 0, 0, w, h)
+        bmpB.getPixels(pixelsB, 0, w, 0, 0, w, h)
+        return ImageOverlapMetrics.normalizedCorrelation(
+            pixelsA, pixelsB, w, h,
+            ImageOverlapMetrics.Region(region.x0, region.y0, region.w, region.h)
+        )
+    }
+
+    fun fastRefineGhostDelta(ghostFast: Double, ghostRefined: Double): Double =
+        ImageOverlapMetrics.ghostDelta(ghostFast, ghostRefined)
+
+    /**
+     * Fraction of strong edge pixels that have a parallel duplicate edge within [minShift..maxShift] px.
+     * Requires matching edge polarity and similar flanking luminance (double-image ghosting).
+     */
+    fun ghostingScore(
+        bmp: Bitmap,
+        region: Region,
+        minShift: Int = 3,
+        maxShift: Int = 12,
+        edgeGradThreshold: Float = 35f
+    ): Double = ghostingScore(
+        bmp, region.x0, region.y0, region.w, region.h,
+        minShift, maxShift, edgeGradThreshold
+    )
+
+    fun ghostingScore(
+        bmp: Bitmap,
+        x0: Int = 0,
+        y0: Int = 0,
+        w: Int = bmp.width,
+        h: Int = bmp.height,
+        minShift: Int = 3,
+        maxShift: Int = 12,
+        edgeGradThreshold: Float = 35f
+    ): Double {
+        val xStart = max(3, x0)
+        val yStart = max(1, y0)
+        val xEnd = min(bmp.width - maxShift - 3, x0 + w)
+        val yEnd = min(bmp.height - 1, y0 + h)
+        if (xEnd <= xStart + maxShift || yEnd <= yStart + 1) return 0.0
+
+        var edgeCount = 0
+        var ghostCount = 0
+        for (y in yStart until yEnd) {
+            for (x in xStart until xEnd) {
+                if (!isContentPixel(bmp.getPixel(x, y))) continue
+                val g1 = horizontalGrad(bmp, x, y)
+                if (abs(g1) < edgeGradThreshold) continue
+                edgeCount++
+
+                var foundGhost = false
+                for (dx in minShift..maxShift) {
+                    val x2 = x + dx
+                    if (!isContentPixel(bmp.getPixel(x2, y))) continue
+                    val g2 = horizontalGrad(bmp, x2, y)
+                    if (abs(g2) < edgeGradThreshold) continue
+                    if (g1 * g2 < 0f) continue
+                    val l1L = luminance(bmp.getPixel(x - 2, y))
+                    val l1R = luminance(bmp.getPixel(x + 2, y))
+                    val l2L = luminance(bmp.getPixel(x2 - 2, y))
+                    val l2R = luminance(bmp.getPixel(x2 + 2, y))
+                    if (abs(l1L - l2L) < 32f && abs(l1R - l2R) < 32f) {
+                        ghostCount++
+                        foundGhost = true
+                        break
+                    }
+                }
+                if (!foundGhost) {
+                    for (dy in -2..2) {
+                        if (dy == 0) continue
+                        val y2 = y + dy
+                        if (y2 < yStart || y2 >= yEnd) continue
+                        for (dx in minShift..maxShift) {
+                            val x2 = x + dx
+                            if (!isContentPixel(bmp.getPixel(x2, y2))) continue
+                            val g2 = horizontalGrad(bmp, x2, y2)
+                            if (abs(g2) < edgeGradThreshold) continue
+                            if (g1 * g2 < 0f) continue
+                            val l1L = luminance(bmp.getPixel(x - 2, y))
+                            val l1R = luminance(bmp.getPixel(x + 2, y))
+                            val l2L = luminance(bmp.getPixel(x2 - 2, y2))
+                            val l2R = luminance(bmp.getPixel(x2 + 2, y2))
+                            if (abs(l1L - l2L) < 32f && abs(l1R - l2R) < 32f) {
+                                ghostCount++
+                                foundGhost = true
+                                break
+                            }
+                        }
+                        if (foundGhost) break
+                    }
+                }
+            }
+        }
+        return if (edgeCount > 0) ghostCount.toDouble() / edgeCount else 0.0
+    }
+
+    private fun horizontalGrad(bmp: Bitmap, x: Int, y: Int): Float =
+        luminance(bmp.getPixel(x + 1, y)) - luminance(bmp.getPixel(x - 1, y))
+
+    /**
+     * Ghost score restricted to a known misalignment offset (e.g. pixel shift in overlap tests).
+     * Ignores unrelated periodic edges that confuse the broad [ghostingScore].
+     */
+    fun ghostingScoreAtOffset(
+        bmp: Bitmap,
+        region: Region,
+        expectedDx: Int,
+        tolerance: Int = 1,
+        edgeGradThreshold: Float = 35f
+    ): Double {
+        val minShift = (expectedDx - tolerance).coerceAtLeast(1)
+        val maxShift = expectedDx + tolerance
+        return ghostingScore(
+            bmp, region.x0, region.y0, region.w, region.h,
+            minShift, maxShift, edgeGradThreshold
+        )
+    }
+
     fun findContentRegion(bmp: Bitmap, margin: Int = 8): Region? {
         var minX = bmp.width
         var maxX = -1
@@ -174,6 +302,30 @@ object SphereImageMetrics {
         val x0 = (bmp.width - cw) / 2
         val y0 = (bmp.height - ch) / 2
         return Region(x0, y0, cw, ch)
+    }
+
+    /** Horizontal band through stitched content (overlap seam band). */
+    fun overlapBandRegion(content: Region, bandHeightFraction: Float = 0.35f): Region {
+        val bandH = (content.h * bandHeightFraction).toInt().coerceAtLeast(8)
+        val y0 = content.y0 + (content.h - bandH) / 2
+        return Region(content.x0, y0, content.w, bandH)
+    }
+
+    fun luminanceStdDev(bmp: Bitmap, region: Region): Double {
+        val values = mutableListOf<Double>()
+        val xEnd = min(bmp.width, region.x0 + region.w)
+        val yEnd = min(bmp.height, region.y0 + region.h)
+        for (y in region.y0 until yEnd) {
+            for (x in region.x0 until xEnd) {
+                val p = bmp.getPixel(x, y)
+                if (!isContentPixel(p)) continue
+                values.add(luminance(p).toDouble())
+            }
+        }
+        if (values.size < 4) return 0.0
+        val mean = values.sum() / values.size
+        val varSum = values.sumOf { (it - mean) * (it - mean) }
+        return kotlin.math.sqrt(varSum / values.size)
     }
 
     fun formatQuality(label: String, bmp: Bitmap, region: Region): String {

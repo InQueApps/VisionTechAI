@@ -1,5 +1,13 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.panorama.SphereNative
+import ab.inque.robotics.video.VideoNative
+import ab.inque.robotics.vision.depth.DepthNative
+import ab.inque.robotics.vision.edge.EdgeDetectionNative
+import ab.inque.robotics.vision.flow.OpticalFlowNative
+import ab.inque.robotics.vision.night.NightVisionNative
+
+
 /**
  * Reports which optional native libraries loaded successfully.
  */

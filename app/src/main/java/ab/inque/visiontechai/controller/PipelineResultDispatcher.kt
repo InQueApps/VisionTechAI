@@ -6,6 +6,8 @@ import ab.inque.visiontechai.ProcessedVideoRecorder
 import ab.inque.visiontechai.SphereCaptureController
 import ab.inque.visiontechai.SphereCoverageFormatter
 import ab.inque.visiontechai.SpherePreviewBinder
+import ab.inque.visiontechai.SphereRefinePolicy
+import ab.inque.visiontechai.SphereStitchFramePrep
 import ab.inque.visiontechai.VisionMode
 import ab.inque.visiontechai.VisionState
 import ab.inque.visiontechai.databinding.ActivityMainBinding
@@ -22,7 +24,7 @@ class PipelineResultDispatcher(
     private val sphereControllerProvider: () -> SphereCaptureController?,
     private val sphereCaptureNextFrame: () -> Boolean,
     private val clearSphereCaptureNextFrame: () -> Unit,
-    private val onSphereRawFrame: ((android.graphics.Bitmap, Long) -> Unit)? = null,
+    private val onSphereRawFrame: ((android.graphics.Bitmap, Long, Int) -> Unit)? = null,
     private val isRecordingProvider: () -> Boolean,
     private val processedVideoRecorderProvider: () -> ProcessedVideoRecorder?
 ) {
@@ -51,12 +53,22 @@ class PipelineResultDispatcher(
         if (visionState.mode == VisionMode.SPHERE && sphereController?.state == SphereCaptureController.State.CAPTURING) {
             result.rawBitmap?.let { raw ->
                 val ts = result.frameTimestampNanos
-                onSphereRawFrame?.invoke(raw, ts)
+                onSphereRawFrame?.invoke(raw, ts, result.imageRotationDegrees)
+                // Match the center-square region sent to the stitch worker (not full sensor / PreviewView).
+                val feedBitmap = if (SphereRefinePolicy.useCenterSquareStitch()) {
+                    SphereStitchFramePrep.cropCenterSquare(raw)
+                } else {
+                    raw
+                }
+                SpherePreviewBinder.apply(binding.sphereCameraFeed, feedBitmap)
+                if (feedBitmap !== raw) {
+                    feedBitmap.recycle()
+                }
                 if (sphereCaptureNextFrame()) {
                     clearSphereCaptureNextFrame()
-                    sphereController.captureFrame(raw, ts)
+                    sphereController.captureFrame(raw, ts, imageRotationDegrees = result.imageRotationDegrees)
                 }
-                sphereController.feedContinuousFrame(raw, ts)
+                sphereController.feedContinuousFrame(raw, ts, result.imageRotationDegrees)
                 if (!sphereController.isStitchBusy()) {
                     binding.sphereCoverageText.text =
                         SphereCoverageFormatter.format(

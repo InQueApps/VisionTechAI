@@ -1,6 +1,6 @@
 # 360° Sphere Stitching — Test Plan
 
-**Version:** 1.1 · **JVM inventory:** see [../skills/prismai/TEST_PLAN.md](../skills/prismai/TEST_PLAN.md) (131 tests)  
+**Version:** 1.1 · **JVM inventory:** see [../skills/README.md](../skills/README.md) → `Work/skills/prismai/README.md#sphere-test-plan`  
 **Related:** [SPHERE_GAPS.md](SPHERE_GAPS.md) · [SPHERE_FEATURE_PLAN.md](SPHERE_FEATURE_PLAN.md)
 
 This plan defines how every stitching gap (S1–S13) and feature (F-B1…F-F1) is verified across unit, integration, instrumented, performance, and manual layers.
@@ -53,7 +53,7 @@ This plan defines how every stitching gap (S1–S13) and feature (F-B1…F-F1) i
 
 ## Current test inventory
 
-> **Canonical list:** [../skills/prismai/TEST_PLAN.md](../skills/prismai/TEST_PLAN.md) — 131 JVM + 11 instrumented.  
+> **Canonical list:** [../skills/README.md](../skills/README.md) → `Work/skills/prismai/README.md#sphere-test-plan`  
 > Section below is a historical Phase A+B snapshot; gap→test rows above list some planned tests not yet implemented.
 
 ### JVM unit tests — `app/src/test/java/ab/inque/visiontechai/` (snapshot)

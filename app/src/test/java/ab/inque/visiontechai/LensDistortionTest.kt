@@ -1,5 +1,10 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.geometry.EquirectProjectionMath
+import ab.inque.robotics.math.LensDistortion
+import ab.inque.robotics.math.LensDistortionMath
+
+
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -15,10 +20,10 @@ class LensDistortionTest {
 
     @Test
     fun framePixelToRay_barrelK1_movesEdgeRay() {
-        val undistorted = SphereProjectionMath.framePixelToRay(
+        val undistorted = EquirectProjectionMath.framePixelToRay(
             0, 120, 320, 240, 65f, 50f, LensDistortion.NONE
         )
-        val distorted = SphereProjectionMath.framePixelToRay(
+        val distorted = EquirectProjectionMath.framePixelToRay(
             0, 120, 320, 240, 65f, 50f, LensDistortion(k1 = 0.15f)
         )
         assertNotEquals(undistorted[0], distorted[0], 0.001)
@@ -26,8 +31,8 @@ class LensDistortionTest {
 
     @Test
     fun framePixelToRay_centerUnchangedWithRadialDistortion() {
-        val c0 = SphereProjectionMath.framePixelToRay(160, 120, 320, 240, 65f, 50f)
-        val c1 = SphereProjectionMath.framePixelToRay(
+        val c0 = EquirectProjectionMath.framePixelToRay(160, 120, 320, 240, 65f, 50f)
+        val c1 = EquirectProjectionMath.framePixelToRay(
             160, 120, 320, 240, 65f, 50f, LensDistortion(k1 = 0.2f)
         )
         assertEquals(c0[2], c1[2], 0.01)

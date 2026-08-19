@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'app/src/main/cpp/sphere_jni.cpp'
-      - 'app/src/main/cpp/CMakeLists.txt'
+      - 'app/src/robotics/cpp/panorama/**'
+      - 'app/src/robotics/java/**/SphereNative.kt'
       - 'app/src/main/java/**/Sphere*.kt'
       - 'app/src/main/java/**/LensDistortion*.kt'
       - 'app/src/main/java/**/ImuCameraClockSync.kt'
@@ -19,8 +19,8 @@ on:
       - 'app/src/androidTest/**/VisionWorkflow*.kt'
   pull_request:
     paths:
-      - 'app/src/main/cpp/sphere_jni.cpp'
-      - 'app/src/main/cpp/CMakeLists.txt'
+      - 'app/src/robotics/cpp/panorama/**'
+      - 'app/src/robotics/java/**/SphereNative.kt'
       - 'app/src/main/java/**/Sphere*.kt'
       - 'app/src/main/java/**/LensDistortion*.kt'
       - 'app/src/main/java/**/ImuCameraClockSync.kt'
@@ -54,5 +54,6 @@ jobs:
           script: |
             cd $GITHUB_WORKSPACE
             chmod +x gradlew
+            adb shell pm trim-caches 2G || true
             ./gradlew connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.MainActivityModeSwitchTest,ab.inque.visiontechai.VisionWorkflowE2ETest
+            -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.MainActivityModeSwitchTest,ab.inque.visiontechai.VisionWorkflowE2ETest,ab.inque.visiontechai.SphereSaveExportE2ETest,ab.inque.visiontechai.SphereFinishE2ETest,ab.inque.visiontechai.SphereWorkerShutdownE2ETest,ab.inque.visiontechai.SphereSessionSaveE2ETest,ab.inque.visiontechai.SphereExportQualityGateE2ETest,ab.inque.visiontechai.SphereLiveSplatE2ETest,ab.inque.visiontechai.SphereStitchProfileE2ETest

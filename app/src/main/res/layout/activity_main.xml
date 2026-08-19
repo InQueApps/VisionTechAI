@@ -421,18 +421,29 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:visibility="gone"
-        android:background="#CC000000"
+        android:background="@android:color/transparent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
         <ImageView
+            android:id="@+id/sphereCameraFeed"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:scaleType="fitXY"
+            android:background="@android:color/black"
+            android:contentDescription="Live camera feed for sphere capture" />
+
+        <ImageView
             android:id="@+id/spherePreviewImage"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
+            android:layout_gravity="center"
             android:scaleType="fitCenter"
-            android:background="#1A1A1A"
+            android:background="@android:color/transparent"
+            android:alpha="0.55"
             android:contentDescription="Sphere equirectangular preview" />
 
         <LinearLayout
@@ -445,12 +456,41 @@
             android:background="#80000000">
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereDebugButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="REC"
+                android:visibility="gone"
+                app:strokeColor="#FF5252" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereCancelButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="CANCEL"
+                app:strokeColor="@android:color/white" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereDoneButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:layout_marginEnd="8dp"
                 android:text="DONE"
                 android:textSize="12sp" />
+
+            <!-- SAVE only after DONE (viewer overlay); mid-capture save hurts quality. -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereCaptureSaveButton"
+                style="@style/PrismActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="SAVE"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/sphereCoverageText"
@@ -499,6 +539,15 @@
                 android:layout_height="36dp"
                 android:layout_marginEnd="8dp"
                 android:text="SAVE" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereAddMoreButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="ADD MORE"
+                app:strokeColor="@android:color/white" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereCloseButton"
