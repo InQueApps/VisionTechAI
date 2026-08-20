@@ -29,6 +29,7 @@
 #include <vector>
 #include <mutex>
 #include <chrono>
+#include <functional>
 #include <set>
 
 #define LOG_TAG "SphereJni"
@@ -107,7 +108,9 @@ static float storedFovH = 0, storedFovV = 0;
 /** When true, negate camera-frame X so bitmap + IMU handedness match (back camera). */
 static bool sMirrorCameraX = false;
 static std::vector<float> eqR, eqG, eqB, eqWeight;
-/** Per-pixel squared distance to frame center during export rebuild (nearest-center composite). */
+/** Sobel gradient magnitude on equirect luminance (rotation search coarse stage). */
+static std::vector<float> eqGradMag;
+/** Per-pixel best view-dot during nearest-view export compositing (higher wins). */
 static std::vector<float> eqSplatCenterDistSq;
 static bool sNearestCenterSplat = false;
 static std::mutex sphereMutex;
@@ -439,6 +442,11 @@ static inline bool worldRayToFramePixel(
     return true;
 }
 
+// Feature matching + pose-graph constraints (after pixelToRay / worldRayToFramePixel).
+static void rebuildOverlapBankLocked();
+static double quatAngularDistSq(const Quat& a, const Quat& b);
+#include "sphere_feature_match.inl"
+
 /** Parallax shift on ref pixel from relative camera-frame translation (6-DoF BA). */
 static inline void applyParallaxPixelShift(
     float& refFx, float& refFy,
@@ -710,18 +718,18 @@ static void splatFrameInverseSpherical(
 
         int idx = ey * eqW + ex;
         if (sNearestCenterSplat) {
-            const double cx = frameW * 0.5;
-            const double cy = frameH * 0.5;
-            const float distSq = static_cast<float>(
-                (sampleFx - cx) * (sampleFx - cx) + (sampleFy - cy) * (sampleFy - cy));
-            if (eqWeight[idx] > 0.f && distSq >= eqSplatCenterDistSq[idx]) {
+            // Pick the frame whose optical axis best matches this equirect ray (not pixel-center distance).
+            double fwx, fwy, fwz;
+            quatRotate(qCorrected, 0.0, 0.0, -1.0, fwx, fwy, fwz);
+            const float viewDot = static_cast<float>(wx * fwx + wy * fwy + wz * fwz);
+            if (eqWeight[idx] > 0.f && viewDot <= eqSplatCenterDistSq[idx]) {
                 return;
             }
             if (eqWeight[idx] > 0.f) {
                 eqR[idx] = eqG[idx] = eqB[idx] = 0.f;
                 eqWeight[idx] = 0.f;
             }
-            eqSplatCenterDistSq[idx] = distSq;
+            eqSplatCenterDistSq[idx] = viewDot;
         } else if (replaceOverlap && eqWeight[idx] > 0.f) {
             eqR[idx] = eqG[idx] = eqB[idx] = 0.f;
             eqWeight[idx] = 0.f;
@@ -985,6 +993,7 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeInit(
     resetCoverageCountersLocked();
     sFrames.clear();
     sOverlapBank.clear();
+    sFeatureEdges.clear();
     sFocalScale = 1.f;
     sFrameIndex = 0;
     sLastRejected = 0;
@@ -1022,6 +1031,7 @@ struct OverlapSample {
     float newR, newG, newB;
     double rx, ry, rz;
     int fx, fy;
+    float newGrad;
 };
 
 /** Median luminance + per-channel p50 match in overlap (robust exposure normalization). */
@@ -1350,6 +1360,133 @@ static double liveFramePairwiseRotSSD(
     double tanH, double tanV,
     int step);
 
+static inline float pixelLumaF(float r, float g, float b) {
+    return 0.299f * r + 0.587f * g + 0.114f * b;
+}
+
+static float sobelGradMag9(
+    float lum_tl, float lum_tc, float lum_tr,
+    float lum_ml, float lum_mr,
+    float lum_bl, float lum_bc, float lum_br) {
+    float gx = -lum_tl + lum_tr - 2.f * lum_ml + 2.f * lum_mr - lum_bl + lum_br;
+    float gy = -lum_tl - 2.f * lum_tc - lum_tr + lum_bl + 2.f * lum_bc + lum_br;
+    return std::sqrt(gx * gx + gy * gy);
+}
+
+static float framePixelGradMag(const int32_t* pixels, int w, int h, int fx, int fy) {
+    if (fx < 1 || fy < 1 || fx >= w - 1 || fy >= h - 1) return 0.f;
+    auto lum = [&](int x, int y) {
+        int32_t p = pixels[y * w + x];
+        return pixelLumaF(
+            static_cast<float>((p >> 16) & 0xff),
+            static_cast<float>((p >> 8) & 0xff),
+            static_cast<float>(p & 0xff));
+    };
+    return sobelGradMag9(
+        lum(fx - 1, fy - 1), lum(fx, fy - 1), lum(fx + 1, fy - 1),
+        lum(fx - 1, fy), lum(fx + 1, fy),
+        lum(fx - 1, fy + 1), lum(fx, fy + 1), lum(fx + 1, fy + 1));
+}
+
+static float storedPixelGradMag(const StoredFrame& f, int fx, int fy) {
+    if (fx < 1 || fy < 1 || fx >= f.w - 1 || fy >= f.h - 1) return 0.f;
+    auto lum = [&](int x, int y) {
+        int32_t p = f.px[(size_t)y * f.w + x];
+        return pixelLumaF(
+            static_cast<float>((p >> 16) & 0xff),
+            static_cast<float>((p >> 8) & 0xff),
+            static_cast<float>(p & 0xff));
+    };
+    return sobelGradMag9(
+        lum(fx - 1, fy - 1), lum(fx, fy - 1), lum(fx + 1, fy - 1),
+        lum(fx - 1, fy), lum(fx + 1, fy),
+        lum(fx - 1, fy + 1), lum(fx, fy + 1), lum(fx + 1, fy + 1));
+}
+
+/** Sobel magnitude on weighted equirect luminance for edge-based coarse rotation search. */
+static void rebuildEquirectGradMagLocked() {
+    const int sz = eqW * eqH;
+    if (sz <= 0) return;
+    if ((int)eqGradMag.size() != sz) eqGradMag.assign(sz, 0.f);
+    std::fill(eqGradMag.begin(), eqGradMag.end(), 0.f);
+    for (int y = 1; y < eqH - 1; y++) {
+        for (int x = 1; x < eqW - 1; x++) {
+            int idx = y * eqW + x;
+            if (eqWeight[idx] <= 0.f) continue;
+            float inv = 1.f / eqWeight[idx];
+            auto lumAt = [&](int cx, int cy) -> float {
+                int i = cy * eqW + cx;
+                if (eqWeight[i] <= 0.f) return -1.f;
+                return pixelLumaF(eqR[i] * inv, eqG[i] * inv, eqB[i] * inv);
+            };
+            float tl = lumAt(x - 1, y - 1);
+            float tc = lumAt(x, y - 1);
+            float tr = lumAt(x + 1, y - 1);
+            float ml = lumAt(x - 1, y);
+            float mr = lumAt(x + 1, y);
+            float bl = lumAt(x - 1, y + 1);
+            float bc = lumAt(x, y + 1);
+            float br = lumAt(x + 1, y + 1);
+            if (tl < 0.f) continue;
+            eqGradMag[idx] = sobelGradMag9(tl, tc, tr, ml, mr, bl, bc, br);
+        }
+    }
+}
+
+/** 1 − ZNCC on gradient magnitudes; 0 = perfect, lower is better. */
+static double overlapGradZnccCost(
+    const std::vector<OverlapSample>& overlap,
+    const Quat& qC,
+    int subsample) {
+    double sumA = 0.0, sumB = 0.0, sumAA = 0.0, sumBB = 0.0, sumAB = 0.0;
+    int count = 0;
+    for (size_t i = 0; i < overlap.size(); i += (size_t)subsample) {
+        const auto& s = overlap[i];
+        double wx, wy, wz;
+        quatRotate(qC, s.rx, s.ry, s.rz, wx, wy, wz);
+        double lon = std::atan2(wx, wy);
+        double lat = std::asin(std::max(-1.0, std::min(1.0, wz)));
+        int eqX = ((int)((lon / PI + 1.0) * 0.5 * eqW) + eqW) % eqW;
+        int eqY = clampI((int)((0.5 - lat / PI) * eqH), 0, eqH - 1);
+        int idx = eqY * eqW + eqX;
+        if (eqWeight[idx] > 0.f && eqGradMag[idx] > 0.f && s.newGrad > 0.f) {
+            const double a = s.newGrad;
+            const double b = eqGradMag[idx];
+            sumA += a;
+            sumB += b;
+            sumAA += a * a;
+            sumBB += b * b;
+            sumAB += a * b;
+            count++;
+        }
+    }
+    if (count < 20) return 1e18;
+    const double n = static_cast<double>(count);
+    const double va = sumAA - sumA * sumA / n;
+    const double vb = sumBB - sumB * sumB / n;
+    if (va < 1e-6 || vb < 1e-6) return 1.0;
+    double zncc = (sumAB - sumA * sumB / n) / std::sqrt(va * vb);
+    zncc = std::max(-1.0, std::min(1.0, zncc));
+    return 1.0 - zncc;
+}
+
+/** G1-fast wide coarse radius scales with IMU misalignment and RGB SSD. */
+static double fastG1WideRadiusRad(double imuGapDeg, double rgbBaseline) {
+    double rDeg = 12.0;
+    if (imuGapDeg > 10.0) rDeg = 20.0;
+    else if (imuGapDeg > 6.0) rDeg = 16.0;
+    else if (imuGapDeg > 3.0) rDeg = 14.0;
+    if (rgbBaseline > 4000.0) rDeg = std::max(rDeg, 16.0);
+    return rDeg * DEG2RAD;
+}
+
+static double fastG1MidRadiusRad(double imuGapDeg, double rgbBaseline) {
+    double rDeg = (rgbBaseline > 3000.0) ? 10.0 : 6.0;
+    if (imuGapDeg > 10.0) rDeg = std::max(rDeg, 14.0);
+    else if (imuGapDeg > 6.0) rDeg = std::max(rDeg, 10.0);
+    return rDeg * DEG2RAD;
+}
+
 static FrameOutcome processFrameLocked(
     const int32_t* pixels, int frameW, int frameH,
     Quat q, bool doAlign, bool allowReject, float overlapGate,
@@ -1413,7 +1550,9 @@ static FrameOutcome processFrameLocked(
                 sumNewR += nr;
                 sumNewG += ng;
                 sumNewB += nb;
-                overlap.push_back({nr, ng, nb, rx, ry, rz, fx, fy});
+                overlap.push_back({
+                    nr, ng, nb, rx, ry, rz, fx, fy,
+                    framePixelGradMag(pixels, frameW, frameH, fx, fy)});
             }
         }
     }
@@ -1497,12 +1636,29 @@ static FrameOutcome processFrameLocked(
             return ssd / count;
         };
 
+        auto computeRotGradSSD = [&](double dyaw, double dpitch, double droll, int subsample) -> double {
+            Quat qY = quatFromAxisAngle(0, 0, 1, dyaw);
+            Quat qP = quatFromAxisAngle(1, 0, 0, dpitch);
+            Quat qR = quatFromAxisAngle(0, 0, 1, droll);
+            Quat qC = quatMul(qY, quatMul(qP, quatMul(qR, q)));
+            return overlapGradZnccCost(overlap, qC, subsample);
+        };
+
         double baselineSSD = computeRotSSD(0, 0, 0, 1);
         double bestDyaw = 0, bestDpitch = 0, bestDroll = 0;
         double bestSSD = baselineSSD;
 
         constexpr double TRUST_SEED_SSD = 300.0;
         const bool trustSeed = !allowReject && baselineSSD < TRUST_SEED_SSD;
+        const bool edgeCoarseAlign =
+            !allowReject && baselineSSD > 2500.0;
+        double baselineGradSSD = 1e18;
+        double bestGradSSD = 1e18;
+        if (edgeCoarseAlign) {
+            rebuildEquirectGradMagLocked();
+            baselineGradSSD = computeRotGradSSD(0, 0, 0, 6);
+            bestGradSSD = baselineGradSSD;
+        }
 
         if (recencyComposite && baselineSSD < 800.0) {
             qCorrected = q;
@@ -1519,19 +1675,31 @@ static FrameOutcome processFrameLocked(
             return std::max(-0.5, std::min(0.5, (sm - sp) / denom));
         };
 
-        // Offline / quality: coarse search when IMU seed is far from photometric minimum.
+        // Offline / quality: ultra-wide edge coarse when IMU seed is far from minimum.
         if (!allowReject && baselineSSD > 2500.0) {
             constexpr double R = 18.0 * DEG2RAD;
             constexpr double S = 2.0 * DEG2RAD;
             for (double dp = -R; dp <= R; dp += S)
                 for (double dy = -R; dy <= R; dy += S) {
-                    double s = computeRotSSD(dy, dp, 0, 6);
-                    if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
+                    if (edgeCoarseAlign) {
+                        double s = computeRotGradSSD(dy, dp, 0, 6);
+                        if (s < bestGradSSD) {
+                            bestGradSSD = s;
+                            bestDyaw = dy;
+                            bestDpitch = dp;
+                        }
+                    } else {
+                        double s = computeRotSSD(dy, dp, 0, 6);
+                        if (s < bestSSD) { bestSSD = s; bestDyaw = dy; bestDpitch = dp; }
+                    }
                 }
+            if (edgeCoarseAlign) {
+                bestSSD = computeRotSSD(bestDyaw, bestDpitch, bestDroll, 2);
+            }
             alignLevelsCompleted = 1;
         }
 
-        // Level 2 (coarsest): ±7° (±5° during refine rebuild)
+        // Level 2 (coarsest): ±7° (±5° during refine rebuild) — RGB
         {
             const double R_FULL = (!allowReject) ? (9.0 * DEG2RAD) : (7.0 * DEG2RAD);
             constexpr double R_LIMITED = 5.0 * DEG2RAD;
@@ -1545,7 +1713,7 @@ static FrameOutcome processFrameLocked(
             alignLevelsCompleted = 1;
         }
 
-        // Roll search ±5° (1° step) with best yaw/pitch
+        // Roll search ±5° (1° step) with best yaw/pitch — RGB
         if (elapsedUs(t0) < frameTimeBudgetUs * 35 / 100) {
             constexpr double R = 5.0 * DEG2RAD;
             constexpr double S = 1.0 * DEG2RAD;
@@ -1708,8 +1876,10 @@ static FrameOutcome processFrameLocked(
                      sFrameIndex + 1, finalSSD, REJECT_SSD_THRESH);
             }
         }
-    } else if (!doAlign && !recencyComposite && overlap.size() > 50 && sFrameIndex > 0) {
-        // G1-fast: limited rotational SSD on live capture (no full doAlign budget).
+    } else if (!doAlign && !recencyComposite && !exportRebuild &&
+               overlapGate > 0.f && overlap.size() > 50 && sFrameIndex > 0) {
+        // G1-fast IMU recovery: only on live capture when overlapGate > 0 (degraded seed).
+        // Stored-pose replay and truth replay (overlapGate=0) skip this path entirely.
         const StoredFrame& prevFrame = sFrames[sFrameIndex - 1];
         const Quat qPrev = prevFrame.fastCorrectedQuat;
 
@@ -1742,57 +1912,49 @@ static FrameOutcome processFrameLocked(
             return ssd / count;
         };
 
-        auto computePairwiseRotSSD = [&](const Quat& base, double dyaw, double dpitch,
-                                         int subsample) -> double {
+        auto computeEquirectRotGradSSD = [&](const Quat& base, double dyaw, double dpitch,
+                                             int subsample) -> double {
             Quat qY = quatFromAxisAngle(0, 0, 1, dyaw);
             Quat qP = quatFromAxisAngle(1, 0, 0, dpitch);
             Quat qC = quatMul(qY, quatMul(qP, base));
-            const int step = (subsample >= 8) ? 8 : (subsample >= 4 ? 8 : 6);
-            return liveFramePairwiseRotSSD(
-                pixels, frameW, frameH, qC, prevFrame, qPrev, tanH, tanV, step);
+            return overlapGradZnccCost(overlap, qC, subsample);
         };
 
-        const double baselineSSD = computeEquirectRotSSD(q, 0, 0, 2);
+        const double rgbBaselineStart = computeEquirectRotSSD(q, 0, 0, 2);
         double bestDyaw = 0, bestDpitch = 0;
-        double bestSSD = baselineSSD;
-        finalSSD = baselineSSD;
+        double bestRgbSSD = rgbBaselineStart;
+        finalSSD = rgbBaselineStart;
+
+        // G1a ultra-coarse edge-map pyramid when IMU seed looks misaligned.
+        const bool needWideCoarse =
+            rgbBaselineStart > FAST_PAIRWISE_SSD_THRESH ||
+            (overlapGate > 0.f && overlapRatio < overlapGate * 1.5f);
+
+        double gradBaselineStart = 1e18;
+        double bestGradSSD = 1e18;
+        if (needWideCoarse) {
+            rebuildEquirectGradMagLocked();
+            gradBaselineStart = computeEquirectRotGradSSD(q, 0, 0, 8);
+            bestGradSSD = gradBaselineStart;
+        }
 
         const double prevImuFastDeg =
             quatAngularDistRad(prevFrame.imuQuat, prevFrame.fastCorrectedQuat) * RAD2DEG;
-        const bool usePairwiseSSD = baselineSSD > FAST_PAIRWISE_SSD_THRESH ||
-            prevImuFastDeg > FAST_IMU_GAP_DEG_THRESH;
+        const double interImuDeg =
+            quatAngularDistRad(q, prevFrame.imuQuat) * RAD2DEG;
+        const double imuGapDeg = std::max(prevImuFastDeg, interImuDeg);
+        LOGI("Fast edge G1: rgb SSD %.1f grad SSD %.1f imuGap %.1f°",
+             rgbBaselineStart, gradBaselineStart, imuGapDeg);
 
-        double searchBaselineSSD = baselineSSD;
-        if (usePairwiseSSD) {
-            searchBaselineSSD = computePairwiseRotSSD(q, 0, 0, 8);
-            bestSSD = searchBaselineSSD;
-        }
-
-        auto computeSearchSSD = [&](double dyaw, double dpitch, int subsample) -> double {
-            if (usePairwiseSSD) {
-                return computePairwiseRotSSD(q, dyaw, dpitch, subsample);
-            }
-            return computeEquirectRotSSD(q, dyaw, dpitch, subsample);
-        };
-
-        if (usePairwiseSSD) {
-            LOGI("Fast pairwise G1: baseline equirect SSD %.1f prevImuGap %.1f°",
-                 baselineSSD, prevImuFastDeg);
-        }
-
-        // G1a ultra-coarse rotational pyramid when IMU seed looks misaligned.
-        const bool needWideCoarse =
-            baselineSSD > FAST_PAIRWISE_SSD_THRESH ||
-            (overlapGate > 0.f && overlapRatio < overlapGate * 1.5f);
         double g1aBestDyaw = 0, g1aBestDpitch = 0;
         if (needWideCoarse && elapsedUs(t0) < frameTimeBudgetUs * 30 / 100) {
-            constexpr double Rwide = 12.0 * DEG2RAD;
-            constexpr double Swide = 4.0 * DEG2RAD;
+            const double Rwide = fastG1WideRadiusRad(imuGapDeg, rgbBaselineStart);
+            const double Swide = (Rwide > 14.0 * DEG2RAD) ? (4.0 * DEG2RAD) : (3.0 * DEG2RAD);
             for (double dp = -Rwide; dp <= Rwide; dp += Swide) {
                 for (double dy = -Rwide; dy <= Rwide; dy += Swide) {
-                    double s = computeSearchSSD(dy, dp, 8);
-                    if (s < bestSSD) {
-                        bestSSD = s;
+                    double s = computeEquirectRotGradSSD(q, dy, dp, 8);
+                    if (s < bestGradSSD) {
+                        bestGradSSD = s;
                         bestDyaw = dy;
                         bestDpitch = dp;
                     }
@@ -1802,14 +1964,10 @@ static FrameOutcome processFrameLocked(
             g1aBestDpitch = bestDpitch;
         }
 
-        // G1b mid: refine around G1a best (±6–12° at 1.5° steps).
-        double midRad =
-            (baselineSSD > 3000.0) ? (10.0 * DEG2RAD) : (6.0 * DEG2RAD);
+        // G1b mid: RGB refine around G1a edge seed (±6–14° at 1.5° steps).
+        double midRad = fastG1MidRadiusRad(imuGapDeg, rgbBaselineStart);
         if (overlapGate > 0.f && overlapRatio < overlapGate * 1.25f) {
             midRad = std::max(midRad, 12.0 * DEG2RAD);
-        }
-        if (needWideCoarse) {
-            midRad = std::min(midRad, 5.0 * DEG2RAD);
         }
         constexpr double Smid = 1.5 * DEG2RAD;
         const double sy0 = bestDyaw;
@@ -1818,24 +1976,24 @@ static FrameOutcome processFrameLocked(
             if (elapsedUs(t0) >= frameTimeBudgetUs * 42 / 100) break;
             for (double dy = sy0 - midRad; dy <= sy0 + midRad; dy += Smid) {
                 if (elapsedUs(t0) >= frameTimeBudgetUs * 42 / 100) break;
-                double s = computeSearchSSD(dy, dp, 4);
-                if (s < bestSSD) {
-                    bestSSD = s;
+                double s = computeEquirectRotSSD(q, dy, dp, 4);
+                if (s < bestRgbSSD) {
+                    bestRgbSSD = s;
                     bestDyaw = dy;
                     bestDpitch = dp;
                 }
             }
         }
 
-        // G1c fine: ±0.5° at 0.1° steps (equirect polish).
+        // G1c fine: RGB polish ±0.5° at 0.1° steps.
         if (elapsedUs(t0) < frameTimeBudgetUs * 50 / 100) {
             constexpr double Rf = 0.5 * DEG2RAD;
             constexpr double Sf = 0.1 * DEG2RAD;
             for (double dp = bestDpitch - Rf; dp <= bestDpitch + Rf; dp += Sf) {
                 for (double dy = bestDyaw - Rf; dy <= bestDyaw + Rf; dy += Sf) {
                     double s = computeEquirectRotSSD(q, dy, dp, 2);
-                    if (s < bestSSD) {
-                        bestSSD = s;
+                    if (s < bestRgbSSD) {
+                        bestRgbSSD = s;
                         bestDyaw = dy;
                         bestDpitch = dp;
                     }
@@ -1843,19 +2001,20 @@ static FrameOutcome processFrameLocked(
             }
         }
 
-        if (searchBaselineSSD < 1e17 && bestSSD < searchBaselineSSD * 0.96) {
+        const bool rgbImproved =
+            rgbBaselineStart < 1e17 && bestRgbSSD < rgbBaselineStart * 0.96;
+        if (rgbImproved) {
             Quat qY = quatFromAxisAngle(0, 0, 1, bestDyaw);
             Quat qP = quatFromAxisAngle(1, 0, 0, bestDpitch);
             qCorrected = quatMul(qY, quatMul(qP, q));
-            LOGI("Fast align: yaw=%.3f° pitch=%.3f° SSD %.1f->%.1f (%zu samp, %s)",
-                 bestDyaw * RAD2DEG, bestDpitch * RAD2DEG, searchBaselineSSD, bestSSD,
-                 overlap.size(), usePairwiseSSD ? "pairwise" : "equirect");
+            LOGI("Fast align edge+rgb: yaw=%.3f° pitch=%.3f° grad %.1f->%.1f rgb %.1f->%.1f",
+                 bestDyaw * RAD2DEG, bestDpitch * RAD2DEG,
+                 gradBaselineStart, bestGradSSD, rgbBaselineStart, bestRgbSSD);
         }
-        const double equirectFinalSSD = computeEquirectRotSSD(qCorrected, 0, 0, 2);
-        if (equirectFinalSSD < 1e17) {
-            finalSSD = equirectFinalSSD;
+        if (bestRgbSSD < 1e17) {
+            finalSSD = bestRgbSSD;
         }
-        if (usePairwiseSSD && finalSSD > FAST_DUBIOUS_SSD_THRESH) {
+        if (overlapGate > 0.f && finalSSD > FAST_DUBIOUS_SSD_THRESH) {
             tentativeSplatFrame = true;
         }
 
@@ -1890,13 +2049,13 @@ static FrameOutcome processFrameLocked(
                 std::sqrt(g1aBestDyaw * g1aBestDyaw + g1aBestDpitch * g1aBestDpitch) * RAD2DEG;
             if (g1aCorrDeg > FAST_ESCALATE_CORR_DEG) escalateFullAlign = true;
         }
-        if (bestSSD > FAST_ESCALATE_SSD_THRESH && bestSSD >= baselineSSD * 0.92) {
+        if (bestRgbSSD > FAST_ESCALATE_SSD_THRESH && bestRgbSSD >= rgbBaselineStart * 0.92) {
             escalateFullAlign = true;
         }
 
-        if (escalateFullAlign && !frameRejected) {
+        if (overlapGate > 0.f && escalateFullAlign && !frameRejected) {
             LOGI("Fast escalate full rot: equirect SSD %.1f (baseline %.1f)",
-                 bestSSD, baselineSSD);
+                 bestRgbSSD, rgbBaselineStart);
             const Quat alignBase = qCorrected;
             auto computeEscSSD = [&](double dyaw, double dpitch, double droll,
                                      int subsample) -> double {
@@ -1992,7 +2151,7 @@ static FrameOutcome processFrameLocked(
                 Quat qP = quatFromAxisAngle(1, 0, 0, escBestDpitch);
                 Quat qR = quatFromAxisAngle(0, 0, 1, escBestDroll);
                 qCorrected = quatMul(qY, quatMul(qP, quatMul(qR, alignBase)));
-                bestSSD = escBestSSD;
+                bestRgbSSD = escBestSSD;
                 LOGI("Fast escalate: yaw=%.2f pitch=%.2f roll=%.2f SSD %.1f->%.1f",
                      escBestDyaw * RAD2DEG, escBestDpitch * RAD2DEG, escBestDroll * RAD2DEG,
                      escBaseline, escBestSSD);
@@ -2002,10 +2161,10 @@ static FrameOutcome processFrameLocked(
         }
 
         if (allowReject && finalSSD > REJECT_SSD_THRESH && sFrameIndex > 0) {
-            const bool alignHelped = finalSSD < baselineSSD * 0.95;
+            const bool alignHelped = finalSSD < rgbBaselineStart * 0.95;
             if (alignHelped) {
                 LOGI("Frame %d fast ACCEPT after align: SSD %.1f (baseline %.1f)",
-                     sFrameIndex + 1, finalSSD, baselineSSD);
+                     sFrameIndex + 1, finalSSD, rgbBaselineStart);
             } else if (finalSSD <= REJECT_SSD_RELAXED && overlap.size() > 80) {
                 LOGI("Frame %d fast fallback ACCEPT: SSD=%.1f", sFrameIndex + 1, finalSSD);
             } else {
@@ -2050,7 +2209,7 @@ static FrameOutcome processFrameLocked(
         gainR = forcedGainR;
         gainG = forcedGainG > 1e-6f ? forcedGainG : forcedGainR;
         gainB = forcedGainB > 1e-6f ? forcedGainB : forcedGainR;
-    } else if (!frameRejected && !overlap.empty() && sFrameIndex > 0) {
+    } else if (!frameRejected && !overlap.empty() && sFrameIndex > 0 && !exportRebuild) {
         applyOverlapExposureNormalization(overlap, qCorrected, gainR, gainG, gainB);
     }
 
@@ -2060,7 +2219,7 @@ static FrameOutcome processFrameLocked(
 
     float tileGains[TILE_GAIN_N * TILE_GAIN_N * 3];
     for (int i = 0; i < TILE_GAIN_N * TILE_GAIN_N * 3; i++) tileGains[i] = 1.f;
-    if (!overlap.empty()) {
+    if (!overlap.empty() && !exportRebuild) {
         double tExR[64] = {}, tExG[64] = {}, tExB[64] = {};
         double tNewR[64] = {}, tNewG[64] = {}, tNewB[64] = {};
         int tCount[64] = {};
@@ -2108,8 +2267,10 @@ static FrameOutcome processFrameLocked(
                  sFrameIndex, finalSSD, splatWeightScale);
         }
 
-        // Tighter edge feather on full-align paths preserves center detail; rebuild uses slightly more.
-        const double featherFrac = usedFullRotAlign ? 0.04 : 0.06;
+        // Export: minimal edge feather; fast-finish uses nearest-view pick (no overlap wash).
+        const double featherFrac =
+            exportRebuild ? (sNearestCenterSplat ? 0.03 : 0.05)
+                          : (usedFullRotAlign ? 0.04 : 0.06);
         double featherX = frameW * featherFrac;
         double featherY = frameH * featherFrac;
         float mismatchSqRange = MISMATCH_HARD_SQ - MISMATCH_SOFT_SQ;
@@ -2137,15 +2298,16 @@ static FrameOutcome processFrameLocked(
 
         if (usedFullRotAlign && !recencyComposite) {
             // S14: inverse spherical mapping for full-quality single-frame stitch.
-            const bool replaceOverlap =
-                exportRebuild && sFrameIndex > 0 && !sNearestCenterSplat;
+            // Export resplat accumulates all frames; replace is only for live fast capture.
+            const bool replaceOverlap = false;
             splatFrameInverseSpherical(
                 splatPixels, splatW, splatH, qCorrected, tanH, tanV, *warp,
                 tileGains, replaceOverlap, splatFeatherX, splatFeatherY,
                 gExpR, gExpG, gExpB, /*eqStep=*/1, splatWeightScale);
         } else {
             // Fast capture + refine rebuild: inverse spherical (matches rectilinear export).
-            const bool replaceOverlap = !usedFullRotAlign && !recencyComposite && sFrameIndex > 0;
+            const bool replaceOverlap =
+                !exportRebuild && !usedFullRotAlign && !recencyComposite && sFrameIndex > 0;
             splatFrameInverseSpherical(
                 splatPixels, splatW, splatH, qCorrected, tanH, tanV, *warp,
                 tileGains, replaceOverlap, splatFeatherX, splatFeatherY,
@@ -2571,21 +2733,21 @@ static double quatAngularDistRad(const Quat& a, const Quat& b) {
  * do not penalize photometric solutions that depart from the erroneous sensor prior.
  */
 static double globalImuPriorLambda(const StoredFrame& f, double photometricSSD) {
-    double lambda = adaptiveImuPriorLambda(photometricSSD);
     const double imuFastDeg = quatAngularDistRad(f.imuQuat, f.fastCorrectedQuat) * RAD2DEG;
+    if (imuFastDeg > 8.0 || photometricSSD > 3000.0) return 0.0;
+    double lambda = adaptiveImuPriorLambda(photometricSSD);
     if (imuFastDeg > 2.0) {
         const double fade = std::max(0.0, 1.0 - (imuFastDeg - 2.0) / 5.0);
         lambda *= fade;
     }
-    if (photometricSSD > 3000.0) lambda = std::min(lambda, 1.5);
     return lambda;
 }
 
 /** Widen rotation search when seeds disagree or overlap SSD is high (IMU recovery). */
 static double globalPoseSearchRadiusRad(const StoredFrame& f, double photometricSSD) {
     const double imuFastDeg = quatAngularDistRad(f.imuQuat, f.fastCorrectedQuat) * RAD2DEG;
-    if (imuFastDeg > 5.0 || photometricSSD > 3500.0) return 14.0 * DEG2RAD;
-    if (photometricSSD > 2000.0) return 9.0 * DEG2RAD;
+    if (imuFastDeg > 10.0 || photometricSSD > 3500.0) return 18.0 * DEG2RAD;
+    if (imuFastDeg > 5.0 || photometricSSD > 2000.0) return 14.0 * DEG2RAD;
     return 5.0 * DEG2RAD;
 }
 
@@ -2621,6 +2783,7 @@ static double neighborPairwiseSSD(
         }
     }
     // S27: loop-closure pair (last frame vs anchor) for wrap-around sessions.
+    constexpr double kLoopClosureWeight = 3.0;
     if (n >= 4 && frameIdx == n - 1) {
         const StoredFrame& anchor = sFrames[0];
         double sFwd = pairwiseFrameRaySSD(
@@ -2628,8 +2791,8 @@ static double neighborPairwiseSSD(
         double sRev = pairwiseFrameRaySSD(
             anchor, anchor.refinedQuat, src, qCandidate, tanH, tanV);
         if (sFwd < 1e17 && sRev < 1e17) {
-            total += 0.5 * (sFwd + sRev);
-            pairs++;
+            total += kLoopClosureWeight * 0.5 * (sFwd + sRev);
+            pairs += static_cast<int>(kLoopClosureWeight);
         }
     }
     return pairs > 0 ? total / pairs : 1e18;
@@ -2707,6 +2870,212 @@ static double sparseGraphPairwiseSSD(
         frameIdx, qCandidate, f.poseTx, f.poseTy, f.poseTz, tanH, tanV);
 }
 
+/** Max IMU vs fast-corrected gap across stored frames (degrees). */
+static double sessionMaxImuFastGapDeg() {
+    double maxGap = 0.0;
+    for (const auto& f : sFrames) {
+        maxGap = std::max(
+            maxGap, quatAngularDistRad(f.imuQuat, f.fastCorrectedQuat) * RAD2DEG);
+    }
+    return maxGap;
+}
+
+/** Pairwise ray SSD vs immediate predecessor (rotation only). */
+static double chainedNeighborRaySSD(
+    int frameIdx, const Quat& qCand, double tanH, double tanV) {
+
+    if (frameIdx <= 0) return 1e18;
+    const StoredFrame& src = sFrames[frameIdx];
+    const StoredFrame& prev = sFrames[frameIdx - 1];
+    double sFwd = pairwiseFrameRaySSD(
+        src, qCand, prev, prev.refinedQuat, tanH, tanV);
+    double sRev = pairwiseFrameRaySSD(
+        prev, prev.refinedQuat, src, qCand, tanH, tanV);
+    if (sFwd < 1e17 && sRev < 1e17) return 0.5 * (sFwd + sRev);
+    return 1e18;
+}
+
+/** Pairwise ray SSD for loop closure (last frame vs anchor). */
+static double loopClosureRaySSD(
+    int lastIdx, const Quat& qCand, double tanH, double tanV) {
+
+    if (lastIdx <= 0) return 1e18;
+    const StoredFrame& src = sFrames[lastIdx];
+    const StoredFrame& anchor = sFrames[0];
+    double sFwd = pairwiseFrameRaySSD(
+        src, qCand, anchor, anchor.refinedQuat, tanH, tanV);
+    double sRev = pairwiseFrameRaySSD(
+        anchor, anchor.refinedQuat, src, qCand, tanH, tanV);
+    if (sFwd < 1e17 && sRev < 1e17) return 0.5 * (sFwd + sRev);
+    return 1e18;
+}
+
+/** Grid search yaw/pitch/roll minimizing pairwise ray SSD (not equirect). */
+static bool searchPairwiseRotation(
+    const std::function<double(const Quat&)>& evalSSD,
+    const Quat& qBase,
+    double searchRad,
+    double coarseStepRad,
+    Quat& qOut,
+    double& bestSSD,
+    double acceptRatio = 0.96) {
+
+    const double baseSSD = evalSSD(qBase);
+    if (baseSSD > 1e17) return false;
+    bestSSD = baseSSD;
+    double bestDy = 0.0, bestDp = 0.0, bestDr = 0.0;
+
+    auto searchAtStep = [&](double stepRad) {
+        for (double dp = -searchRad; dp <= searchRad; dp += stepRad) {
+            for (double dy = -searchRad; dy <= searchRad; dy += stepRad) {
+                for (double dr = -searchRad; dr <= searchRad; dr += stepRad) {
+                    Quat qY = quatFromAxisAngle(0, 0, 1, dy);
+                    Quat qP = quatFromAxisAngle(1, 0, 0, dp);
+                    Quat qR = quatFromAxisAngle(0, 0, 1, dr);
+                    Quat qCand = quatMul(qY, quatMul(qP, quatMul(qR, qBase)));
+                    double s = evalSSD(qCand);
+                    if (s < bestSSD) {
+                        bestSSD = s;
+                        bestDy = dy;
+                        bestDp = dp;
+                        bestDr = dr;
+                    }
+                }
+            }
+        }
+    };
+
+    searchAtStep(coarseStepRad);
+    const double fineStep = std::max(coarseStepRad * 0.5, 0.5 * DEG2RAD);
+    const double fineRad = std::min(searchRad, coarseStepRad * 2.0);
+    for (double dp = bestDp - fineRad; dp <= bestDp + fineRad; dp += fineStep) {
+        for (double dy = bestDy - fineRad; dy <= bestDy + fineRad; dy += fineStep) {
+            for (double dr = bestDr - fineRad; dr <= bestDr + fineRad; dr += fineStep) {
+                Quat qY = quatFromAxisAngle(0, 0, 1, dy);
+                Quat qP = quatFromAxisAngle(1, 0, 0, dp);
+                Quat qR = quatFromAxisAngle(0, 0, 1, dr);
+                Quat qCand = quatMul(qY, quatMul(qP, quatMul(qR, qBase)));
+                double s = evalSSD(qCand);
+                if (s < bestSSD) {
+                    bestSSD = s;
+                    bestDy = dy;
+                    bestDp = dp;
+                    bestDr = dr;
+                }
+            }
+        }
+    }
+
+    if (bestSSD < baseSSD * acceptRatio) {
+        Quat qY = quatFromAxisAngle(0, 0, 1, bestDy);
+        Quat qP = quatFromAxisAngle(1, 0, 0, bestDp);
+        Quat qR = quatFromAxisAngle(0, 0, 1, bestDr);
+        qOut = quatMul(qY, quatMul(qP, quatMul(qR, qBase)));
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Seed export global graph from pairwise ray chain (i vs i-1), not equirect accumulator.
+ */
+static int seedPosesPairwiseChainLocked() {
+    const int n = (int)sFrames.size();
+    if (n < 2) return 0;
+
+    double tanH, tanV;
+    sessionTanHalfFov(tanH, tanV);
+    const double maxImuFastDeg = sessionMaxImuFastGapDeg();
+    const double searchRad =
+        maxImuFastDeg > 12.0 ? (14.0 * DEG2RAD)
+        : (maxImuFastDeg > 6.0 ? (10.0 * DEG2RAD) : (6.0 * DEG2RAD));
+    const double coarseStep =
+        searchRad > 10.0 * DEG2RAD ? (3.0 * DEG2RAD) : (2.0 * DEG2RAD);
+
+    int adjusted = 0;
+    for (int i = 1; i < n; i++) {
+        StoredFrame& f = sFrames[i];
+        Quat qBase = f.refinedQuat;
+        double baseSSD = chainedNeighborRaySSD(i, qBase, tanH, tanV);
+        if (baseSSD > 1e17) continue;
+
+        double bestSSD = baseSSD;
+        double bestDy = 0.0, bestDp = 0.0;
+        for (double dp = -searchRad; dp <= searchRad; dp += coarseStep) {
+            for (double dy = -searchRad; dy <= searchRad; dy += coarseStep) {
+                Quat qY = quatFromAxisAngle(0, 0, 1, dy);
+                Quat qP = quatFromAxisAngle(1, 0, 0, dp);
+                Quat qCand = quatMul(qY, quatMul(qP, qBase));
+                double s = chainedNeighborRaySSD(i, qCand, tanH, tanV);
+                if (s < bestSSD) {
+                    bestSSD = s;
+                    bestDy = dy;
+                    bestDp = dp;
+                }
+            }
+        }
+        const double fineStep = 0.75 * DEG2RAD;
+        const double fineRad = coarseStep;
+        for (double dp = bestDp - fineRad; dp <= bestDp + fineRad; dp += fineStep) {
+            for (double dy = bestDy - fineRad; dy <= bestDy + fineRad; dy += fineStep) {
+                Quat qY = quatFromAxisAngle(0, 0, 1, dy);
+                Quat qP = quatFromAxisAngle(1, 0, 0, dp);
+                Quat qCand = quatMul(qY, quatMul(qP, qBase));
+                double s = chainedNeighborRaySSD(i, qCand, tanH, tanV);
+                if (s < bestSSD) {
+                    bestSSD = s;
+                    bestDy = dy;
+                    bestDp = dp;
+                }
+            }
+        }
+        if (bestSSD < baseSSD * 0.96) {
+            Quat qY = quatFromAxisAngle(0, 0, 1, bestDy);
+            Quat qP = quatFromAxisAngle(1, 0, 0, bestDp);
+            f.refinedQuat = quatMul(qY, quatMul(qP, qBase));
+            f.fastCorrectedQuat = f.refinedQuat;
+            adjusted++;
+        }
+    }
+
+    if (n >= 4) {
+        const int last = n - 1;
+        StoredFrame& f = sFrames[last];
+        Quat qBase = f.refinedQuat;
+        double baseSSD = loopClosureRaySSD(last, qBase, tanH, tanV);
+        if (baseSSD < 1e17) {
+            double bestSSD = baseSSD;
+            double bestDy = 0.0, bestDp = 0.0;
+            const double loopRad = std::min(searchRad, 10.0 * DEG2RAD);
+            for (double dp = -loopRad; dp <= loopRad; dp += coarseStep) {
+                for (double dy = -loopRad; dy <= loopRad; dy += coarseStep) {
+                    Quat qY = quatFromAxisAngle(0, 0, 1, dy);
+                    Quat qP = quatFromAxisAngle(1, 0, 0, dp);
+                    Quat qCand = quatMul(qY, quatMul(qP, qBase));
+                    double s = loopClosureRaySSD(last, qCand, tanH, tanV);
+                    if (s < bestSSD) {
+                        bestSSD = s;
+                        bestDy = dy;
+                        bestDp = dp;
+                    }
+                }
+            }
+            if (bestSSD < baseSSD * 0.94) {
+                Quat qY = quatFromAxisAngle(0, 0, 1, bestDy);
+                Quat qP = quatFromAxisAngle(1, 0, 0, bestDp);
+                f.refinedQuat = quatMul(qY, quatMul(qP, qBase));
+                f.fastCorrectedQuat = f.refinedQuat;
+                adjusted++;
+            }
+        }
+    }
+
+    LOGI("Pairwise chain seed: adjusted %d frames (search %.1f deg, imuGap %.1f deg)",
+         adjusted, searchRad * RAD2DEG, maxImuFastDeg);
+    if (adjusted > 0) rebuildOverlapBankLocked();
+    return adjusted;
+}
+
 /** Align each frame to its immediate predecessor (robust for desk / chained capture). */
 static void refineChainedPosesLocked() {
     const int n = (int)sFrames.size();
@@ -2717,17 +3086,7 @@ static void refineChainedPosesLocked() {
     int adjusted = 0;
 
     auto neighborSSD = [&](int frameIdx, const Quat& qCand) -> double {
-        if (frameIdx <= 0) return 1e18;
-        const StoredFrame& src = sFrames[frameIdx];
-        const StoredFrame& prev = sFrames[frameIdx - 1];
-        double sFwd = pairwiseFrameRaySSD6D(
-            src, qCand, src.poseTx, src.poseTy, src.poseTz,
-            prev, prev.refinedQuat, prev.poseTx, prev.poseTy, prev.poseTz, tanH, tanV);
-        double sRev = pairwiseFrameRaySSD6D(
-            prev, prev.refinedQuat, prev.poseTx, prev.poseTy, prev.poseTz,
-            src, qCand, src.poseTx, src.poseTy, src.poseTz, tanH, tanV);
-        if (sFwd < 1e17 && sRev < 1e17) return 0.5 * (sFwd + sRev);
-        return 1e18;
+        return chainedNeighborRaySSD(frameIdx, qCand, tanH, tanV);
     };
 
     for (int i = 1; i < n; i++) {
@@ -2765,9 +3124,9 @@ static void refineChainedPosesLocked() {
                 quatAngularDistRad(f.imuQuat, f.fastCorrectedQuat) * RAD2DEG;
             double maxStepRad = 4.0 * DEG2RAD;
             if (imuFastDeg > 4.0) maxStepRad = 8.0 * DEG2RAD;
-            const double stepRad = std::sqrt(bestDy * bestDy + bestDp * bestDp);
+            const double stepRad2 = std::sqrt(bestDy * bestDy + bestDp * bestDp);
             const double ssdGain = (baseSSD - bestSSD) / std::max(baseSSD, 1.0);
-            if (stepRad > maxStepRad && ssdGain < 0.12) continue;
+            if (stepRad2 > maxStepRad && ssdGain < 0.12) continue;
             f.fastCorrectedQuat = qNew;
             f.refinedQuat = f.fastCorrectedQuat;
             adjusted++;
@@ -2790,9 +3149,15 @@ static void refineFramePoseGaussNewton(int frameIdx, double tanH, double tanV) {
         Quat qR = quatFromAxisAngle(0, 0, 1, droll);
         Quat qCand = quatMul(qY, quatMul(qP, quatMul(qR, qBase)));
         double photometric = sparseGraphPairwiseSSD(frameIdx, qCand, tanH, tanV);
+        const int featInliers = frameFeatureInlierSum(frameIdx);
+        double photoScale = 1.0;
+        if (featInliers >= 80) photoScale = 0.35;
+        if (featInliers >= 140) photoScale = 0.15;
+        photometric *= photoScale;
         const double imuLambda = globalImuPriorLambda(f, photometric);
-        double imuPenalty = imuLambda * quatAngularDistSq(qCand, f.fastCorrectedQuat);
-        return photometric + imuPenalty;
+        double imuPenalty = imuLambda * quatAngularDistSq(qCand, f.imuQuat);
+        double featurePenalty = featureGraphPenaltyForFrame(frameIdx, qCand);
+        return photometric + imuPenalty + featurePenalty;
     };
 
     constexpr double eps = 0.08 * DEG2RAD;
@@ -2942,8 +3307,34 @@ static void refineFramePoseGlobal(int frameIdx, double tanH, double tanV) {
     Quat qBase = f.refinedQuat;
     const double basePhotometric = sparseGraphPairwiseSSD(frameIdx, qBase, tanH, tanV);
     if (sGlobalRefinePassesOverride > 0 && basePhotometric < 220.0) return;
-    double bestSSD = 1e18;
     double bestDyaw = 0, bestDpitch = 0, bestDroll = 0;
+
+    // Edge-map coarse (ZNCC) when photometric SSD is high, then RGB fine below.
+    if (basePhotometric > 2000.0) {
+        rebuildEquirectGradMagLocked();
+        std::vector<OverlapSample> overlap;
+        buildOverlapSamplesFromEquirect(frameIdx, overlap);
+        if (overlap.size() >= 20) {
+            double bestGradCost = overlapGradZnccCost(overlap, qBase, 8);
+            double edgeR = globalPoseSearchRadiusRad(f, basePhotometric);
+            const double edgeS = (edgeR > 10.0 * DEG2RAD) ? (2.0 * DEG2RAD) : (1.5 * DEG2RAD);
+            for (double dp = -edgeR; dp <= edgeR; dp += edgeS) {
+                for (double dy = -edgeR; dy <= edgeR; dy += edgeS) {
+                    Quat qY = quatFromAxisAngle(0, 0, 1, dy);
+                    Quat qP = quatFromAxisAngle(1, 0, 0, dp);
+                    Quat qC = quatMul(qY, quatMul(qP, qBase));
+                    double c = overlapGradZnccCost(overlap, qC, 6);
+                    if (c < bestGradCost) {
+                        bestGradCost = c;
+                        bestDyaw = dy;
+                        bestDpitch = dp;
+                    }
+                }
+            }
+        }
+    }
+
+    double bestSSD = 1e18;
 
     auto evalDelta = [&](double dyaw, double dpitch, double droll) -> double {
         Quat qY = quatFromAxisAngle(0, 0, 1, dyaw);
@@ -2951,22 +3342,29 @@ static void refineFramePoseGlobal(int frameIdx, double tanH, double tanV) {
         Quat qR = quatFromAxisAngle(0, 0, 1, droll);
         Quat qCand = quatMul(qY, quatMul(qP, quatMul(qR, qBase)));
         double photometric = sparseGraphPairwiseSSD(frameIdx, qCand, tanH, tanV);
+        const int featInliers = frameFeatureInlierSum(frameIdx);
+        double photoScale = 1.0;
+        if (featInliers >= 80) photoScale = 0.35;
+        if (featInliers >= 140) photoScale = 0.15;
+        photometric *= photoScale;
         const double imuLambda = globalImuPriorLambda(f, photometric);
-        double imuPenalty = imuLambda * quatAngularDistSq(qCand, f.fastCorrectedQuat);
-        return photometric + imuPenalty;
+        double imuPenalty = imuLambda * quatAngularDistSq(qCand, f.imuQuat);
+        double featurePenalty = featureGraphPenaltyForFrame(frameIdx, qCand);
+        return photometric + imuPenalty + featurePenalty;
     };
 
-    bestSSD = evalDelta(0, 0, 0);
+    bestSSD = evalDelta(bestDyaw, bestDpitch, bestDroll);
     const double R = globalPoseSearchRadiusRad(f, basePhotometric);
     const double S = (R > 8.0 * DEG2RAD) ? (1.25 * DEG2RAD) : (0.75 * DEG2RAD);
-    for (double dp = -R; dp <= R; dp += S) {
-        for (double dy = -R; dy <= R; dy += S) {
-            double s = evalDelta(dy, dp, 0);
+    const double seedDy = bestDyaw;
+    const double seedDp = bestDpitch;
+    for (double dp = seedDp - R; dp <= seedDp + R; dp += S) {
+        for (double dy = seedDy - R; dy <= seedDy + R; dy += S) {
+            double s = evalDelta(dy, dp, bestDroll);
             if (s < bestSSD) {
                 bestSSD = s;
                 bestDyaw = dy;
                 bestDpitch = dp;
-                bestDroll = 0;
             }
         }
     }
@@ -2990,9 +3388,9 @@ static void refineFramePoseGlobal(int frameIdx, double tanH, double tanV) {
         }
     }
 
-    double baseline = evalDelta(0, 0, 0);
-    const double acceptRatio = (baseline < 300.0) ? 0.995 : 0.98;
-    if (bestSSD < baseline * acceptRatio) {
+    const double baselineAtZero = evalDelta(0, 0, 0);
+    const double acceptRatio = (baselineAtZero < 300.0) ? 0.995 : 0.98;
+    if (bestSSD < baselineAtZero * acceptRatio) {
         Quat qY = quatFromAxisAngle(0, 0, 1, bestDyaw);
         Quat qP = quatFromAxisAngle(1, 0, 0, bestDpitch);
         Quat qR = quatFromAxisAngle(0, 0, 1, bestDroll);
@@ -3001,7 +3399,7 @@ static void refineFramePoseGlobal(int frameIdx, double tanH, double tanV) {
             bestDyaw * bestDyaw + bestDpitch * bestDpitch + bestDroll * bestDroll) * RAD2DEG;
         LOGI("Global pose frame %d: yaw=%.2f pitch=%.2f roll=%.2f (%.2f deg, SSD %.1f->%.1f)",
              frameIdx, bestDyaw * RAD2DEG, bestDpitch * RAD2DEG, bestDroll * RAD2DEG,
-             corrDeg, baseline, bestSSD);
+             corrDeg, baselineAtZero, bestSSD);
     }
 
     // G2: per-frame warp (skip in fast global — expensive, marginal for rotation recovery).
@@ -3098,8 +3496,9 @@ static void buildOverlapSamplesFromEquirect(
             s.newR = static_cast<float>((p >> 16) & 0xff);
             s.newG = static_cast<float>((p >> 8) & 0xff);
             s.newB = static_cast<float>(p & 0xff);
-            s.fx = static_cast<float>(fx);
-            s.fy = static_cast<float>(fy);
+            s.fx = fx;
+            s.fy = fy;
+            s.newGrad = storedPixelGradMag(f, fx, fy);
             pixelToRay(fx, fy, f.w, f.h, tanH, tanV, s.rx, s.ry, s.rz);
             double wx, wy, wz;
             quatRotate(f.refinedQuat, s.rx, s.ry, s.rz, wx, wy, wz);
@@ -3154,6 +3553,9 @@ static void applyDepthParallaxWarpLocked(StoredFrame& f) {
  * G2/G3/G5 motion refine after global rotation: re-estimate translation +
  * per-cell warp from overlap, depth-weighted when available.
  */
+// Skip parallax warp when rotation is still badly misaligned (avoids ghost amplification).
+static constexpr double MOTION_WARP_SKIP_PAIRWISE_SSD = 3000.0;
+
 static void refineMotionWarpsLocked() {
     const int n = (int)sFrames.size();
     if (n < 2) return;
@@ -3162,10 +3564,18 @@ static void refineMotionWarpsLocked() {
     sessionTanHalfFov(tanH, tanV);
     auto t0 = SteadyClock::now();
     int refined = 0;
+    int skipped = 0;
 
     for (int i = 1; i < n; i++) {
         StoredFrame& f = sFrames[i];
         if (f.locked) continue;
+
+        const double pairwiseSSD = sparseGraphPairwiseSSD(i, f.refinedQuat, tanH, tanV);
+        if (pairwiseSSD > MOTION_WARP_SKIP_PAIRWISE_SSD) {
+            skipped++;
+            LOGI("Motion warp skip frame %d: pairwise SSD %.1f", i, pairwiseSSD);
+            continue;
+        }
 
         std::vector<OverlapSample> overlap;
         buildOverlapSamplesFromEquirect(i, overlap);
@@ -3190,8 +3600,8 @@ static void refineMotionWarpsLocked() {
         applyDepthParallaxWarpLocked(f);
         refined++;
     }
-    LOGI("Motion warp refine: %d/%d frames in %lldus",
-         refined, n, (long long)elapsedUs(t0));
+    LOGI("Motion warp refine: %d/%d frames skipped=%d in %lldus",
+         refined, n, skipped, (long long)elapsedUs(t0));
     if (refined > 0) rebuildOverlapBankLocked();
 }
 
@@ -3209,13 +3619,24 @@ static void updateLockedFramesAfterRefine() {
     }
 }
 
+/** Reset stored poses to raw IMU seeds (clears per-frame fast-align drift before global/export). */
+static void resetPosesToImuLocked() {
+    for (auto& f : sFrames) {
+        f.refinedQuat = f.imuQuat;
+        f.fastCorrectedQuat = f.imuQuat;
+        initIdentityWarp(f.warp);
+        f.poseTx = f.poseTy = f.poseTz = 0.f;
+    }
+    invalidateEquirectFreshLocked();
+}
+
 /** L2b export: clear and rebuild with full per-frame visual alignment (photo-quality). */
 static int rebuildEquirectFullAlignLocked() {
     std::fill(eqR.begin(), eqR.end(), 0.f);
     std::fill(eqG.begin(), eqG.end(), 0.f);
     std::fill(eqB.begin(), eqB.end(), 0.f);
     std::fill(eqWeight.begin(), eqWeight.end(), 0.f);
-    eqSplatCenterDistSq.assign((size_t)eqW * eqH, 1e18f);
+    eqSplatCenterDistSq.assign((size_t)eqW * eqH, -1e18f);
     sNearestCenterSplat = true;
     resetCoverageCountersLocked();
     sFrameIndex = 0;
@@ -3269,7 +3690,8 @@ static int rebuildEquirectFromStoredFramesLocked(
             f.px.data(), f.w, f.h, f.refinedQuat,
             /*doAlign=*/false, /*allowReject=*/false, /*overlapGate=*/0.f,
             &f.warp, recencyComposite, depthPtr,
-            forcedR, forcedG, forcedB);
+            forcedR, forcedG, forcedB,
+            /*exportRebuild=*/true);
         if (!f.locked) aligned++;
         f.refined = true;
         (void)o;
@@ -3282,7 +3704,7 @@ static int rebuildEquirectFromStoredFramesLocked(
 
 /** Truth export: resplat stored poses with nearest-center overlap (no photometric align). */
 static int rebuildEquirectExportNearestCenterLocked() {
-    eqSplatCenterDistSq.assign((size_t)eqW * eqH, 1e18f);
+    eqSplatCenterDistSq.assign((size_t)eqW * eqH, -1e18f);
     sNearestCenterSplat = true;
     for (auto& f : sFrames) {
         initIdentityWarp(f.warp);
@@ -3296,7 +3718,7 @@ static int rebuildEquirectExportNearestCenterLocked() {
 /** DONE export: resplat at full resolution without re-running photometric align. */
 static bool prepareExportEquirectLocked(int outW, int outH) {
     if (outW <= 0 || outH <= 0 || sFrames.empty()) return false;
-    if (sEquirectBufferFresh && outW == eqW && outH == eqH) {
+    if (sEquirectBufferFresh && outW == eqW && outH == eqH && !sFastFinishRefine) {
         LOGI("Export prep: skip resplat (%dx%d fresh)", eqW, eqH);
         return true;
     }
@@ -3309,22 +3731,24 @@ static bool prepareExportEquirectLocked(int outW, int outH) {
         eqG.assign(sz, 0.f);
         eqB.assign(sz, 0.f);
         eqWeight.assign(sz, 0.f);
-        eqSplatCenterDistSq.assign(sz, 1e18f);
+        eqSplatCenterDistSq.assign(sz, -1e18f);
     } else {
         std::fill(eqR.begin(), eqR.end(), 0.f);
         std::fill(eqG.begin(), eqG.end(), 0.f);
         std::fill(eqB.begin(), eqB.end(), 0.f);
         std::fill(eqWeight.begin(), eqWeight.end(), 0.f);
-        eqSplatCenterDistSq.assign((size_t)eqW * eqH, 1e18f);
+        eqSplatCenterDistSq.assign((size_t)eqW * eqH, -1e18f);
     }
-    sNearestCenterSplat = false;
+    sNearestCenterSplat = sFastFinishRefine;
     resetCoverageCountersLocked();
     sFrameIndex = 0;
     sLastRejected = 0;
     sLastRollOffset = 0.f;
     const int aligned = rebuildEquirectFromStoredFramesLocked(/*recencyComposite=*/false);
-    LOGI("Export prep: %dx%d resplat %zu frames (%d aligned) in %lldus",
-         eqW, eqH, sFrames.size(), aligned, (long long)elapsedUs(t0));
+    sNearestCenterSplat = false;
+    LOGI("Export prep: %dx%d resplat %zu frames (%d aligned, nearestCenter=%d) in %lldus",
+         eqW, eqH, sFrames.size(), aligned, sFastFinishRefine ? 1 : 0,
+         (long long)elapsedUs(t0));
     return true;
 }
 
@@ -3491,10 +3915,14 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeRefinePending(
     }
 
     if (applyGlobalPose) {
+        const double maxImuFastDeg = sessionMaxImuFastGapDeg();
+        const bool useImuSeed = sFastFinishRefine || maxImuFastDeg > 4.0;
         for (auto& f : sFrames) {
-            f.refinedQuat = f.fastCorrectedQuat;
+            f.refinedQuat = useImuSeed ? f.imuQuat : f.fastCorrectedQuat;
             f.poseTx = f.poseTy = f.poseTz = 0.f;
         }
+        LOGI("Global refine seed: %s (max imu-fast gap %.1f deg, fastFinish=%d)",
+             useImuSeed ? "imuQuat" : "fastCorrected", maxImuFastDeg, sFastFinishRefine ? 1 : 0);
         rebuildOverlapBankLocked();
         if (sFrames.size() >= 3 && sOverlapBank.size() >= 20 &&
             sGlobalRefinePassesOverride <= 0) {
@@ -3505,13 +3933,24 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeRefinePending(
             sLastRefineSsdBefore = static_cast<float>(
                 evalOverlapBankSSD(sFocalScale, distK1, /*includePrior=*/false));
         }
+        // Feature graph helps high IMU error; skip on sweep-fast low-degrade (noisy matches).
+        const bool useFeatureGraph = !sFastFinishRefine || maxImuFastDeg >= 8.0;
+        if (useFeatureGraph) {
+            buildFeatureEdgesLocked();
+            const int featureSeeded = seedPosesFromFeatureGraphLocked();
+            if (featureSeeded < 2) {
+                seedPosesPairwiseChainLocked();
+            }
+        } else {
+            LOGI("Global refine: skip feature graph (fastFinish imuGap %.1f deg)", maxImuFastDeg);
+        }
         // Optional pose-graph seed; revert if overlap SSD regresses.
         std::vector<Quat> seedQuats;
         seedQuats.reserve(sFrames.size());
         for (const auto& f : sFrames) seedQuats.push_back(f.refinedQuat);
 
         globalRefinePosesLocked();
-        if (sGlobalRefinePassesOverride <= 0) {
+        if (sGlobalRefinePassesOverride <= 0 && !sFastFinishRefine) {
             refineMotionWarpsLocked();
         }
         rebuildOverlapBankLocked();
@@ -3595,6 +4034,15 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeRebuildFullAlign(
         f.locked = false;
     }
     rebuildEquirectFullAlignLocked();
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_ab_inque_robotics_panorama_SphereNative_nativeResetPosesToImu(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    if (sFrames.empty()) return JNI_FALSE;
+    resetPosesToImuLocked();
+    LOGI("Reset %zu frame poses to imuQuat", sFrames.size());
     return JNI_TRUE;
 }
 
@@ -4090,6 +4538,7 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeReset(
     resetCoverageCountersLocked();
     sFrames.clear();
     sOverlapBank.clear();
+    sFeatureEdges.clear();
     sFocalScale = 1.f;
     distK1Prior = distK1;
     sFrameIndex = 0;
@@ -4120,6 +4569,7 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeRelease(
     eqG.clear(); eqG.shrink_to_fit();
     eqB.clear(); eqB.shrink_to_fit();
     eqWeight.clear(); eqWeight.shrink_to_fit();
+    eqGradMag.clear(); eqGradMag.shrink_to_fit();
     eqW = 0; eqH = 0;
     LOGI("Sphere released");
 }

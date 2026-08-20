@@ -4,6 +4,7 @@ import ab.inque.robotics.math.QuaternionMath
 
 
 import android.content.Context
+import android.os.Build
 
 /**
  * Persistent camera–IMU extrinsic offset (quaternion [x,y,z,w]).
@@ -11,7 +12,13 @@ import android.content.Context
  */
 class SphereExtrinsicCalibration(context: Context) {
 
-    private val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+  /** Device-protected storage so calibration is readable before the user unlocks CE storage. */
+    private val prefs = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+        context.createDeviceProtectedStorageContext()
+            .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    } else {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+    }
 
     fun getOffsetQuaternion(): FloatArray = floatArrayOf(
         prefs.getFloat(KEY_QX, 0f),

@@ -85,6 +85,10 @@ class SphereStitchWorker(
         }
         runCaptureRefine()
     }
+    /** When false, [schedulePreFinishDrain] is ignored (sweep-fast replay on constrained devices). */
+    @Volatile
+    var preFinishDrainEnabled: Boolean = true
+
     private val preFinishRunnable = Runnable { runPreFinishSlice() }
 
     @Volatile
@@ -141,7 +145,12 @@ class SphereStitchWorker(
     private fun isRefinementGenerationCurrent(generation: Int): Boolean =
         generation == refinementGeneration.get()
 
-    fun submit(bitmap: Bitmap, quaternion: FloatArray, photoMode: Boolean = false) {
+    fun submit(
+        bitmap: Bitmap,
+        quaternion: FloatArray,
+        photoMode: Boolean = false,
+        overlapGateOverride: Float? = null
+    ) {
         val copy = copyToArgb8888(bitmap)
         if (!inFlight.compareAndSet(false, true)) {
             synchronized(this) {
@@ -153,15 +162,21 @@ class SphereStitchWorker(
             pendingDrops.incrementAndGet()
             return
         }
-        runStitch(copy, quaternion, photoMode)
+        runStitch(copy, quaternion, photoMode, overlapGateOverride)
     }
 
-    private fun runStitch(bitmap: Bitmap, quaternion: FloatArray, photoMode: Boolean = false) {
+    private fun runStitch(
+        bitmap: Bitmap,
+        quaternion: FloatArray,
+        photoMode: Boolean = false,
+        overlapGateOverride: Float? = null
+    ) {
         safeExecute(executor) {
             val start = SystemClock.elapsedRealtime()
             val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
             val nearness = motionDepthEstimator?.invoke(bitmap)
-            val status = operations.addFrameFast(bitmap, quaternion, overlapGate, nearness)
+            val gate = overlapGateOverride ?: overlapGate
+            val status = operations.addFrameFast(bitmap, quaternion, gate, nearness)
             val accepted = status == STITCH_ACCEPTED
             val lowOverlap = status == STITCH_LOW_OVERLAP
             val coverage = operations.getCoverage()
@@ -238,6 +253,7 @@ class SphereStitchWorker(
 
     /** After DONE, drain remaining pre-finish slices and refresh the preview (non-blocking). */
     fun schedulePreFinishDrain(delayMs: Long = 0L) {
+        if (!preFinishDrainEnabled) return
         schedulePreFinish(delayMs)
     }
 
@@ -301,6 +317,7 @@ class SphereStitchWorker(
      * while capture stays idle (front-loads heavy work before DONE).
      */
     private fun runPreFinishSlice() {
+        if (!preFinishDrainEnabled) return
         val generation = refinementGeneration.get()
         safeExecute(preFinishExecutor) {
             if (!isRefinementGenerationCurrent(generation)) return@safeExecute
@@ -509,6 +526,44 @@ class SphereStitchWorker(
                     )
                     mainHandler.post { onFinishBackgroundPolish?.invoke() }
                 }
+            }
+        }
+    }
+
+    /**
+     * Light DONE export for IMU sweep-fast: capture refine + global/converge finish on
+     * degraded IMU; no background polish or long pre-finish drain.
+     * [onComplete] is invoked on the main thread.
+     */
+    fun runSweepFastExport(
+        eqW: Int,
+        eqH: Int,
+        imuDegradeDeg: Float,
+        onComplete: (SphereFinishResult) -> Unit
+    ) {
+        mainHandler.removeCallbacks(refineRunnable)
+        mainHandler.removeCallbacks(preFinishRunnable)
+        cancelIntrinsicRefine()
+        val finishGeneration = refinementGeneration.get()
+        runWhenStitchIdle {
+            safeExecute(refineExecutor) {
+                if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                val start = SystemClock.elapsedRealtime()
+                val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
+                SphereProductionStitchPipeline.runSweepFastFinishExport(
+                    operations = operations,
+                    exportW = eqW,
+                    exportH = eqH,
+                    imuDegradeDeg = imuDegradeDeg
+                )
+                if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                val equirect = operations.getEquirectBitmap(eqW, eqH)
+                val result = SphereFinishResult(
+                    equirect = equirect,
+                    durationMs = SystemClock.elapsedRealtime() - start,
+                    ranOnMainThread = ranOnMain
+                )
+                mainHandler.post { onComplete(result) }
             }
         }
     }

@@ -1,0 +1,143 @@
+{
+  "sourceEquirect": "img_eq4096_eq1024.jpg",
+  "referenceEquirect": "img_eq4096_eq1024.jpg",
+  "eqW": 1024,
+  "eqH": 512,
+  "refW": 1024,
+  "refH": 512,
+  "bandY0": 0,
+  "fov": 90.0,
+  "vfov": 90.0,
+  "elevation": 0.0,
+  "refinePasses": 3,
+  "refineSeams": "light",
+  "eqScale": 1,
+  "fullSphere": true,
+  "compareFullEquirect": true,
+  "imuDegradeDeg": 16.0,
+  "imuDegradeSeed": 42,
+  "runCaptureRefinement": false,
+  "useFastPath": true,
+  "overlapGate": 0.1,
+  "fastE2eTest": false,
+  "productionReplay": true,
+  "skipPlanarRoundtrip": false,
+  "useProductionWorker": false,
+  "exportEqW": null,
+  "exportEqH": null,
+  "sweepFast": true,
+  "frames": [
+    {
+      "file": "planar_img_eq4096_00_az000_elp0.jpg",
+      "azimuth": 0.0,
+      "elevation": 0.0,
+      "roll": 0.0,
+      "index": 0
+    },
+    {
+      "file": "planar_img_eq4096_01_az060_elp0.jpg",
+      "azimuth": 60.0,
+      "elevation": 0.0,
+      "roll": 0.0,
+      "index": 1
+    },
+    {
+      "file": "planar_img_eq4096_02_az120_elp0.jpg",
+      "azimuth": 120.0,
+      "elevation": 0.0,
+      "roll": 0.0,
+      "index": 2
+    },
+    {
+      "file": "planar_img_eq4096_03_az180_elp0.jpg",
+      "azimuth": 180.0,
+      "elevation": 0.0,
+      "roll": 0.0,
+      "index": 3
+    },
+    {
+      "file": "planar_img_eq4096_04_az240_elp0.jpg",
+      "azimuth": 240.0,
+      "elevation": 0.0,
+      "roll": 0.0,
+      "index": 4
+    },
+    {
+      "file": "planar_img_eq4096_05_az300_elp0.jpg",
+      "azimuth": 300.0,
+      "elevation": 0.0,
+      "roll": 0.0,
+      "index": 5
+    },
+    {
+      "file": "planar_img_eq4096_06_az045_elp45.jpg",
+      "azimuth": 45.0,
+      "elevation": 45.0,
+      "roll": 0.0,
+      "index": 6
+    },
+    {
+      "file": "planar_img_eq4096_07_az135_elp45.jpg",
+      "azimuth": 135.0,
+      "elevation": 45.0,
+      "roll": 0.0,
+      "index": 7
+    },
+    {
+      "file": "planar_img_eq4096_08_az225_elp45.jpg",
+      "azimuth": 225.0,
+      "elevation": 45.0,
+      "roll": 0.0,
+      "index": 8
+    },
+    {
+      "file": "planar_img_eq4096_09_az315_elp45.jpg",
+      "azimuth": 315.0,
+      "elevation": 45.0,
+      "roll": 0.0,
+      "index": 9
+    },
+    {
+      "file": "planar_img_eq4096_10_az000_elp90.jpg",
+      "azimuth": 0.0,
+      "elevation": 90.0,
+      "roll": 0.0,
+      "index": 10
+    },
+    {
+      "file": "planar_img_eq4096_11_az045_elm45.jpg",
+      "azimuth": 45.0,
+      "elevation": -45.0,
+      "roll": 0.0,
+      "index": 11
+    },
+    {
+      "file": "planar_img_eq4096_12_az135_elm45.jpg",
+      "azimuth": 135.0,
+      "elevation": -45.0,
+      "roll": 0.0,
+      "index": 12
+    },
+    {
+      "file": "planar_img_eq4096_13_az225_elm45.jpg",
+      "azimuth": 225.0,
+      "elevation": -45.0,
+      "roll": 0.0,
+      "index": 13
+    },
+    {
+      "file": "planar_img_eq4096_14_az315_elm45.jpg",
+      "azimuth": 315.0,
+      "elevation": -45.0,
+      "roll": 0.0,
+      "index": 14
+    },
+    {
+      "file": "planar_img_eq4096_15_az000_elm90.jpg",
+      "azimuth": 0.0,
+      "elevation": -90.0,
+      "roll": 0.0,
+      "index": 15
+    }
+  ]
+}

@@ -35,6 +35,16 @@ class SphereProductionStitchPipelineTest {
             return true
         }
 
+        override fun rebuildExportNearestCenter(): Boolean {
+            steps.add("nearestCenter")
+            return true
+        }
+
+        override fun resetPosesToImu(): Boolean {
+            steps.add("resetPosesToImu")
+            return true
+        }
+
         override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean {
             steps.add("prepareExport")
             return true
@@ -75,5 +85,28 @@ class SphereProductionStitchPipelineTest {
         assert(ops.steps.contains("prepareExport"))
         assert(ops.steps.contains("seamFull"))
         assert(ops.steps.count { it == "rebuildFullAlign" } >= 2)
+    }
+
+    @Test
+    fun runSweepFastFinishExport_truthUsesNearestCenter() {
+        val ops = RecordingOps()
+        SphereProductionStitchPipeline.runSweepFastFinishExport(ops, 1024, 512, imuDegradeDeg = 0f)
+        assert(ops.fastFinish)
+        assertEquals(0, ops.globalPasses)
+        assertEquals(listOf("resetPosesToImu", "prepareExport"), ops.steps.takeLast(2))
+    }
+
+    @Test
+    fun runSweepFastFinishExport_degradedImuResetsPosesThenGlobalGraph() {
+        val ops = RecordingOps()
+        SphereProductionStitchPipeline.runSweepFastFinishExport(ops, 1024, 512, imuDegradeDeg = 2f)
+        assert(ops.fastFinish)
+        assertEquals(0, ops.globalPasses)
+        assert(ops.steps.contains("resetPosesToImu"))
+        assert(ops.steps.contains("fastFinishOff"))
+        assert(ops.steps.contains("global"))
+        assert(!ops.steps.contains("rebuildFullAlign"))
+        assert(ops.steps.contains("prepareExport"))
+        assert(!ops.steps.contains("seamLight"))
     }
 }

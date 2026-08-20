@@ -59,4 +59,24 @@ object SphereProductionStitchPipeline {
         operations.prepareExportEquirect(exportW, exportH)
         operations.refineSeams(light = !SphereRefinePolicy.useFullSeamsOnExport())
     }
+
+    /**
+     * IMU sweep-fast: reset to IMU seeds, global graph, nearest-view export (no per-frame drift).
+     */
+    fun runSweepFastFinishExport(
+        operations: SphereStitchOperations,
+        exportW: Int,
+        exportH: Int,
+        imuDegradeDeg: Float,
+    ) {
+        operations.setFastFinishRefine(true)
+        operations.setGlobalRefinePasses(0)
+        operations.resetPosesToImu()
+        if (imuDegradeDeg > 0f) {
+            configureForCaptureRefine(operations)
+            operations.refineGlobalPose()
+        }
+        operations.setFastFinishRefine(true)
+        operations.prepareExportEquirect(exportW, exportH)
+    }
 }

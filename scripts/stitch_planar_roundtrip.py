@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
@@ -67,6 +68,27 @@ def asset_dir(root: Path) -> Path:
 def output_dir(root: Path, subdir: str | None = None) -> Path:
     base = root / "scripts" / "images" / "roundtrip_output"
     return base / subdir if subdir else base
+
+
+def replot_imu_sweep_summary() -> None:
+    """Refresh imu_degrade_sweep_summary.png/json from per-level metrics.json folders."""
+    sweep_script = _SCRIPT_DIR / "run_imu_degrade_sweep.py"
+    if not sweep_script.is_file():
+        return
+    levels = [0, 2, 4, 8, 16]
+    print("Refreshing IMU sweep summary plot...")
+    subprocess.run(
+        [
+            sys.executable,
+            str(sweep_script),
+            "--plot-only",
+            "--imu-levels",
+            *[str(x) for x in levels],
+            "--sweep-fast",
+        ],
+        cwd=repo_root(),
+        check=False,
+    )
 
 
 def load_extract_manifest(images_dir: Path, source_stem: str) -> dict | None:
@@ -178,6 +200,7 @@ def build_manifest(
     use_production_worker: bool = False,
     export_eq_w: int | None = None,
     export_eq_h: int | None = None,
+    sweep_fast: bool = False,
 ) -> dict:
     from PIL import Image
 
@@ -219,6 +242,7 @@ def build_manifest(
         "useProductionWorker": use_production_worker,
         "exportEqW": export_eq_w,
         "exportEqH": export_eq_h,
+        "sweepFast": sweep_fast,
         "frames": [
             {
                 "file": fr["file"],
@@ -455,6 +479,7 @@ def sync_assets(
     heading_range: float = 15.0,
     elevation_range: float = 8.0,
     layout_seed: int = 42,
+    sweep_fast: bool = False,
 ) -> tuple[Path, Path | None]:
     source_path = images_dir / source_name
     if not source_path.is_file():
@@ -550,10 +575,22 @@ def sync_assets(
     use_production_worker = (
         production_replay and not fast_e2e_test and not direct_finish_replay
     )
-    if use_production_worker:
-        skip_planar = True
-    export_w = PRODUCTION_EXPORT_W if use_production_worker else None
-    export_h = PRODUCTION_EXPORT_H if use_production_worker else None
+    # Sweep-fast: direct seed ingest (no worker G1 drift) + global graph export.
+    if sweep_fast:
+        use_production_worker = False
+    # Keep planar roundtrip enabled for production worker (primary alignment metric).
+    # Sweep-fast degraded: skip G1-fast ingest (overlapGate=0); export chain+global solves poses.
+    effective_overlap_gate = overlap_gate if imu_degrade_deg > 0 else 0.0
+    if use_production_worker and sweep_fast and imu_degrade_deg > 0:
+        effective_overlap_gate = 0.0
+    if use_production_worker and sweep_fast:
+        from PIL import Image
+
+        with Image.open(work_source) as im:
+            export_w, export_h = im.size
+    else:
+        export_w = PRODUCTION_EXPORT_W if use_production_worker else None
+        export_h = PRODUCTION_EXPORT_H if use_production_worker else None
     manifest = build_manifest(
         work_source,
         reference_path,
@@ -570,22 +607,25 @@ def sync_assets(
         imu_degrade_seed=imu_degrade_seed,
         run_capture_refinement=run_capture,
         use_fast_path=use_fast,
-        overlap_gate=overlap_gate,
+        overlap_gate=effective_overlap_gate,
         fast_e2e_test=fast_e2e_test,
         production_replay=production_replay,
         skip_planar_roundtrip=skip_planar,
         use_production_worker=use_production_worker,
         export_eq_w=export_w,
         export_eq_h=export_h,
+        sweep_fast=sweep_fast,
     )
     (out_asset_dir / "manifest.json").write_text(
         json.dumps(manifest, indent=2), encoding="utf-8"
     )
     ref_note = reference_path.name if reference_path else "full equirect"
+    fast_note = " sweepFast=True" if sweep_fast else ""
     print(
         f"Synced {len(frames)} planars + {work_source.name} + {ref_note} "
         f"(eqScale={eq_scale}, fullSphere={full_sphere}, imuDegrade={imu_degrade_deg}°, "
-        f"production={production_replay}, worker={use_production_worker}, fastE2e={fast_e2e_test}) "
+        f"production={production_replay}, worker={use_production_worker}, fastE2e={fast_e2e_test}"
+        f"{fast_note}) "
         f"-> {out_asset_dir}"
     )
     return work_source, reference_path
@@ -593,6 +633,34 @@ def sync_assets(
 
 def gradle_cmd(root: Path) -> list[str]:
     return [str(root / ("gradlew.bat" if sys.platform == "win32" else "gradlew"))]
+
+
+def acquire_planar_replay_lock(root: Path, timeout_s: float = 7200.0) -> object:
+    """Exclusive lock so concurrent sweeps cannot overwrite planar_replay/manifest.json."""
+    lock_path = root / ".planar_replay_sync.lock"
+    lock_file = open(lock_path, "w")
+    lock_file.write("locked\n")
+    lock_file.flush()
+    start = time.monotonic()
+    while True:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return lock_file
+        except OSError:
+            if time.monotonic() - start > timeout_s:
+                raise SystemExit(
+                    "Another planar replay / IMU sweep is running "
+                    f"(lock: {lock_path}). Stop it before starting a new run."
+                )
+            print(f"Waiting for planar replay lock ({lock_path.name})...")
+            time.sleep(3)
 
 
 def run_instrumented_test(root: Path, device: str | None, no_build: bool) -> int:
@@ -604,16 +672,19 @@ def run_instrumented_test(root: Path, device: str | None, no_build: bool) -> int
     if not no_build:
         for task in (
             [":app:assembleDebug", ":app:assembleDebugAndroidTest"],
+            [":app:mergeDebugAndroidTestAssets"],
             [":app:installDebug", ":app:installDebugAndroidTest"],
         ):
             print("Running:", " ".join(gw + task))
             if subprocess.call(gw + task + ["--no-daemon"], cwd=root, env=env) != 0:
                 return 1
     else:
-        # Keep APKs installed so pm grant + run-as pull work after the test.
-        for task in (":app:installDebug", ":app:installDebugAndroidTest"):
-            print("Running:", " ".join(gw + [task]))
-            if subprocess.call(gw + [task, "--no-daemon"], cwd=root, env=env) != 0:
+        for task in (
+            [":app:mergeDebugAndroidTestAssets", ":app:packageDebugAndroidTest"],
+            [":app:installDebug", ":app:installDebugAndroidTest"],
+        ):
+            print("Running:", " ".join(gw + task))
+            if subprocess.call(gw + task + ["--no-daemon"], cwd=root, env=env) != 0:
                 return 1
     grant_storage(device)
     clear_device_outputs(device)
@@ -641,7 +712,12 @@ def run_instrumented_test(root: Path, device: str | None, no_build: bool) -> int
     if proc.returncode != 0:
         return proc.returncode
     out = proc.stdout or ""
-    if "INSTRUMENTATION_STATUS: Error" in out or "FAILURES!!!" in out:
+    if (
+        "Process crashed" in out
+        or "INSTRUMENTATION_STATUS: Error" in out
+        or "FAILURES!!!" in out
+        or "TestTimedOutException" in out
+    ):
         return 1
     if "INSTRUMENTATION_STATUS: code=-1" in out and "OK (" not in out:
         return 1
@@ -670,6 +746,16 @@ def clear_device_outputs(device: str | None) -> None:
     for remote_dir in (DEVICE_DOWNLOAD, PUBLIC_OUTPUT):
         cmd = adb_base(device) + ["shell", "rm", "-rf", remote_dir]
         subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    cmd = adb_base(device) + [
+        "shell",
+        "run-as",
+        PACKAGE,
+        "rm",
+        "-f",
+        "files/stitched_equirect.jpg",
+        "files/reference_equirect.jpg",
+    ]
+    subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
 def pull_via_run_as(device: str | None, remote_name: str, dest: Path) -> bool:
@@ -693,12 +779,71 @@ def pull_via_run_as(device: str | None, remote_name: str, dest: Path) -> bool:
         return False
 
 
+def pull_json_artifact(
+    device: str | None,
+    remote_name: str,
+    dest: Path,
+) -> bool:
+    """Pull a small JSON artifact from device download or run-as files dir."""
+    if dest.is_file():
+        dest.unlink()
+    remotes = [
+        f"{DEVICE_DOWNLOAD}/{remote_name}",
+        f"/storage/emulated/0/Android/data/{PACKAGE}/files/{remote_name}",
+        f"/sdcard/Android/data/{PACKAGE}/files/{remote_name}",
+        f"{PUBLIC_OUTPUT}/{remote_name}",
+    ]
+    for remote in remotes:
+        cmd = adb_base(device) + ["pull", remote, str(dest)]
+        if subprocess.call(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0:
+            if dest.stat().st_size > 10:
+                print(f"Pulled {remote_name} from {remote}")
+                return True
+    if pull_via_run_as(device, remote_name, dest):
+        print(f"Pulled {remote_name} via adb run-as")
+        return True
+    return False
+
+
+def merge_device_replay_metrics(out: Path, metrics: dict, expected_imu_deg: float | None = None) -> dict:
+    replay_path = out / "replay_metrics.json"
+    if not replay_path.is_file():
+        return metrics
+    try:
+        device_metrics = json.loads(replay_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return metrics
+    if expected_imu_deg is not None:
+        replay_imu = device_metrics.get("imu_degrade_deg")
+        if replay_imu is not None and float(replay_imu) != float(expected_imu_deg):
+            raise SystemExit(
+                f"Stale device output: replay_metrics imu_degrade_deg={replay_imu} "
+                f"!= expected {expected_imu_deg}. Re-run after clearing device exports."
+            )
+    merged = dict(metrics)
+    merged["device_replay"] = device_metrics
+    for key in (
+        "planar_min_psnr_db",
+        "planar_mean_psnr_db",
+        "planar_min_correlation",
+        "planar_mean_correlation",
+        "planar_count",
+        "equirect_correlation_mapped",
+        "equirect_correlation_raw",
+    ):
+        if key in device_metrics:
+            merged[key] = device_metrics[key]
+    (out / "metrics.json").write_text(json.dumps(merged, indent=2), encoding="utf-8")
+    return merged
+
+
 def pull_outputs(
     root: Path,
     device: str | None,
     reference_band: Path | None,
     out_subdir: str | None,
     work_source: Path | None = None,
+    expected_imu_deg: float | None = None,
 ) -> Path:
     out = output_dir(root, out_subdir)
     if out.exists():
@@ -754,6 +899,22 @@ def pull_outputs(
             f"Could not pull {stitched_name}. Check {PUBLIC_OUTPUT}/ on device."
         )
 
+    pull_json_artifact(device, "replay_metrics.json", out / "replay_metrics.json")
+    if expected_imu_deg is not None:
+        replay_path = out / "replay_metrics.json"
+        if replay_path.is_file():
+            try:
+                replay_imu = json.loads(replay_path.read_text(encoding="utf-8")).get(
+                    "imu_degrade_deg"
+                )
+                if replay_imu is not None and float(replay_imu) != float(expected_imu_deg):
+                    raise SystemExit(
+                        f"Stale device output: replay_metrics imu_degrade_deg={replay_imu} "
+                        f"!= expected {expected_imu_deg}. Clear device exports and re-run."
+                    )
+            except json.JSONDecodeError:
+                pass
+
     return out
 
 
@@ -764,6 +925,7 @@ def run_local_compare(
     vfov: float,
     *,
     full_equirect: bool = False,
+    expected_imu_deg: float | None = None,
 ) -> dict:
     compare_py = root / "scripts" / "compare_equirect.py"
     ref = out / "reference_equirect.jpg"
@@ -782,7 +944,8 @@ def run_local_compare(
         cmd.append("--full")
     print("Running:", " ".join(cmd))
     subprocess.check_call(cmd)
-    return json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    metrics = json.loads((out / "metrics.json").read_text(encoding="utf-8"))
+    return merge_device_replay_metrics(out, metrics, expected_imu_deg=expected_imu_deg)
 
 
 def parse_args() -> argparse.Namespace:
@@ -914,6 +1077,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     p.add_argument(
+        "--sweep-fast",
+        action="store_true",
+        help=(
+            "IMU sweep mode: 1024 export, skip long pre-finish/polish waits "
+            "(metrics only; still uses production worker + G1-fast when imu>0)"
+        ),
+    )
+    p.add_argument(
         "--random-roll",
         action="store_true",
         default=True,
@@ -985,6 +1156,10 @@ def main() -> None:
     if max_eq_width == 0:
         max_eq_width = None
     fast_e2e = args.fast_e2e
+    if args.sweep_fast:
+        args.random_roll = False
+        args.random_heading = False
+        args.random_elevation = False
     if args.slow_e2e:
         if max_eq_width is None or max_eq_width < 4096:
             max_eq_width = 4096
@@ -995,39 +1170,48 @@ def main() -> None:
         max_eq_width = 1024
     max_frames = args.max_frames
     if out_subdir is None and args.imu_degrade_deg > 0:
-        suffix = "4096" if args.slow_e2e else "prod"
-        out_subdir = f"{Path(args.source).stem}_imu{int(args.imu_degrade_deg)}_{suffix}"
+        if args.sweep_fast:
+            deg_label = int(args.imu_degrade_deg) if args.imu_degrade_deg == int(args.imu_degrade_deg) else args.imu_degrade_deg
+            out_subdir = f"{Path(args.source).stem}_imu{deg_label}deg"
+        else:
+            suffix = "4096" if args.slow_e2e else "prod"
+            out_subdir = f"{Path(args.source).stem}_imu{int(args.imu_degrade_deg)}_{suffix}"
     elif out_subdir is None and args.source.startswith("img"):
         out_subdir = Path(args.source).stem + "_fullsphere"
 
-    work_source, reference = sync_assets(
-        images_dir,
-        args.source,
-        asset_dir(root),
-        args.fov,
-        vfov,
-        args.elevation,
-        eq_scale=eq_scale,
-        planar_size=planar_size,
-        planar_count=args.planar_count,
-        max_frames=max_frames,
-        refine_passes=args.refine_passes,
-        refine_seams=args.refine_seams,
-        max_eq_width=max_eq_width,
-        imu_degrade_deg=args.imu_degrade_deg,
-        imu_degrade_seed=args.imu_degrade_seed,
-        overlap_gate=args.overlap_gate,
-        fast_e2e_test=fast_e2e,
-        run_capture_refinement=args.run_capture_refine,
-        reextract=args.reextract,
-        direct_finish_replay=args.direct_finish_replay,
-        random_roll=args.random_roll,
-        random_heading=args.random_heading,
-        random_elevation=args.random_elevation,
-        heading_range=args.heading_range,
-        elevation_range=args.elevation_range,
-        layout_seed=args.layout_seed,
-    )
+    lock = acquire_planar_replay_lock(root)
+    try:
+        work_source, reference = sync_assets(
+            images_dir,
+            args.source,
+            asset_dir(root),
+            args.fov,
+            vfov,
+            args.elevation,
+            eq_scale=eq_scale,
+            planar_size=planar_size,
+            planar_count=args.planar_count,
+            max_frames=max_frames,
+            refine_passes=args.refine_passes,
+            refine_seams=args.refine_seams,
+            max_eq_width=max_eq_width,
+            imu_degrade_deg=args.imu_degrade_deg,
+            imu_degrade_seed=args.imu_degrade_seed,
+            overlap_gate=args.overlap_gate,
+            fast_e2e_test=fast_e2e,
+            run_capture_refinement=args.run_capture_refine,
+            reextract=args.reextract,
+            direct_finish_replay=args.direct_finish_replay,
+            random_roll=args.random_roll,
+            random_heading=args.random_heading,
+            random_elevation=args.random_elevation,
+            heading_range=args.heading_range,
+            elevation_range=args.elevation_range,
+            layout_seed=args.layout_seed,
+            sweep_fast=args.sweep_fast,
+        )
+    finally:
+        lock.close()
 
     extract_manifest = load_extract_manifest(images_dir, Path(args.source).stem)
     full_sphere = bool(extract_manifest and extract_manifest.get("full_sphere"))
@@ -1040,16 +1224,35 @@ def main() -> None:
         test_exit_code = run_instrumented_test(root, args.device, args.no_build)
         if test_exit_code != 0:
             print(
-                f"Instrumented test exited with code {test_exit_code} "
-                "(pulling device output if available)"
+                f"Instrumented test failed (code {test_exit_code}); "
+                "pulling outputs anyway for metrics (stitch may still be on device)"
             )
 
-    out = pull_outputs(
-        root, args.device, reference, out_subdir, work_source=work_source
-    )
+    try:
+        out = pull_outputs(
+            root,
+            args.device,
+            reference,
+            out_subdir,
+            work_source=work_source,
+            expected_imu_deg=args.imu_degrade_deg,
+        )
+    except SystemExit as e:
+        if test_exit_code != 0:
+            raise SystemExit(test_exit_code)
+        raise e
+
     metrics = run_local_compare(
-        root, out, args.elevation, vfov, full_equirect=full_sphere
+        root,
+        out,
+        args.elevation,
+        vfov,
+        full_equirect=full_sphere,
+        expected_imu_deg=args.imu_degrade_deg,
     )
+
+    if test_exit_code != 0:
+        raise SystemExit(test_exit_code)
 
     print()
     print("=" * 60)
@@ -1067,10 +1270,16 @@ def main() -> None:
     print(f"  Diff:       {out / 'diff.jpg'}")
     print(f"  Sharpness:  {out / 'sharpness.jpg'}")
     print(
-        f"  Metrics:    correlation={metrics['correlation']}  PSNR={metrics['psnr_db']} dB  "
+        f"  Metrics:    correlation={metrics['correlation']} (mapped={metrics.get('correlation_mapped', 'n/a')})  "
+        f"PSNR={metrics['psnr_db']} dB  "
+        f"planarMeanPSNR={metrics.get('planar_mean_psnr_db', 'n/a')}  "
+        f"planarMinPSNR={metrics.get('planar_min_psnr_db', 'n/a')}  "
         f"sharpRet={metrics.get('sharpness_retention', 'n/a')}"
     )
     print("=" * 60)
+
+    if args.sweep_fast:
+        replot_imu_sweep_summary()
 
     if test_exit_code != 0:
         raise SystemExit(test_exit_code)

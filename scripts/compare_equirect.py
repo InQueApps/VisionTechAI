@@ -30,7 +30,7 @@ def content_mask(rgb: np.ndarray, bg: tuple[int, int, int] = (0x1A, 0x1A, 0x2E))
     return diff > 12.0
 
 
-def correlation(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
+def correlation_rgb(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
     av = a[mask].reshape(-1, 3)
     bv = b[mask].reshape(-1, 3)
     if av.size == 0:
@@ -40,6 +40,24 @@ def correlation(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
     num = (am * bm).sum()
     den = math.sqrt((am * am).sum() * (bm * bm).sum())
     return float(num / den) if den > 1e-9 else 0.0
+
+
+def luminance_correlation(a: np.ndarray, b: np.ndarray, mask: np.ndarray) -> float:
+    """Match ImageOverlapMetrics.normalizedCorrelation / SpherePlanarReplay JUnit gate."""
+    lum_a = rgb_to_luminance(a)[mask]
+    lum_b = rgb_to_luminance(b)[mask]
+    if lum_a.size < 16:
+        return 0.0
+    mean_a = float(lum_a.mean())
+    mean_b = float(lum_b.mean())
+    da = lum_a - mean_a
+    db = lum_b - mean_b
+    var_a = float((da * da).mean())
+    var_b = float((db * db).mean())
+    if var_a <= 1e-9 or var_b <= 1e-9:
+        return 1.0 if var_a <= 1e-9 and var_b <= 1e-9 else 0.0
+    cov = float((da * db).mean())
+    return cov / math.sqrt(var_a * var_b)
 
 
 def rgb_to_luminance(rgb: np.ndarray) -> np.ndarray:
@@ -225,11 +243,14 @@ def compare(
                 f"Size mismatch: reference {ref.shape[:2]} vs stitched {st.shape[:2]}"
             )
 
-    mask = content_mask(ref) | content_mask(st)
-    corr = correlation(ref, st, mask)
-    psnr_db = psnr(ref, st, mask)
-    ref_sharp = laplacian_variance(ref, mask)
-    st_sharp = laplacian_variance(st, mask)
+    mask_ref = content_mask(ref)
+    mask_st = content_mask(st)
+    mask_both = mask_ref & mask_st
+    corr = luminance_correlation(ref, st, mask_both)
+    corr_rgb = correlation_rgb(ref, st, mask_ref | mask_st)
+    psnr_db = psnr(ref, st, mask_both)
+    ref_sharp = laplacian_variance(ref, mask_both)
+    st_sharp = laplacian_variance(st, mask_both)
     sharp_ret = sharpness_retention(ref_sharp, st_sharp)
 
     st_mask = content_mask(st)
@@ -238,6 +259,19 @@ def compare(
     ghost = ghosting_score(st, ox0, oy0, ow, oh)
 
     h, w, _ = ref.shape
+    hx0, hy0, hw, hh = overlap_band_region(0, 0, w, h, band_height_fraction=0.35)
+    horizon_mask = mask_both[hy0:hy0 + hh, hx0:hx0 + hw]
+    corr_horizon = luminance_correlation(
+        ref[hy0:hy0 + hh, hx0:hx0 + hw],
+        st[hy0:hy0 + hh, hx0:hx0 + hw],
+        horizon_mask,
+    )
+    psnr_horizon = psnr(
+        ref[hy0:hy0 + hh, hx0:hx0 + hw],
+        st[hy0:hy0 + hh, hx0:hx0 + hw],
+        horizon_mask,
+    )
+
     diff = np.abs(ref - st)
     diff_vis = np.clip(diff * 4.0, 0, 255).astype(np.uint8)
 
@@ -264,9 +298,14 @@ def compare(
         "stitched": str(stitched.resolve()),
         "width": w,
         "height": h,
-        "content_pixels": int(mask.sum()),
+        "content_pixels": int(mask_both.sum()),
         "correlation": round(corr, 4),
+        "correlation_mapped": round((corr + 1.0) * 0.5, 4),
+        "correlation_horizon_band": round(corr_horizon, 4),
+        "correlation_horizon_mapped": round((corr_horizon + 1.0) * 0.5, 4),
+        "correlation_rgb_union": round(corr_rgb, 4),
         "psnr_db": round(psnr_db, 2),
+        "psnr_horizon_band_db": round(psnr_horizon, 2),
         "reference_laplacian_var": round(ref_sharp, 2),
         "stitched_laplacian_var": round(st_sharp, 2),
         "sharpness_retention": round(sharp_ret, 4),

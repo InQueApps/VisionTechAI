@@ -27,7 +27,21 @@ def load_metrics(folder: Path) -> dict | None:
     path = folder / "metrics.json"
     if not path.is_file():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    metrics = json.loads(path.read_text(encoding="utf-8"))
+    corr = metrics.get("correlation", -1.0)
+    if corr < -0.5:
+        return None
+    return metrics
+
+
+def metric_or_none(metrics: dict, key: str) -> float | None:
+    val = metrics.get(key)
+    if val is None:
+        return None
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return None
 
 
 def plot_sweep(
@@ -38,27 +52,63 @@ def plot_sweep(
     import matplotlib.pyplot as plt
 
     levels = [r["imu_degrade_deg"] for r in rows]
-    corr = [r["metrics"]["correlation"] for r in rows]
-    psnr = [r["metrics"]["psnr_db"] for r in rows]
-    ghost = [r["metrics"].get("ghost_score", 0.0) for r in rows]
-    sharp = [r["metrics"].get("sharpness_retention", 0.0) for r in rows]
+    metrics_list = [r["metrics"] for r in rows]
+
+    corr_raw = [m["correlation"] for m in metrics_list]
+    corr_mapped = [m.get("correlation_mapped", (c + 1) * 0.5) for m, c in zip(metrics_list, corr_raw)]
+    psnr = [m["psnr_db"] for m in metrics_list]
+    planar_min = [metric_or_none(m, "planar_min_psnr_db") for m in metrics_list]
+    planar_mean = [metric_or_none(m, "planar_mean_psnr_db") for m in metrics_list]
+    sharp = [m.get("sharpness_retention", 0.0) for m in metrics_list]
+    has_planar = any(v is not None for v in planar_min)
 
     fig, axes = plt.subplots(2, 2, figsize=(10, 8), sharex=True)
     fig.suptitle(title, fontsize=13)
 
-    panels = [
-        (axes[0, 0], corr, "Correlation", "#2a6fdb"),
-        (axes[0, 1], psnr, "PSNR (dB)", "#1a8f4a"),
-        (axes[1, 0], ghost, "Ghost score", "#c44a2d"),
-        (axes[1, 1], sharp, "Sharpness retention", "#7a5acd"),
-    ]
-    for ax, values, label, color in panels:
-        ax.plot(levels, values, marker="o", linewidth=2, color=color)
-        ax.set_ylabel(label)
+    ax = axes[0, 0]
+    ax.plot(levels, corr_mapped, marker="o", linewidth=2, color="#2a6fdb", label="mapped")
+    ax.plot(levels, corr_raw, marker="x", linewidth=1, color="#7aa8e8", label="raw")
+    ax.set_ylabel("Equirect correlation")
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[0, 1]
+    ax.plot(levels, psnr, marker="o", linewidth=2, color="#1a8f4a")
+    ax.set_ylabel("Equirect PSNR (dB)")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 0]
+    if has_planar:
+        ax.plot(
+            levels,
+            [v if v is not None else float("nan") for v in planar_mean],
+            marker="o",
+            linewidth=2,
+            color="#c44a2d",
+            label="mean",
+        )
+        ax.plot(
+            levels,
+            [v if v is not None else float("nan") for v in planar_min],
+            marker="x",
+            linewidth=1,
+            color="#e8a07a",
+            label="min",
+        )
+        ax.set_ylabel("Planar roundtrip PSNR (dB)")
+        ax.legend(fontsize=8)
+    else:
+        ax.text(0.5, 0.5, "No planar metrics", ha="center", va="center", transform=ax.transAxes)
+        ax.set_ylabel("Planar PSNR (missing)")
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[1, 1]
+    ax.plot(levels, sharp, marker="o", linewidth=2, color="#7a5acd")
+    ax.set_ylabel("Sharpness retention")
+    ax.grid(True, alpha=0.3)
+
+    for ax in axes.flat:
         ax.set_xlabel("IMU degrade (deg)")
-        ax.grid(True, alpha=0.3)
-        for x, y in zip(levels, values):
-            ax.annotate(f"{y:.3f}", (x, y), textcoords="offset points", xytext=(0, 6), ha="center", fontsize=8)
 
     fig.tight_layout()
     out_png.parent.mkdir(parents=True, exist_ok=True)
@@ -73,6 +123,7 @@ def run_roundtrip(
     out_subdir: str,
     no_build: bool,
     imu_seed: int,
+    sweep_fast: bool,
 ) -> int:
     cmd = [
         sys.executable,
@@ -93,6 +144,8 @@ def run_roundtrip(
         cmd.extend(["--device", device])
     if no_build:
         cmd.append("--no-build")
+    if sweep_fast:
+        cmd.append("--sweep-fast")
 
     print()
     print("=" * 72)
@@ -125,6 +178,11 @@ def main() -> None:
         default=None,
         help="Summary PNG path (default: roundtrip_output/imu_degrade_sweep_summary.png)",
     )
+    p.add_argument(
+        "--sweep-fast",
+        action="store_true",
+        help="Fast sweep: 1024 export, skip long pre-finish/polish; rebuild APK once",
+    )
     args = p.parse_args()
 
     source_stem = Path(args.source).stem
@@ -132,15 +190,17 @@ def main() -> None:
     summary_json = _ROUNDTRIP_ROOT / "imu_degrade_sweep_summary.json"
 
     if not args.plot_only:
-        for deg in args.imu_levels:
+        for i, deg in enumerate(args.imu_levels):
             subdir = subdir_for_level(source_stem, deg)
+            no_build = i > 0
             code = run_roundtrip(
                 args.source,
                 args.device,
                 deg,
                 subdir,
-                no_build=False,
+                no_build=no_build,
                 imu_seed=args.imu_degrade_seed,
+                sweep_fast=args.sweep_fast,
             )
             if code != 0:
                 print(f"Warning: roundtrip at {deg}° exited with code {code} (metrics may still exist)")
@@ -169,7 +229,8 @@ def main() -> None:
     plot_sweep(
         rows,
         out_plot,
-        f"Planar roundtrip vs IMU degrade ({args.source}, production worker)",
+        f"Planar roundtrip vs IMU degrade ({args.source}, "
+        f"{'sweep-fast' if args.sweep_fast else 'production worker'})",
     )
 
     print()
@@ -178,9 +239,14 @@ def main() -> None:
     print("=" * 72)
     for row in rows:
         m = row["metrics"]
+        planar_min = m.get("planar_min_psnr_db", "n/a")
+        planar_mean = m.get("planar_mean_psnr_db", "n/a")
+        corr_mapped = m.get("correlation_mapped", (m["correlation"] + 1) * 0.5)
         print(
-            f"  {row['imu_degrade_deg']:>5.1f}°  corr={m['correlation']:.4f}  "
-            f"PSNR={m['psnr_db']:.2f} dB  ghost={m.get('ghost_score', 'n/a')}  "
+            f"  {row['imu_degrade_deg']:>5.1f}°  "
+            f"eq_corr_raw={m['correlation']:.4f} mapped={corr_mapped:.4f}  "
+            f"PSNR={m['psnr_db']:.2f} dB  "
+            f"planarMin={planar_min}  planarMean={planar_mean}  "
             f"sharpRet={m.get('sharpness_retention', 'n/a')}"
         )
     print(f"  Summary JSON: {summary_json}")

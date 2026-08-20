@@ -157,6 +157,12 @@ object SphereNative {
         return nativeRebuildExportNearestCenter()
     }
 
+    /** Reset refined poses to imuQuat (clears fast-path align drift). */
+    fun resetPosesToImu(): Boolean {
+        if (!loaded) return false
+        return nativeResetPosesToImu()
+    }
+
     fun getEquirectBitmap(eqW: Int = 4096, eqH: Int = 2048): Bitmap? {
         if (!loaded) return null
         val pixels = IntArray(eqW * eqH)
@@ -332,6 +338,7 @@ object SphereNative {
     private external fun nativeRefineStoredPoses(): Boolean
     private external fun nativeRebuildFullAlign(): Boolean
     private external fun nativeRebuildExportNearestCenter(): Boolean
+    private external fun nativeResetPosesToImu(): Boolean
     private external fun nativeGetRectilinear(pixelsOut: IntArray, outW: Int, outH: Int, azimuth: Float, elevation: Float, fov: Float): Boolean
     private external fun nativeLoadEquirect(pixels: IntArray, w: Int, h: Int): Boolean
     private external fun nativeGetCoverage(): Float

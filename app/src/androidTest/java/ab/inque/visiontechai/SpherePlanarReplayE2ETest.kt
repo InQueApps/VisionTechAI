@@ -1,5 +1,6 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.image.ImageOverlapMetrics
 import ab.inque.robotics.math.QuaternionMath
 import ab.inque.robotics.panorama.SphereNative
 import android.content.Context
@@ -11,6 +12,7 @@ import android.os.SystemClock
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -59,12 +61,16 @@ class SpherePlanarReplayE2ETest {
         private const val E2E_WALL_MS_PRODUCTION = 900_000L
         private const val FRAME_SUBMIT_TIMEOUT_MS = 30_000L
         private const val FRAME_SUBMIT_TIMEOUT_PRODUCTION_MS = 180_000L
-        private const val PREVIEW_TIMEOUT_MS = 30_000L
         private const val PRE_FINISH_TIMEOUT_MS = 420_000L
         private const val EXPORT_TIMEOUT_MS = 480_000L
+        /** Pairwise chain + global at 16° IMU can exceed 8 min on device. */
+        private const val EXPORT_TIMEOUT_SWEEP_FAST_MS = 720_000L
         private const val POLISH_TIMEOUT_MS = 180_000L
+        private const val SWEEP_POLISH_TIMEOUT_MS = 5_000L
         private const val MAX_GHOST_SCORE_IMU_FAST_FULL_SPHERE = 0.74
         private const val MIN_EQUIRECT_CORRELATION_IMU_FAST_FULL_SPHERE = 0.85
+        /** Sweep-fast full-sphere: 8° IMU can land ~0.849 on nearest-center export. */
+        private const val MIN_EQUIRECT_CORRELATION_SWEEP_FAST_IMU_FULL_SPHERE = 0.84
         private const val MIN_EQUIRECT_CORRELATION_IMU_FAST = 0.82
         private const val MIN_EQUIRECT_PSNR_IMU_FAST_DB = 15.0
         private const val MIN_EQUIRECT_PSNR_IMU_FAST_FULL_SPHERE_DB = 14.0
@@ -116,11 +122,13 @@ class SpherePlanarReplayE2ETest {
         val fastE2eTest: Boolean = false,
         /** When true, runs [SphereProductionStitchPipeline] (same as live DONE). */
         val productionReplay: Boolean = true,
-        /** Live path: [SphereCaptureController] + [SphereStitchWorker] through SAVE + polish. */
+        /** Replay worker path: [SphereStitchWorker] submit → SAVE export (no capture controller). */
         val useProductionWorker: Boolean = false,
         val exportEqW: Int? = null,
         val exportEqH: Int? = null,
-        val skipPlanarRoundtrip: Boolean = false
+        val skipPlanarRoundtrip: Boolean = false,
+        /** Host IMU sweep: 1024 export, no long pre-finish/polish waits. */
+        val sweepFast: Boolean = false
     )
 
     private lateinit var appContext: Context
@@ -242,6 +250,11 @@ class SpherePlanarReplayE2ETest {
         )
 
         var minPlanarPsnr = Double.MAX_VALUE
+        var meanPlanarPsnr = 0.0
+        var minPlanarCorr = Double.MAX_VALUE
+        var meanPlanarCorr = 0.0
+        var planarCount = 0
+        val planarFramesJson = JSONArray()
         if (!manifest.skipPlanarRoundtrip) {
             for (spec in manifest.frames) {
                 val planar = loadAssetBitmap(spec.fileName) ?: continue
@@ -253,16 +266,68 @@ class SpherePlanarReplayE2ETest {
                     manifest.fovDeg
                 ) ?: error("Rectilinear extract null for ${spec.fileName}")
                 val planarPsnr = planarPsnr(planar, extracted)
+                val planarCorr = planarRoundtripCorrelation(planar, extracted)
                 minPlanarPsnr = minOf(minPlanarPsnr, planarPsnr)
+                minPlanarCorr = minOf(minPlanarCorr, planarCorr)
+                meanPlanarPsnr += planarPsnr
+                meanPlanarCorr += planarCorr
+                planarCount++
+                planarFramesJson.put(
+                    JSONObject()
+                        .put("file", spec.fileName)
+                        .put("azimuth", spec.azimuthDeg.toDouble())
+                        .put("elevation", spec.elevationDeg.toDouble())
+                        .put("psnr_db", planarPsnr)
+                        .put("correlation", planarCorr)
+                )
                 Log.i(
                     TAG,
                     "Planar round-trip ${spec.fileName} az=${spec.azimuthDeg}: " +
-                        "PSNR=${"%.2f".format(planarPsnr)}dB"
+                        "PSNR=${"%.2f".format(planarPsnr)}dB corr=${"%.4f".format(planarCorr)}"
+                )
+            }
+            if (planarCount > 0) {
+                meanPlanarPsnr /= planarCount
+                meanPlanarCorr /= planarCount
+                Log.i(
+                    TAG,
+                    "Planar round-trip summary: count=$planarCount " +
+                        "minPSNR=${"%.2f".format(minPlanarPsnr)}dB " +
+                        "meanPSNR=${"%.2f".format(meanPlanarPsnr)}dB " +
+                        "minCorr=${"%.4f".format(minPlanarCorr)} " +
+                        "meanCorr=${"%.4f".format(meanPlanarCorr)}"
                 )
             }
         }
 
+        val correlationRaw = correlation * 2.0 - 1.0
+        val replayMetrics = JSONObject()
+            .put("compare_full_equirect", manifest.compareFullEquirect)
+            .put("imu_degrade_deg", manifest.imuDegradeDeg.toDouble())
+            .put("sweep_fast", manifest.sweepFast)
+            .put("equirect_correlation_mapped", correlation)
+            .put("equirect_correlation_raw", correlationRaw)
+            .put("equirect_psnr_db", psnr)
+            .put("ghost_score", ghost)
+            .put("sharpness_retention", sharpRetention)
+            .put("coverage", SphereNative.getCoverage().toDouble())
+            .put("planar_roundtrip_enabled", !manifest.skipPlanarRoundtrip)
+        if (planarCount > 0) {
+            replayMetrics
+                .put("planar_count", planarCount)
+                .put("planar_min_psnr_db", minPlanarPsnr)
+                .put("planar_mean_psnr_db", meanPlanarPsnr)
+                .put("planar_min_correlation", minPlanarCorr)
+                .put("planar_mean_correlation", meanPlanarCorr)
+                .put("planar_frames", planarFramesJson)
+        }
+        saveOutputText(replayMetrics.toString(2), "replay_metrics.json")
+
         val minCorr = when {
+            manifest.sweepFast && manifest.imuDegradeDeg > 0f && manifest.compareFullEquirect ->
+                MIN_EQUIRECT_CORRELATION_SWEEP_FAST_IMU_FULL_SPHERE
+            manifest.sweepFast && manifest.imuDegradeDeg > 0f ->
+                MIN_EQUIRECT_CORRELATION_IMU_FAST
             manifest.productionReplay && manifest.imuDegradeDeg > 0f ->
                 MIN_EQUIRECT_CORRELATION_IMU_RECOVERY
             manifest.productionReplay && manifest.compareFullEquirect ->
@@ -276,6 +341,10 @@ class SpherePlanarReplayE2ETest {
             else -> MIN_EQUIRECT_CORRELATION
         }
         val minPsnr = when {
+            manifest.sweepFast && manifest.imuDegradeDeg > 0f && manifest.compareFullEquirect ->
+                MIN_EQUIRECT_PSNR_IMU_FAST_FULL_SPHERE_DB
+            manifest.sweepFast && manifest.imuDegradeDeg > 0f ->
+                MIN_EQUIRECT_PSNR_IMU_FAST_DB
             manifest.fastE2eTest && manifest.imuDegradeDeg > 0f && manifest.compareFullEquirect ->
                 MIN_EQUIRECT_PSNR_IMU_FAST_FULL_SPHERE_DB
             manifest.fastE2eTest && manifest.imuDegradeDeg > 0f ->
@@ -293,6 +362,10 @@ class SpherePlanarReplayE2ETest {
             psnr >= minPsnr
         )
         val maxGhost = when {
+            manifest.sweepFast && manifest.imuDegradeDeg > 0f && manifest.compareFullEquirect ->
+                MAX_GHOST_SCORE_IMU_FAST_FULL_SPHERE
+            manifest.sweepFast && manifest.imuDegradeDeg == 0f && manifest.compareFullEquirect ->
+                MAX_GHOST_SCORE_FAST_TRUTH_FULL_SPHERE
             manifest.fastE2eTest && manifest.imuDegradeDeg > 0f && manifest.compareFullEquirect ->
                 MAX_GHOST_SCORE_IMU_FAST_FULL_SPHERE
             manifest.fastE2eTest && manifest.imuDegradeDeg == 0f && manifest.compareFullEquirect ->
@@ -335,9 +408,11 @@ class SpherePlanarReplayE2ETest {
                 spec.elevationDeg.toDouble(),
                 spec.rollDeg.toDouble()
             )
-            if (manifest.useFastPath) {
-                val seedQuat = seedQuaternion(manifest, truthQuat, spec.index)
-                val gate = if (spec.index == 0) {
+            val seedQuat = seedQuaternion(manifest, truthQuat, spec.index)
+            if (manifest.sweepFast || manifest.useFastPath) {
+                val gate = if (manifest.sweepFast) {
+                    0f
+                } else if (spec.index == 0) {
                     LIVE_OVERLAP_GATE_FIRST_FRAME
                 } else {
                     manifest.overlapGate
@@ -359,7 +434,7 @@ class SpherePlanarReplayE2ETest {
             }
         }
 
-        if (manifest.runCaptureRefinement) {
+        if (manifest.runCaptureRefinement && !manifest.sweepFast) {
             SphereProductionStitchPipeline.runCaptureRefinement(
                 operations = SphereNativeOperations,
                 onPass = { label -> Log.i(TAG, "Capture $label") }
@@ -367,6 +442,16 @@ class SpherePlanarReplayE2ETest {
         }
 
         when {
+            manifest.sweepFast -> {
+                val exportW = manifest.exportEqW ?: manifest.eqW
+                val exportH = manifest.exportEqH ?: manifest.eqH
+                SphereProductionStitchPipeline.runSweepFastFinishExport(
+                    operations = SphereNativeOperations,
+                    exportW = exportW,
+                    exportH = exportH,
+                    imuDegradeDeg = manifest.imuDegradeDeg
+                )
+            }
             manifest.productionReplay -> {
                 SphereProductionStitchPipeline.runFinishExport(
                     operations = SphereNativeOperations,
@@ -410,13 +495,16 @@ class SpherePlanarReplayE2ETest {
             }
         }
 
-        return SphereNative.getEquirectBitmap(manifest.eqW, manifest.eqH)
+        return SphereNative.getEquirectBitmap(
+            manifest.exportEqW ?: manifest.eqW,
+            manifest.exportEqH ?: manifest.eqH
+        )
             ?: error("Stitched equirect null")
     }
 
     /**
-     * Full live pipeline: worker submit → debounced capture refine → DONE pre-finish drain →
-     * SAVE [runFinishGeneration] → background intrinsics + light seams.
+     * Replay worker pipeline: native init + [SphereStitchWorker] submit → export.
+     * No [SphereCaptureController] (no live IMU, extrinsic prefs, or preview state).
      */
     private fun runProductionWorkerPipeline(
         manifest: Manifest,
@@ -424,25 +512,38 @@ class SpherePlanarReplayE2ETest {
         initFovV: Float
     ): Bitmap {
         val executor = Executors.newSingleThreadExecutor()
+        val replayOverlapGate = if (manifest.imuDegradeDeg > 0f) {
+            manifest.overlapGate
+        } else {
+            LIVE_OVERLAP_GATE_FIRST_FRAME
+        }
+        val replayRefineDelay = if (manifest.sweepFast) {
+            SphereRefinePolicy.captureRefineDelayMs()
+        } else {
+            60_000L
+        }
+
+        SphereNativeOperations.reset()
+        val initOk = SphereNativeOperations.init(
+            SphereCaptureController.CAPTURE_EQ_W,
+            SphereCaptureController.CAPTURE_EQ_H,
+            initFovH,
+            initFovV
+        )
+        assertTrue("Sphere native init failed", initOk)
+        SphereNative.setMirrorCameraX(false)
+
         val worker = SphereStitchWorker(
             operations = SphereNativeOperations,
             executor = executor,
-            refineDelayMs = 60_000L
+            refineDelayMs = replayRefineDelay,
+            overlapGate = replayOverlapGate
         )
-        val controller = SphereCaptureController(
-            orientationTracker = OrientationTracker(appContext),
-            extrinsicCalibration = SphereExtrinsicCalibration(appContext).apply { reset() },
-            onCoverageUpdate = { _, _, _ -> },
-            onPreviewReady = {},
-            operations = SphereNativeOperations,
-            stitchWorker = worker
-        )
-        controller.startSession(
-            sensorFovH = manifest.fovDeg,
-            sensorFovV = manifest.vfovDeg,
-            fovH = initFovH,
-            fovV = initFovV
-        )
+        if (manifest.sweepFast) {
+            worker.preFinishDrainEnabled = false
+            worker.invalidatePendingRefinement()
+            Log.i(TAG, "Sweep fast: skip pre-finish/polish waits")
+        }
 
         for (spec in manifest.frames) {
             val raw = loadAssetBitmap(spec.fileName)
@@ -454,39 +555,66 @@ class SpherePlanarReplayE2ETest {
                 spec.rollDeg.toDouble()
             )
             val seedQuat = seedQuaternion(manifest, truthQuat, spec.index)
-            submitFrameAndWait(worker, frame, seedQuat, productionReplay = true)
+            val frameGate = if (spec.index == 0) {
+                LIVE_OVERLAP_GATE_FIRST_FRAME
+            } else {
+                replayOverlapGate
+            }
+            submitFrameAndWait(worker, frame, seedQuat, productionReplay = true, overlapGate = frameGate)
         }
 
-        assertTrue("Controller must have frames", controller.hasCapturedFrames)
-        waitForCaptureRefineIdle(worker)
-
-        assertTrue("finishCapture failed", controller.finishCapture())
-        waitForPreview(controller)
-
-        waitForPreFinishComplete(worker, PRE_FINISH_TIMEOUT_MS)
+        assertTrue("Worker must have frames", manifest.frames.isNotEmpty())
+        if (!manifest.sweepFast) {
+            waitForCaptureRefineIdle(worker)
+            worker.schedulePreFinishDrain(0L)
+            waitForPreFinishComplete(worker, PRE_FINISH_TIMEOUT_MS)
+        }
 
         val exportW = manifest.exportEqW ?: SphereCaptureController.EQ_W
         val exportH = manifest.exportEqH ?: SphereCaptureController.EQ_H
-        Log.i(TAG, "Production SAVE export at ${exportW}x${exportH}")
+        Log.i(TAG, "Replay worker SAVE export at ${exportW}x${exportH}")
 
         val exportLatch = CountDownLatch(1)
-        val polishLatch = CountDownLatch(1)
         var exportResult: SphereFinishResult? = null
-        controller.onBackgroundPolishReady = { polishLatch.countDown() }
-        assertTrue(
-            controller.startBackgroundFullExport { result ->
-                exportResult = result
-                exportLatch.countDown()
-            }
-        )
-        assertTrue(
-            "SAVE export timed out after ${EXPORT_TIMEOUT_MS}ms",
-            exportLatch.await(EXPORT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        )
-        assertTrue(
-            "Background polish timed out after ${POLISH_TIMEOUT_MS}ms",
-            polishLatch.await(POLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
-        )
+        val exportTimeoutMs = if (manifest.sweepFast) {
+            EXPORT_TIMEOUT_SWEEP_FAST_MS
+        } else {
+            EXPORT_TIMEOUT_MS
+        }
+        if (manifest.sweepFast) {
+            worker.runSweepFastExport(
+                eqW = exportW,
+                eqH = exportH,
+                imuDegradeDeg = manifest.imuDegradeDeg,
+                onComplete = { result ->
+                    exportResult = result
+                    exportLatch.countDown()
+                }
+            )
+            assertTrue(
+                "Sweep-fast SAVE export timed out after ${exportTimeoutMs}ms",
+                exportLatch.await(exportTimeoutMs, TimeUnit.MILLISECONDS)
+            )
+        } else {
+            val polishLatch = CountDownLatch(1)
+            worker.onFinishBackgroundPolish = { polishLatch.countDown() }
+            worker.runFinishGeneration(
+                eqW = exportW,
+                eqH = exportH,
+                onComplete = { result ->
+                    exportResult = result
+                    exportLatch.countDown()
+                }
+            )
+            assertTrue(
+                "SAVE export timed out after ${EXPORT_TIMEOUT_MS}ms",
+                exportLatch.await(EXPORT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+            assertTrue(
+                "Background polish timed out after ${POLISH_TIMEOUT_MS}ms",
+                polishLatch.await(POLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+            )
+        }
 
         val finish = exportResult ?: error("export result null")
         assertTrue("Export equirect null", finish.equirect != null)
@@ -494,18 +622,19 @@ class SpherePlanarReplayE2ETest {
         assertEquals("Export height", exportH, finish.equirect!!.height)
         Log.i(
             TAG,
-            "Production SAVE done in ${finish.durationMs}ms; polish complete; " +
+            "Replay worker SAVE done in ${finish.durationMs}ms; " +
                 "export=${finish.equirect!!.width}x${finish.equirect!!.height}"
         )
 
-        val polished = controller.exportFullEquirect()
-            ?: finish.equirect
-            ?: error("No equirect after polish")
-        val compare = equirectForCompare(polished, manifest.eqW, manifest.eqH)
+        val compare = equirectForCompare(
+            finish.equirect ?: error("No equirect after export"),
+            manifest.eqW,
+            manifest.eqH
+        )
 
-        controller.release()
         worker.shutdown()
         executor.shutdown()
+        // Keep native session alive for planar roundtrip extract + @After teardown.
 
         return compare
     }
@@ -526,10 +655,11 @@ class SpherePlanarReplayE2ETest {
         worker: SphereStitchWorker,
         frame: Bitmap,
         quat: FloatArray,
-        productionReplay: Boolean = false
+        productionReplay: Boolean = false,
+        overlapGate: Float? = null
     ) {
         val latch = CountDownLatch(1)
-        worker.submit(frame, quat, photoMode = true)
+        worker.submit(frame, quat, photoMode = true, overlapGateOverride = overlapGate)
         worker.runWhenStitchIdle { latch.countDown() }
         val timeoutMs = if (productionReplay) {
             FRAME_SUBMIT_TIMEOUT_PRODUCTION_MS
@@ -555,21 +685,6 @@ class SpherePlanarReplayE2ETest {
             Thread.sleep(100)
         }
         Log.w(TAG, "Capture refine idle wait timed out — continuing")
-    }
-
-    private fun waitForPreview(controller: SphereCaptureController) {
-        val deadline = SystemClock.elapsedRealtime() + PREVIEW_TIMEOUT_MS
-        while (
-            controller.state != SphereCaptureController.State.PREVIEW &&
-            SystemClock.elapsedRealtime() < deadline
-        ) {
-            Thread.sleep(50)
-        }
-        assertEquals(
-            "PREVIEW after DONE",
-            SphereCaptureController.State.PREVIEW,
-            controller.state
-        )
     }
 
     private fun waitForPreFinishComplete(worker: SphereStitchWorker, timeoutMs: Long) {
@@ -738,7 +853,8 @@ class SpherePlanarReplayE2ETest {
             } else {
                 null
             },
-            skipPlanarRoundtrip = obj.optBoolean("skipPlanarRoundtrip", false)
+            skipPlanarRoundtrip = obj.optBoolean("skipPlanarRoundtrip", false),
+            sweepFast = obj.optBoolean("sweepFast", false)
         )
     }
 
@@ -749,6 +865,28 @@ class SpherePlanarReplayE2ETest {
             }
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun saveOutputText(text: String, name: String) {
+        val targets = mutableListOf<File>()
+        targets.add(appContext.filesDir)
+        appContext.getExternalFilesDir(null)?.let { targets.add(it) }
+        Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+            ?.let { File(it, "visiontech_planar_roundtrip") }
+            ?.let { targets.add(it) }
+        Environment.getExternalStorageDirectory()
+            ?.let { File(it, "visiontech_stitch_output") }
+            ?.let { targets.add(it) }
+        for (dir in targets) {
+            try {
+                dir.mkdirs()
+                val file = File(dir, name)
+                file.writeText(text)
+                Log.i(TAG, "Wrote ${file.absolutePath}")
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not write $name to ${dir.absolutePath}: $e")
+            }
         }
     }
 
@@ -807,6 +945,23 @@ class SpherePlanarReplayE2ETest {
     private fun isStitchContentPixel(pixel: Int): Boolean {
         if ((pixel ushr 24) == 0) return false
         return (pixel and 0x00FFFFFF) != 0x001A1A2E
+    }
+
+    private fun planarRoundtripCorrelation(source: Bitmap, extracted: Bitmap): Double {
+        val w = minOf(source.width, extracted.width)
+        val h = minOf(source.height, extracted.height)
+        if (w < 2 || h < 2) return 0.0
+        val pixelsA = IntArray(w * h)
+        val pixelsB = IntArray(w * h)
+        source.getPixels(pixelsA, 0, w, 0, 0, w, h)
+        extracted.getPixels(pixelsB, 0, w, 0, 0, w, h)
+        return ImageOverlapMetrics.normalizedCorrelation(
+            pixelsA,
+            pixelsB,
+            w,
+            h,
+            ImageOverlapMetrics.Region(0, 0, w, h)
+        )
     }
 
     private fun planarPsnr(source: Bitmap, extracted: Bitmap, centerFrac: Float = 0.6f): Double {

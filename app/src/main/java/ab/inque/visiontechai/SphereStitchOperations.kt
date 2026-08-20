@@ -66,6 +66,12 @@ interface SphereStitchOperations {
     /** Clear equirect and rebuild every stored frame with full visual alignment. */
     fun rebuildFullAlign(): Boolean = false
 
+    /** Truth export: nearest-center resplat at current equirect resolution (no photometric align). */
+    fun rebuildExportNearestCenter(): Boolean = false
+
+    /** Restore refined poses from raw IMU quaternions (drops live fast-align drift). */
+    fun resetPosesToImu(): Boolean = false
+
     /**
      * Resize internal equirect to export resolution and resplat stored frames
      * (no photometric align — poses already refined at capture resolution).
@@ -126,6 +132,10 @@ object SphereNativeOperations : SphereStitchOperations {
     override fun refineStoredPoses(): Boolean = SphereNative.refineStoredPoses()
 
     override fun rebuildFullAlign(): Boolean = SphereNative.rebuildFullAlign()
+
+    override fun rebuildExportNearestCenter(): Boolean = SphereNative.rebuildExportNearestCenter()
+
+    override fun resetPosesToImu(): Boolean = SphereNative.resetPosesToImu()
 
     override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean =
         SphereNative.prepareExportEquirect(exportW, exportH)
