@@ -119,8 +119,8 @@ class SphereSaveExportE2ETest {
 
         val finish = exportResult ?: error("export result null")
         assertNotNull(finish.equirect)
-        assertEquals(SphereCaptureController.EQ_W, finish.equirect!!.width)
-        assertEquals(SphereCaptureController.EQ_H, finish.equirect!!.height)
+        assertEquals(controller.exportWidth, finish.equirect!!.width)
+        assertEquals(controller.exportHeight, finish.equirect!!.height)
         assertTrue(controller.isFullExportComplete())
         controller.release()
     }

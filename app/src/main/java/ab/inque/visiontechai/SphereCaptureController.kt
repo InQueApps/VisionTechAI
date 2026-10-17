@@ -70,7 +70,7 @@ class SphereCaptureController(
 
     private fun hasFullResExportReady(): Boolean {
         val bmp = lastFullEquirect
-        return bmp != null && !bmp.isRecycled && bmp.width >= EQ_W && bmp.height >= EQ_H
+        return bmp != null && !bmp.isRecycled && bmp.width >= exportWidth && bmp.height >= exportHeight
     }
 
     /** @deprecated use [isFinalizationInProgress] */
@@ -125,8 +125,17 @@ class SphereCaptureController(
     private var lastMotionQuat: FloatArray? = null
     private var lastMotionTimeMs = 0L
     private var frameCount = 0
+    private var stitchFrameW = 0
+    private var stitchFrameH = 0
 
     val hasCapturedFrames: Boolean get() = frameCount > 0
+
+    /** DONE/SAVE equirect size matching the captured frames' angular resolution. */
+    val exportWidth: Int get() = exportSize().width
+    val exportHeight: Int get() = exportSize().height
+
+    private fun exportSize(): SphereExportSize.Size =
+        SphereExportSize.fromFrame(stitchFrameW, stitchFrameH, stitchFovH, stitchFovV)
 
     private var sessionFovH = 65f
     private var sessionFovV = 50f
@@ -160,7 +169,7 @@ class SphereCaptureController(
                 notifyIntrinsicsConverged()
                 if (SphereRefinePolicy.refreshViewerAfterBackgroundFinish()) {
                     val polished = retainBitmap(
-                        operations.getEquirectBitmap(EQ_W, EQ_H) ?: lastFullEquirect
+                        operations.getEquirectBitmap(exportWidth, exportHeight) ?: lastFullEquirect
                     )
                     if (polished != null) {
                         replaceFullEquirect(polished)
@@ -202,6 +211,8 @@ class SphereCaptureController(
         SphereNative.setMirrorCameraX(false)
         state = State.CAPTURING
         frameCount = 0
+        stitchFrameW = 0
+        stitchFrameH = 0
         continuousCapture = false
         lastCoverage = 0f
         lastSolidAngleCoverage = 0f
@@ -277,6 +288,7 @@ class SphereCaptureController(
         ensureSessionGeometry(bitmap, imageRotationDegrees)
         val frame = prepareStitchFrame(bitmap)
         applyStitchFov(frame.fovH, frame.fovV)
+        rememberStitchFrameSize(frame.bitmap.width, frame.bitmap.height)
         val imuQuat = orientationTracker.getQuaternionForCameraFrame(frameTimestampNanos)
         val calQuat = extrinsicCalibration.applyToImu(imuQuat)
         val stitchQuat = stitchQuaternion(calQuat, imageRotationDegrees)
@@ -353,6 +365,19 @@ class SphereCaptureController(
             )
         }
         return SphereStitchFramePrep.centerSquare(bitmap, sessionFovH, sessionFovV)
+    }
+
+    private fun rememberStitchFrameSize(width: Int, height: Int) {
+        if (width <= 0 || height <= 0) return
+        if (width == stitchFrameW && height == stitchFrameH) return
+        stitchFrameW = width
+        stitchFrameH = height
+        val export = exportSize()
+        Log.i(
+            TAG,
+            "Stitch input ${width}x${height} fov=${"%.1f".format(stitchFovH)}x${"%.1f".format(stitchFovV)} " +
+                "→ export ${export.width}x${export.height}"
+        )
     }
 
     private fun applyStitchFov(fovH: Float, fovV: Float) {
@@ -565,7 +590,7 @@ class SphereCaptureController(
     }
 
     /**
-     * Post-DONE: 2048 feather preview then adaptive 4096 finalization (align, warp, seams).
+     * Post-DONE: 2048 feather preview then input-matched export finalization.
      */
     fun startBackgroundFinalization(
         onProgress: ((Int, String) -> Unit)? = null,
@@ -596,7 +621,7 @@ class SphereCaptureController(
             } else {
                 Log.e(
                     TAG,
-                    "Post-DONE finalization failed — no ${EQ_W}x${EQ_H} export " +
+                    "Post-DONE finalization failed — no ${exportWidth}x${exportHeight} export " +
                         "(frames=$frameCount, hadResult=${result.equirect != null})"
                 )
                 state = State.PREVIEW_REFINING
@@ -622,8 +647,8 @@ class SphereCaptureController(
         stitchWorker.runPostDoneFinalization(
             previewW = SphereRefinePolicy.donePreviewWidth(),
             previewH = SphereRefinePolicy.donePreviewHeight(),
-            exportW = EQ_W,
-            exportH = EQ_H,
+            exportW = exportWidth,
+            exportH = exportHeight,
             onProgress = onProgress,
             onStageViewerRefresh = { requestViewerSnapshot() },
             onIntermediatePreview = { intermediate ->
@@ -685,10 +710,10 @@ class SphereCaptureController(
     }
 
     private fun resolveFullResExportBitmap(primary: Bitmap?): Bitmap? {
-        val fromPrimary = primary?.takeIf { !it.isRecycled && it.width >= EQ_W && it.height >= EQ_H }
+        val fromPrimary = primary?.takeIf { !it.isRecycled && it.width >= exportWidth && it.height >= exportHeight }
         if (fromPrimary != null) return retainBitmap(fromPrimary)
-        val native = operations.getEquirectBitmap(EQ_W, EQ_H)
-        val fromNative = native?.takeIf { !it.isRecycled && it.width >= EQ_W && it.height >= EQ_H }
+        val native = operations.getEquirectBitmap(exportWidth, exportHeight)
+        val fromNative = native?.takeIf { !it.isRecycled && it.width >= exportWidth && it.height >= exportHeight }
         val copy = retainBitmap(fromNative)
         if (native != null && native !== copy) native.recycle()
         return copy
@@ -768,28 +793,28 @@ class SphereCaptureController(
         lastFullEquirect?.takeIf { !it.isRecycled }
 
     /**
-     * Full-resolution bitmap for SAVE. Stitching runs at capture resolution; this may
-     * resplat from full-res frame sources at [EQ_W]×[EQ_H].
+     * Full-resolution bitmap for SAVE. Live stitching runs at preview resolution; this
+     * resplats stored frames at [exportWidth]×[exportHeight] (input-matched).
      */
     fun ensureFullResExportBitmap(): Bitmap? {
         val cached = lastFullEquirect
         if (
             cached != null &&
             !cached.isRecycled &&
-            cached.width >= EQ_W &&
-            cached.height >= EQ_H
+            cached.width >= exportWidth &&
+            cached.height >= exportHeight
         ) {
             return retainBitmap(cached)
         }
         operations.flushPendingFrameStores()
-        if (!operations.prepareExportEquirect(EQ_W, EQ_H)) {
-            Log.w(TAG, "prepareExportEquirect($EQ_W x $EQ_H) failed")
+        if (!operations.prepareExportEquirect(exportWidth, exportHeight)) {
+            Log.w(TAG, "prepareExportEquirect($exportWidth x $exportHeight) failed")
             return null
         }
-        val native = operations.getEquirectBitmap(EQ_W, EQ_H)
+        val native = operations.getEquirectBitmap(exportWidth, exportHeight)
         val copy = retainBitmap(native)
         if (native != null && native !== copy) native.recycle()
-        if (copy != null && copy.width >= EQ_W && copy.height >= EQ_H) {
+        if (copy != null && copy.width >= exportWidth && copy.height >= exportHeight) {
             replaceFullEquirect(copy)
             if (state == State.PREVIEW_REFINING) {
                 state = State.PREVIEW_FINALIZED
@@ -800,8 +825,8 @@ class SphereCaptureController(
 
     /** Latest native equirect for export (includes in-progress intrinsic pass if done). */
     fun exportFullEquirect(): Bitmap? =
-        operations.getEquirectBitmap(EQ_W, EQ_H)?.takeIf { !it.isRecycled }
-            ?: getFullEquirect()?.takeIf { it.width >= EQ_W && it.height >= EQ_H }
+        operations.getEquirectBitmap(exportWidth, exportHeight)?.takeIf { !it.isRecycled }
+            ?: getFullEquirect()?.takeIf { it.width >= exportWidth && it.height >= exportHeight }
 
     fun resetSession() {
         val failedExport = SphereFinishResult(
@@ -821,6 +846,8 @@ class SphereCaptureController(
         orientationResolved = false
         state = State.IDLE
         frameCount = 0
+        stitchFrameW = 0
+        stitchFrameH = 0
         continuousCapture = false
         lastCoverage = 0f
         lastSolidAngleCoverage = 0f
@@ -892,7 +919,7 @@ class SphereCaptureController(
         const val CAPTURE_EQ_W = 1024
         const val CAPTURE_EQ_H = 512
 
-        /** Gallery / viewer export resolution. */
+        /** Default gallery export when input size is unknown. Actual SAVE size is [exportWidth]. */
         const val EQ_W = 4096
         const val EQ_H = 2048
 

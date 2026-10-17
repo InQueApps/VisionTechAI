@@ -126,6 +126,20 @@ class SphereCaptureControllerTest {
     }
 
     @Test
+    fun captureFrame_setsExportSizeFromInputAngularResolution() {
+        controller.startSession()
+        val bmp = Bitmap.createBitmap(1080, 1080, Bitmap.Config.ARGB_8888).apply {
+            eraseColor(Color.RED)
+        }
+        controller.captureFrame(bmp)
+        val expected = SphereExportSize.fromFrame(1080, 1080, 65f, 50f)
+        assertEquals(expected.width, controller.exportWidth)
+        assertEquals(expected.height, controller.exportHeight)
+        assertTrue(controller.exportWidth > SphereCaptureController.EQ_W)
+        bmp.recycle()
+    }
+
+    @Test
     fun stitchResult_updatesDualCoverage() {
         controller.startSession()
         ops.areaCoverage = 0.42f

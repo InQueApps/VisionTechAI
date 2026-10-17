@@ -573,7 +573,7 @@ class SphereStitchWorker(
     }
 
     /**
-     * Post-DONE: 2048 feather preview then adaptive 4096 finalization.
+     * Post-DONE: 2048 feather preview then input-matched export finalization.
      */
     fun runPostDoneFinalization(
         previewW: Int,

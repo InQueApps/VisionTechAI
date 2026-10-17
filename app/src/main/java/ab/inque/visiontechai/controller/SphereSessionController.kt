@@ -680,8 +680,11 @@ class SphereSessionController(
             Toast.makeText(activity, "Could not finish 360° photo", Toast.LENGTH_SHORT).show()
             return
         }
-        if (bitmap.width < SphereCaptureController.EQ_W || bitmap.height < SphereCaptureController.EQ_H) {
-            Log.w(TAG, "Rejecting save at ${bitmap.width}x${bitmap.height} — expected full export")
+        if (bitmap.width < ctrl.exportWidth || bitmap.height < ctrl.exportHeight) {
+            Log.w(
+                TAG,
+                "Rejecting save at ${bitmap.width}x${bitmap.height} — expected ${ctrl.exportWidth}x${ctrl.exportHeight}"
+            )
             exportNotificationHelper.showExportComplete(success = false)
             Toast.makeText(
                 activity,

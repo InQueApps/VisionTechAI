@@ -2,11 +2,14 @@ package ab.inque.visiontechai.controller
 
 import ab.inque.visiontechai.CameraFovCalculator
 import android.util.Log
+import android.util.Size
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.Quality
 import androidx.camera.video.QualitySelector
@@ -54,8 +57,18 @@ class CameraController(
                 .build()
             videoCapture = VideoCapture.withOutput(recorder)
 
+            val analysisSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(
+                        ANALYSIS_TARGET,
+                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                    )
+                )
+                .build()
             val imageAnalyzer = ImageAnalysis.Builder()
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .setResolutionSelector(analysisSelector)
+                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
                 .also { it.setAnalyzer(cameraExecutor, createAnalyzer()) }
 
@@ -109,5 +122,7 @@ class CameraController(
 
     companion object {
         private const val TAG = "CameraController"
+        /** Prefer ~1440p 4:3 so sphere center-square crops keep ~1440 px, not CameraX's 640 default. */
+        private val ANALYSIS_TARGET = Size(1920, 1440)
     }
 }
