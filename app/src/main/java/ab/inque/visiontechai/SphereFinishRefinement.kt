@@ -1,8 +1,8 @@
 package ab.inque.visiontechai
 
 /**
- * DONE / offline replay pose refinement. Runs the full pre-finish schedule for any
- * slices not already completed during idle capture.
+ * DONE / offline replay pose refinement. Runs preview-orientation passes not
+ * already completed during idle capture.
  */
 object SphereFinishRefinement {
 
@@ -13,9 +13,9 @@ object SphereFinishRefinement {
     isCancelled: () -> Boolean = { false },
     onPass: (label: String) -> Unit = {}
   ) {
-    val config = SphereRefinePolicy.preFinishRefinementPasses()
+    val config = SphereRefinePolicy.donePreviewRefinementPasses()
     if (startProgress.isCompleteFor(config)) return
-    SpherePoseRefinement.run(
+    SpherePoseRefinement.runAdaptive(
       operations = operations,
       config = config,
       startProgress = startProgress,

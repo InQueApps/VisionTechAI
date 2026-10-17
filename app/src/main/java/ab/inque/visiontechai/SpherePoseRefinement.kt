@@ -117,8 +117,30 @@ object SpherePoseRefinement {
     isCancelled: () -> Boolean = { false },
     onPass: (label: String) -> Unit = {}
   ): Boolean {
+    return runAdaptive(
+      operations = operations,
+      config = config,
+      startProgress = startProgress,
+      isCancelled = isCancelled,
+      onPass = onPass
+    )
+  }
+
+  /**
+   * Run configured slices; after each global pass, stop early when SSD gates say
+   * another pass is unlikely to help (SAVE polish may still run one extra pass).
+   */
+  fun runAdaptive(
+    operations: SphereStitchOperations,
+    config: PassConfig,
+    startProgress: RefineProgress = RefineProgress(),
+    isCancelled: () -> Boolean = { false },
+    onPass: (label: String) -> Unit = {}
+  ): Boolean {
+    SphereProductionStitchPipeline.ensureCaptureWorkCommitted(operations)
     var changed = false
     var progress = startProgress
+    var extraGlobalAllowed = true
     while (!progress.isCompleteFor(config) && !isCancelled()) {
       val result = runOneSlice(operations, config, progress, isCancelled)
       if (isCancelled()) break
@@ -126,6 +148,17 @@ object SpherePoseRefinement {
       if (result.passLabel != null) onPass(result.passLabel)
       if (result.progress == progress) break
       progress = result.progress
+      if (result.passLabel != null && result.passLabel.contains("global")) {
+        val stats = operations.getLastRefineStats()
+        if (SphereRefinePolicy.shouldStopAfterGlobalPass(stats)) {
+          progress = progress.copy(
+            globalPassesDone = config.globalPasses,
+            convergePassesDone = config.convergePasses
+          )
+        } else if (extraGlobalAllowed && progress.globalPassesDone < config.globalPasses) {
+          extraGlobalAllowed = false
+        }
+      }
     }
     return changed
   }

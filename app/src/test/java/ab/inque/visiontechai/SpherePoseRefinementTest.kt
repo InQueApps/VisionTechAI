@@ -47,18 +47,23 @@ class SpherePoseRefinementTest {
     }
 
     @Test
-    fun runOneSlice_advancesThroughFullFinishSchedule() {
+    fun runOneSlice_advancesThroughLegacyGlobalSchedule() {
         val ops = CountingOps()
-        val config = SphereRefinePolicy.finishRefinementPassesFull()
+        val config = SpherePoseRefinement.PassConfig(
+            chainedPasses = 0,
+            globalPasses = 1,
+            convergePasses = 1,
+            fullAlignOnGlobal = true
+        )
         var progress = SpherePoseRefinement.RefineProgress()
         repeat(config.chainedPasses + config.globalPasses + config.convergePasses) {
             val result = SpherePoseRefinement.runOneSlice(ops, config, progress)
             progress = result.progress
         }
         assertTrue(progress.isCompleteFor(config))
-        assertEquals(3, ops.chained)
-        assertEquals(3, ops.global)
-        assertEquals(3, ops.rebuild)
+        assertEquals(1, ops.chained)
+        assertEquals(2, ops.global)
+        assertEquals(2, ops.rebuild)
     }
 
     @Test
@@ -66,9 +71,13 @@ class SpherePoseRefinementTest {
         val ops = object : CountingOps() {
             override fun hasRefineWorkPending(applyGlobalPose: Boolean): Boolean = false
         }
-        val config = SphereRefinePolicy.finishRefinementPassesFull()
+        val config = SpherePoseRefinement.PassConfig(
+            chainedPasses = 0,
+            globalPasses = 1,
+            convergePasses = 1,
+            fullAlignOnGlobal = true
+        )
         var progress = SpherePoseRefinement.RefineProgress(
-            chainedPassesDone = config.chainedPasses,
             globalPassesDone = config.globalPasses
         )
         val result = SpherePoseRefinement.runOneSlice(ops, config, progress)
@@ -81,27 +90,27 @@ class SpherePoseRefinementTest {
     @Test
     fun run_resumesFromStartProgress() {
         val ops = CountingOps()
-        val config = SphereRefinePolicy.finishRefinementPassesFull()
-        val halfway = SpherePoseRefinement.RefineProgress(
-            chainedPassesDone = 2,
-            globalPassesDone = 1
+        val config = SpherePoseRefinement.PassConfig(
+            chainedPasses = 0,
+            globalPasses = 1,
+            convergePasses = 1,
+            fullAlignOnGlobal = true
         )
-        SpherePoseRefinement.run(ops, config, startProgress = halfway)
-        assertEquals(1, ops.chained)
-        assertEquals(2, ops.global)
-        assertEquals(2, ops.rebuild)
-    }
-
-    @Test
-    fun captureConfig_runsFullAlignOnGlobalPass() {
-        val ops = CountingOps()
-        val config = SphereRefinePolicy.captureRefinementPasses()
-        var progress = SpherePoseRefinement.RefineProgress()
-        repeat(2) {
-            progress = SpherePoseRefinement.runOneSlice(ops, config, progress).progress
-        }
+        val done = SpherePoseRefinement.RefineProgress(globalPassesDone = 1)
+        SpherePoseRefinement.run(ops, config, startProgress = done)
         assertEquals(1, ops.chained)
         assertEquals(1, ops.global)
         assertEquals(1, ops.rebuild)
+    }
+
+    @Test
+    fun captureConfig_runsPoseGraphOnlyWithoutFullAlign() {
+        val ops = CountingOps()
+        val config = SphereRefinePolicy.captureRefinementPasses()
+        var progress = SpherePoseRefinement.RefineProgress()
+        progress = SpherePoseRefinement.runOneSlice(ops, config, progress).progress
+        assertEquals(0, ops.chained)
+        assertEquals(1, ops.global)
+        assertEquals(0, ops.rebuild)
     }
 }

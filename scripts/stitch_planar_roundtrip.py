@@ -45,6 +45,7 @@ PLANAR_INDEX_RE = re.compile(
     r"^planar_.+_(\d{2})_az\d{3}(?:_el[pm]\d+)?\.(jpg|png)$",
     re.IGNORECASE,
 )
+PLANAR_EL_RE = re.compile(r"_el([pm])(\d+)\.(?:jpg|png)$", re.IGNORECASE)
 DEFAULT_FOV = 90.0
 DEFAULT_ELEVATION = 0.0
 TEST_CLASS = "ab.inque.visiontechai.SpherePlanarReplayE2ETest"
@@ -65,27 +66,30 @@ def asset_dir(root: Path) -> Path:
     return root / "app" / "src" / "androidTest" / "assets" / "planar_replay"
 
 
-def output_dir(root: Path, subdir: str | None = None) -> Path:
-    base = root / "scripts" / "images" / "roundtrip_output"
+def output_dir(root: Path, subdir: str | None = None, output_root: str | None = None) -> Path:
+    base = root / "scripts" / "images" / (output_root or "roundtrip_output")
     return base / subdir if subdir else base
 
 
-def replot_imu_sweep_summary() -> None:
+def replot_imu_sweep_summary(output_root: str | None = None) -> None:
     """Refresh imu_degrade_sweep_summary.png/json from per-level metrics.json folders."""
     sweep_script = _SCRIPT_DIR / "run_imu_degrade_sweep.py"
     if not sweep_script.is_file():
         return
     levels = [0, 2, 4, 8, 16]
     print("Refreshing IMU sweep summary plot...")
+    cmd = [
+        sys.executable,
+        str(sweep_script),
+        "--plot-only",
+        "--imu-levels",
+        *[str(x) for x in levels],
+        "--sweep-fast",
+    ]
+    if output_root:
+        cmd.extend(["--output-root", output_root])
     subprocess.run(
-        [
-            sys.executable,
-            str(sweep_script),
-            "--plot-only",
-            "--imu-levels",
-            *[str(x) for x in levels],
-            "--sweep-fast",
-        ],
+        cmd,
         cwd=repo_root(),
         check=False,
     )
@@ -96,6 +100,23 @@ def load_extract_manifest(images_dir: Path, source_stem: str) -> dict | None:
     if not path.is_file():
         return None
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def elevation_from_planar_filename(name: str) -> float:
+    """Parse signed elevation from planar_*_azDDD_elp45.jpg / elm90.jpg suffix."""
+    m = PLANAR_EL_RE.search(name)
+    if not m:
+        return 0.0
+    sign = 1.0 if m.group(1).lower() == "p" else -1.0
+    return sign * float(m.group(2))
+
+
+def infer_full_sphere_from_frames(frames: list[dict]) -> bool:
+    """True when planars span multiple elevation rings (16-view full-sphere layout)."""
+    if len(frames) < 10:
+        return False
+    elevations = {round(f["elevation"], 1) for f in frames}
+    return len(elevations) > 1 and any(abs(e) >= 40.0 for e in elevations)
 
 
 def discover_planar_frames(
@@ -134,24 +155,25 @@ def discover_planar_frames(
             key = m.group(1) if m else p.stem
             prefixes.setdefault(key, []).append(p)
         paths = max(prefixes.values(), key=len)
-    indexed: list[tuple[int, str, float]] = []
+    indexed: list[tuple[int, str, float, float]] = []
     for path in paths:
         match = PLANAR_RE.match(path.name)
         if not match:
             continue
         idx_m = PLANAR_INDEX_RE.match(path.name)
         idx = int(idx_m.group(1)) if idx_m else len(indexed)
-        indexed.append((idx, path.name, float(match.group(1))))
+        el = elevation_from_planar_filename(path.name)
+        indexed.append((idx, path.name, float(match.group(1)), el))
     indexed.sort(key=lambda t: t[0])
     return [
         {
             "file": name,
             "azimuth": az,
-            "elevation": 0.0,
+            "elevation": el,
             "roll": 0.0,
             "index": idx,
         }
-        for idx, name, az in indexed
+        for idx, name, az, el in indexed
     ]
 
 
@@ -548,6 +570,13 @@ def sync_assets(
             f"No planars for prefix {prefix!r} in {images_dir}. "
             "Run extract_rectilinear_views or use --eq-scale to generate."
         )
+    if not full_sphere and infer_full_sphere_from_frames(frames):
+        full_sphere = True
+        reference_path = None
+        print(
+            f"Inferred full-sphere layout from {len(frames)} planars "
+            "(multiple elevation rings in filenames/manifest)"
+        )
     if max_frames is not None and max_frames > 0:
         frames = frames[:max_frames]
 
@@ -681,7 +710,7 @@ def run_instrumented_test(root: Path, device: str | None, no_build: bool) -> int
     else:
         for task in (
             [":app:mergeDebugAndroidTestAssets", ":app:packageDebugAndroidTest"],
-            [":app:installDebug", ":app:installDebugAndroidTest"],
+            [":app:installDebugAndroidTest"],
         ):
             print("Running:", " ".join(gw + task))
             if subprocess.call(gw + task + ["--no-daemon"], cwd=root, env=env) != 0:
@@ -702,9 +731,26 @@ def run_instrumented_test(root: Path, device: str | None, no_build: bool) -> int
         component,
     ]
     print("Running:", " ".join(cmd))
-    proc = subprocess.run(
-        cmd, cwd=root, env=env, text=True, capture_output=True
-    )
+    instrument_timeout_s = 2_100.0
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=instrument_timeout_s,
+        )
+    except subprocess.TimeoutExpired as e:
+        print(
+            f"Instrumented test timed out after {instrument_timeout_s:.0f}s "
+            "(increase E2E_JUNIT_TIMEOUT_MS or reduce IMU recovery cost)"
+        )
+        if e.stdout:
+            print(e.stdout, end="" if e.stdout.endswith("\n") else "\n")
+        if e.stderr:
+            print(e.stderr, end="" if e.stderr.endswith("\n") else "\n", file=sys.stderr)
+        return 1
     if proc.stdout:
         print(proc.stdout, end="" if proc.stdout.endswith("\n") else "\n")
     if proc.stderr:
@@ -844,8 +890,9 @@ def pull_outputs(
     out_subdir: str | None,
     work_source: Path | None = None,
     expected_imu_deg: float | None = None,
+    output_root: str | None = None,
 ) -> Path:
-    out = output_dir(root, out_subdir)
+    out = output_dir(root, out_subdir, output_root=output_root)
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -999,6 +1046,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default=None,
         help="Subfolder under scripts/images/roundtrip_output/ for this run",
+    )
+    p.add_argument(
+        "--output-root",
+        type=str,
+        default=None,
+        help="Folder under scripts/images/ for outputs (default: roundtrip_output)",
     )
     p.add_argument(
         "--eq-scale",
@@ -1236,6 +1289,7 @@ def main() -> None:
             out_subdir,
             work_source=work_source,
             expected_imu_deg=args.imu_degrade_deg,
+            output_root=args.output_root,
         )
     except SystemExit as e:
         if test_exit_code != 0:
@@ -1279,7 +1333,7 @@ def main() -> None:
     print("=" * 60)
 
     if args.sweep_fast:
-        replot_imu_sweep_summary()
+        replot_imu_sweep_summary(args.output_root)
 
     if test_exit_code != 0:
         raise SystemExit(test_exit_code)

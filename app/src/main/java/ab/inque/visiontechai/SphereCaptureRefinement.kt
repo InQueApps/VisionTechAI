@@ -16,4 +16,16 @@ object SphereCaptureRefinement {
     isCancelled = isCancelled,
     onPass = onPass
   )
+
+  /** Periodic idle refine while scanning (pose-only, same as pause refine). */
+  fun runPeriodic(
+    operations: SphereStitchOperations,
+    isCancelled: () -> Boolean = { false },
+    onPass: (label: String) -> Unit = {}
+  ): Boolean = SpherePoseRefinement.run(
+    operations = operations,
+    config = SphereRefinePolicy.capturePeriodicRefinementPasses(),
+    isCancelled = isCancelled,
+    onPass = onPass
+  )
 }

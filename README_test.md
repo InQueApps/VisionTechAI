@@ -69,7 +69,7 @@ CI runs a fixed subset via [.github/workflows/android-sphere-e2e.yml](.github/wo
 End-to-end workflow for validating the native stitcher against a known equirect source:
 
 ```
-scripts/images/img.jpg
+scripts/images/input_images/img_eq4096.jpg   (or scripts/images/img.jpg)
   → extract_rectilinear_views.py     (planar JPEGs + manifest on PC)
   → stitch_planar_roundtrip.py       (sync assets, run device test, pull, compare)
   → SpherePlanarReplayE2ETest        (production worker: capture → DONE → SAVE → polish)
@@ -96,12 +96,69 @@ Metrics compare at manifest equirect resolution (e.g. 1024×512); export runs at
 Use `--direct-finish-replay` for the legacy shortcut (direct `runFinishExport` only, no worker).
 
 **Working directory for inputs/outputs:** `scripts/images/`  
+**Reference dataset (full sphere):** `scripts/images/input_images/`  
 **Synced test assets:** `app/src/androidTest/assets/planar_replay/`  
 **Roundtrip output:** `scripts/images/roundtrip_output/<subdir>/`
 
+### Reference dataset — `scripts/images/input_images/`
+
+Canonical offline replay inputs: one full-sphere equirect and 16 rectilinear views cut from it. Used by IMU-degrade sweeps (`--source img_eq4096.jpg`) and synced to `planar_replay` test assets.
+
+| File | Size (typical) | Role |
+|------|----------------|------|
+| `img_original.jpg` | ~21278×10639 | Full-resolution 2:1 equirect (entire sphere) |
+| `img_eq4096.jpg` | 4096×2048 | Downscaled working equirect (gallery / test resolution) |
+| `planar_img_eq4096_00_…` … `_15_…` | 1024×1024 each | Rectilinear views extracted from `img_eq4096.jpg` |
+
+**Source chain:**
+
+```
+img_original.jpg  (full-res sphere)
+       ↓ downscale to 4096 px wide (manual, or stitch script --max-eq-width / --slow-e2e)
+img_eq4096.jpg    (4096×2048 truth equirect)
+       ↓ extract_rectilinear_views.py --full-sphere
+16 × planar_img_eq4096_{index}_az{deg}_{el}.jpg
+       ↓ stitch_planar_roundtrip.py → device → stitch back
+roundtrip_output/<subdir>/stitched_equirect.jpg
+```
+
+Planars are **not** captured on a phone. `extract_rectilinear_views.py` simulates pinhole cameras at fixed look directions and bilinear-samples the equirect. Math matches native `nativeGetRectilinear` in `sphere_jni.cpp` (earth frame: X=East, Y=North, Z=Up; camera looks along +Y before azimuth/elevation).
+
+**16-view layout** (`--full-sphere`, 90° hFOV, ring elevation default 45°):
+
+| Index | Label | Azimuth | Elevation | Example filename suffix |
+|-------|-------|---------|-----------|-------------------------|
+| 00–05 | horizon ring | 0°, 60°, 120°, 180°, 240°, 300° | 0° | `az000_elp0` … `az300_elp0` |
+| 06–09 | upper ring | 45°, 135°, 225°, 315° | +45° | `az045_elp45` … `az315_elp45` |
+| 10 | zenith | 0° | +90° | `az000_elp90` |
+| 11–14 | lower ring | 45°, 135°, 225°, 315° | −45° | `az045_elm45` … `az315_elm45` |
+| 15 | nadir | 0° | −90° | `az000_elm90` |
+
+Six horizon views at 60° steps with 90° FOV give ~30° overlap between neighbors (by design for stitching). Upper/lower rings at ±45° overlap the horizon ring and poles.
+
+**Filename pattern:** `planar_{stem}_{index:02d}_az{az:03.0f}_{el_tag}.jpg` where `el_tag` is signed elevation (`elp45` = +45°, `elm90` = −90°).
+
+**Reproduce `input_images` planars** (exact poses, no jitter — matches IMU sweep / `sweep-fast` assets):
+
+```powershell
+python scripts/extract_rectilinear_views.py scripts/images/input_images/img_eq4096.jpg `
+  --full-sphere --fov 90 --vfov 90 `
+  --width 1024 --height 1024 `
+  --no-random-roll --no-random-heading --no-random-elevation `
+  -o scripts/images/input_images
+```
+
+To downscale `img_original.jpg` to `img_eq4096.jpg` before extract (Python + Pillow):
+
+```powershell
+python -c "from PIL import Image; Image.MAX_IMAGE_PIXELS=500_000_000; im=Image.open('scripts/images/input_images/img_original.jpg'); im=im.convert('RGB'); w,h=im.size; nw=4096; nh=max(1,round(h*nw/w)); im.resize((nw,nh),Image.Resampling.LANCZOS).save('scripts/images/input_images/img_eq4096.jpg',quality=95)"
+```
+
+Extract also writes `planar_img_eq4096_manifest.json` in the output dir (per-frame `azimuth`, `elevation`, `roll`). `stitch_planar_roundtrip.py` reads this to detect `full_sphere: true` and frame poses.
+
 ### Step 1 — Generate planar images
 
-Place a 2:1 equirect in `scripts/images/` (e.g. `img.jpg`). Run extract to create planar views with various heading, elevation, and roll offsets:
+Place a 2:1 equirect in `scripts/images/` (e.g. `img.jpg` or `input_images/img_eq4096.jpg`). Run extract to create planar views with various heading, elevation, and roll offsets:
 
 ```bash
 python scripts/extract_rectilinear_views.py scripts/images/img.jpg \
@@ -111,9 +168,9 @@ python scripts/extract_rectilinear_views.py scripts/images/img.jpg \
   --layout-seed 42
 ```
 
-**`--full-sphere`** extracts 16 views: 6 on the horizon, 4 upper ring (+45°) + zenith, 4 lower ring (−45°) + nadir.
+**`--full-sphere`** extracts the 16 views listed in the reference dataset table above.
 
-**Default jitter** (reproducible via `--layout-seed`):
+**Default jitter** (reproducible via `--layout-seed`; disable with `--no-random-roll`, `--no-random-heading`, `--no-random-elevation` for exact layout poses):
 
 | Option | Default | Effect |
 |--------|---------|--------|
@@ -138,14 +195,16 @@ Projection matches native `nativeGetRectilinear` in `sphere_jni.cpp`. The device
 After planars exist, run the full roundtrip (sync + device + pull + metrics):
 
 ```bash
-python scripts/stitch_planar_roundtrip.py --source img.jpg --device <ADB_SERIAL>
+python scripts/stitch_planar_roundtrip.py --source img_eq4096.jpg --images scripts/images/input_images --device <ADB_SERIAL>
 ```
 
 On Windows, from repo root (Python 3 + Pillow + numpy):
 
 ```powershell
-python scripts/stitch_planar_roundtrip.py --source img.jpg --device <ADB_SERIAL>
+python scripts/stitch_planar_roundtrip.py --source img_eq4096.jpg --images scripts/images/input_images --device <ADB_SERIAL>
 ```
+
+For IMU-degrade sweeps at 4096 resolution, add `--slow-e2e` or point `--images` at `input_images` where planars already exist.
 
 **What the stitch script does:**
 

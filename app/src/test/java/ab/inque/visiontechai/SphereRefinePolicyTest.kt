@@ -8,8 +8,9 @@ import org.junit.Test
 class SphereRefinePolicyTest {
 
     @Test
-    fun periodicRefine_disabledForTapLatency() {
-        assertFalse(SphereRefinePolicy.shouldRunPeriodicRefine(6))
+    fun periodicRefine_everyFiveFramesWhenIdle() {
+        assertTrue(SphereRefinePolicy.shouldRunPeriodicRefine(5))
+        assertTrue(SphereRefinePolicy.shouldRunPeriodicRefine(6))
         assertFalse(SphereRefinePolicy.shouldRunPeriodicRefine(4))
     }
 
@@ -84,9 +85,9 @@ class SphereRefinePolicyTest {
 
     @Test
     fun finishPosePassCounts() {
-        assertEquals(2, SphereRefinePolicy.finishChainedPosePasses())
-        assertEquals(2, SphereRefinePolicy.finishGlobalPosePasses())
-        assertEquals(1, SphereRefinePolicy.finishConvergePasses())
+        assertEquals(0, SphereRefinePolicy.finishChainedPosePasses())
+        assertEquals(1, SphereRefinePolicy.finishGlobalPosePasses())
+        assertEquals(0, SphereRefinePolicy.finishConvergePasses())
         assertFalse(SphereRefinePolicy.runBackgroundGlobalPose())
     }
 
@@ -126,8 +127,9 @@ class SphereRefinePolicyTest {
     fun preFinishPolicy_frontLoadsEarly() {
         assertEquals(0.15f, SphereRefinePolicy.preFinishMinSolidAngle(), 1e-6f)
         assertTrue(SphereRefinePolicy.preFinishDelayMs() < SphereRefinePolicy.captureRefineDelayMs())
-        assertEquals(2, SphereRefinePolicy.preFinishRefinementPasses().chainedPasses)
-        assertEquals(2, SphereRefinePolicy.finishRefinementPassesMinimal().globalPasses)
+        assertEquals(0, SphereRefinePolicy.preFinishRefinementPasses().chainedPasses)
+        assertEquals(1, SphereRefinePolicy.donePreviewRefinementPasses().globalPasses)
+        assertFalse(SphereRefinePolicy.donePreviewRefinementPasses().fullAlignOnGlobal)
         assertFalse(SphereRefinePolicy.useLightFinishWhenCaptureRefined())
         assertEquals(0, SphereRefinePolicy.captureGlobalRefinePasses())
         assertEquals(0, SphereRefinePolicy.finishGlobalRefinePassesCap())

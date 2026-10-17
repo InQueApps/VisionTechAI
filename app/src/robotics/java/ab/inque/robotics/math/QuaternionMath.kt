@@ -96,4 +96,8 @@ object QuaternionMath {
             a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2]
         )
     }
+
+    /** Conjugate / inverse for unit quaternions [x, y, z, w]. */
+    fun conjugate(q: FloatArray): FloatArray =
+        floatArrayOf(-q[0], -q[1], -q[2], q[3])
 }

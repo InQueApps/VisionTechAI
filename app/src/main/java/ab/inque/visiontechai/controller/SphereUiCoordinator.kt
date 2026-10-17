@@ -27,6 +27,9 @@ class SphereUiCoordinator(
         binding.sphereDoneButton.setOnClickListener {
             sphereSession.finishCapture()
         }
+        binding.sphereImuButton.setOnClickListener {
+            sphereSession.toggleImuViewerMode()
+        }
         binding.sphereSaveButton.setOnClickListener {
             sphereSession.saveEquirectangular()
         }

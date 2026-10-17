@@ -59,6 +59,10 @@ class SpherePlanarReplayE2ETest {
         private const val E2E_WALL_MS_FAST = 30_000L
         /** Production worker (capture refine + DONE + SAVE + polish) budget on device. */
         private const val E2E_WALL_MS_PRODUCTION = 900_000L
+        /** Sweep-fast with IMU noise: per-frame visual recovery + 12 min export can exceed 15 min. */
+        private const val E2E_WALL_MS_SWEEP_FAST_IMU = 1_800_000L
+        /** JUnit harness must outlive wall budget + planar metrics (~8 min). */
+        private const val E2E_JUNIT_TIMEOUT_MS = 2_100_000L
         private const val FRAME_SUBMIT_TIMEOUT_MS = 30_000L
         private const val FRAME_SUBMIT_TIMEOUT_PRODUCTION_MS = 180_000L
         private const val PRE_FINISH_TIMEOUT_MS = 420_000L
@@ -83,6 +87,29 @@ class SpherePlanarReplayE2ETest {
         private const val SEAMS_NONE = "none"
         private const val SEAMS_FULL = "full"
     }
+
+  /** Per-step wall timings written to replay_metrics.json as timing_ms. */
+  private class StepProfiler(private val logTag: String) {
+    private val steps = JSONArray()
+    private val wallStart = SystemClock.elapsedRealtime()
+    private var segmentStart = wallStart
+
+    fun record(step: String, durationMs: Long? = null) {
+      val duration = durationMs ?: (SystemClock.elapsedRealtime() - segmentStart)
+      steps.put(
+        JSONObject()
+          .put("step", step)
+          .put("duration_ms", duration)
+      )
+      Log.i(logTag, "SphereProfile $step=${duration}ms")
+      segmentStart = SystemClock.elapsedRealtime()
+    }
+
+    fun toJson(): JSONObject =
+      JSONObject()
+        .put("steps", steps)
+        .put("wall_total_ms", SystemClock.elapsedRealtime() - wallStart)
+  }
 
     data class ReplayOptions(
         val refinePasses: Int = POSE_REFINE_PASSES,
@@ -148,13 +175,13 @@ class SpherePlanarReplayE2ETest {
         SphereNative.release()
     }
 
-    @Test(timeout = 900_000)
+    @Test(timeout = E2E_JUNIT_TIMEOUT_MS)
     fun stitchPlanarViews_matchesSourceEquirect() {
         val wallStart = SystemClock.elapsedRealtime()
         val manifest = loadManifest()
-        if (manifest.productionReplay && !manifest.fastE2eTest) {
+        if (manifest.useProductionWorker && !manifest.fastE2eTest) {
             assumeFalse(
-                "Production planar replay skipped on emulator (S47)",
+                "Production worker replay skipped on emulator (S47)",
                 Build.FINGERPRINT.contains("generic", ignoreCase = true) ||
                     Build.HARDWARE.contains("goldfish", ignoreCase = true) ||
                     Build.HARDWARE.contains("ranchu", ignoreCase = true)
@@ -195,8 +222,11 @@ class SpherePlanarReplayE2ETest {
             Log.i(TAG, "Center-square replay FOV ${initFovH}x${initFovV} (manifest ${manifest.fovDeg}x${manifest.vfovDeg})")
         }
 
-        val stitchedFull = if (manifest.useProductionWorker) {
-            runProductionWorkerPipeline(manifest, initFovH, initFovV)
+        var pipelineTiming: JSONObject? = null
+        val stitchedFull: Bitmap = if (manifest.useProductionWorker) {
+            val workerResult = runProductionWorkerPipeline(manifest, initFovH, initFovV)
+            pipelineTiming = workerResult.timing
+            workerResult.bitmap
         } else {
             runDirectNativePipeline(manifest, initFovH, initFovV)
         }
@@ -218,6 +248,7 @@ class SpherePlanarReplayE2ETest {
             saveOutputBitmap(reference, "reference_equirect.jpg")
         }
 
+        val metricsProfiler = StepProfiler(TAG)
         val content = SphereImageMetrics.requireContentRegion(stitched, "stitched")
         val refContent = SphereImageMetrics.requireContentRegion(referenceCompare, "reference")
         val compareRegion = SphereImageMetrics.Region(
@@ -238,6 +269,7 @@ class SpherePlanarReplayE2ETest {
         val sharpRef = SphereImageMetrics.laplacianVariance(referenceCompare, refContent)
         val sharpStitch = SphereImageMetrics.laplacianVariance(stitched, content)
         val sharpRetention = SphereImageMetrics.sharpnessRetentionRatio(sharpRef, sharpStitch)
+        metricsProfiler.record("equirect_quality_metrics")
 
         Log.i(
             TAG,
@@ -255,6 +287,7 @@ class SpherePlanarReplayE2ETest {
         var meanPlanarCorr = 0.0
         var planarCount = 0
         val planarFramesJson = JSONArray()
+        val planarRoundtripProfiler = StepProfiler(TAG)
         if (!manifest.skipPlanarRoundtrip) {
             for (spec in manifest.frames) {
                 val planar = loadAssetBitmap(spec.fileName) ?: continue
@@ -286,6 +319,7 @@ class SpherePlanarReplayE2ETest {
                         "PSNR=${"%.2f".format(planarPsnr)}dB corr=${"%.4f".format(planarCorr)}"
                 )
             }
+            planarRoundtripProfiler.record("planar_roundtrip_all_frames")
             if (planarCount > 0) {
                 meanPlanarPsnr /= planarCount
                 meanPlanarCorr /= planarCount
@@ -321,6 +355,13 @@ class SpherePlanarReplayE2ETest {
                 .put("planar_mean_correlation", meanPlanarCorr)
                 .put("planar_frames", planarFramesJson)
         }
+        val timingMs = JSONObject()
+        pipelineTiming?.let { timingMs.put("worker_pipeline", it) }
+        timingMs.put("equirect_metrics", metricsProfiler.toJson())
+        if (!manifest.skipPlanarRoundtrip) {
+            timingMs.put("planar_roundtrip", planarRoundtripProfiler.toJson())
+        }
+        replayMetrics.put("timing_ms", timingMs)
         saveOutputText(replayMetrics.toString(2), "replay_metrics.json")
 
         val minCorr = when {
@@ -506,11 +547,17 @@ class SpherePlanarReplayE2ETest {
      * Replay worker pipeline: native init + [SphereStitchWorker] submit → export.
      * No [SphereCaptureController] (no live IMU, extrinsic prefs, or preview state).
      */
+    private data class WorkerPipelineResult(
+        val bitmap: Bitmap,
+        val timing: JSONObject
+    )
+
     private fun runProductionWorkerPipeline(
         manifest: Manifest,
         initFovH: Float,
         initFovV: Float
-    ): Bitmap {
+    ): WorkerPipelineResult {
+        val profiler = StepProfiler(TAG)
         val executor = Executors.newSingleThreadExecutor()
         val replayOverlapGate = if (manifest.imuDegradeDeg > 0f) {
             manifest.overlapGate
@@ -532,6 +579,7 @@ class SpherePlanarReplayE2ETest {
         )
         assertTrue("Sphere native init failed", initOk)
         SphereNative.setMirrorCameraX(false)
+        profiler.record("native_init")
 
         val worker = SphereStitchWorker(
             operations = SphereNativeOperations,
@@ -545,6 +593,7 @@ class SpherePlanarReplayE2ETest {
             Log.i(TAG, "Sweep fast: skip pre-finish/polish waits")
         }
 
+        val frameIngestMs = JSONArray()
         for (spec in manifest.frames) {
             val raw = loadAssetBitmap(spec.fileName)
                 ?: error("Missing frame asset: ${spec.fileName}")
@@ -560,14 +609,21 @@ class SpherePlanarReplayE2ETest {
             } else {
                 replayOverlapGate
             }
+            val frameStart = SystemClock.elapsedRealtime()
             submitFrameAndWait(worker, frame, seedQuat, productionReplay = true, overlapGate = frameGate)
+            val frameMs = SystemClock.elapsedRealtime() - frameStart
+            frameIngestMs.put(frameMs)
+            Log.i(TAG, "SphereProfile frame_ingest_${spec.index}=${frameMs}ms (${spec.fileName})")
         }
+        profiler.record("frame_ingest_all")
 
         assertTrue("Worker must have frames", manifest.frames.isNotEmpty())
         if (!manifest.sweepFast) {
             waitForCaptureRefineIdle(worker)
+            profiler.record("capture_refine_idle_wait")
             worker.schedulePreFinishDrain(0L)
             waitForPreFinishComplete(worker, PRE_FINISH_TIMEOUT_MS)
+            profiler.record("pre_finish_drain")
         }
 
         val exportW = manifest.exportEqW ?: SphereCaptureController.EQ_W
@@ -581,6 +637,7 @@ class SpherePlanarReplayE2ETest {
         } else {
             EXPORT_TIMEOUT_MS
         }
+        var finishPassSteps: JSONArray? = null
         if (manifest.sweepFast) {
             worker.runSweepFastExport(
                 eqW = exportW,
@@ -597,10 +654,12 @@ class SpherePlanarReplayE2ETest {
             )
         } else {
             val polishLatch = CountDownLatch(1)
+            val finishPassProfiler = StepProfiler(TAG)
             worker.onFinishBackgroundPolish = { polishLatch.countDown() }
             worker.runFinishGeneration(
                 eqW = exportW,
                 eqH = exportH,
+                onProgress = { _, label -> finishPassProfiler.record("finish:$label") },
                 onComplete = { result ->
                     exportResult = result
                     exportLatch.countDown()
@@ -610,13 +669,21 @@ class SpherePlanarReplayE2ETest {
                 "SAVE export timed out after ${EXPORT_TIMEOUT_MS}ms",
                 exportLatch.await(EXPORT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             )
+            val finish = exportResult ?: error("export result null")
+            profiler.record("finish_export_foreground", finish.durationMs)
+            val polishStart = SystemClock.elapsedRealtime()
             assertTrue(
                 "Background polish timed out after ${POLISH_TIMEOUT_MS}ms",
                 polishLatch.await(POLISH_TIMEOUT_MS, TimeUnit.MILLISECONDS)
             )
+            profiler.record("background_polish", SystemClock.elapsedRealtime() - polishStart)
+            finishPassSteps = finishPassProfiler.toJson().getJSONArray("steps")
         }
 
         val finish = exportResult ?: error("export result null")
+        if (manifest.sweepFast) {
+            profiler.record("finish_export_sweep_fast", finish.durationMs)
+        }
         assertTrue("Export equirect null", finish.equirect != null)
         assertEquals("Export width", exportW, finish.equirect!!.width)
         assertEquals("Export height", exportH, finish.equirect!!.height)
@@ -636,7 +703,9 @@ class SpherePlanarReplayE2ETest {
         executor.shutdown()
         // Keep native session alive for planar roundtrip extract + @After teardown.
 
-        return compare
+        val timingJson = profiler.toJson().put("frame_ingest_ms", frameIngestMs)
+        finishPassSteps?.let { timingJson.put("finish_export_passes", it) }
+        return WorkerPipelineResult(compare, timingJson)
     }
 
     private fun seedQuaternion(manifest: Manifest, truthQuat: FloatArray, frameIndex: Int): FloatArray =
@@ -721,10 +790,11 @@ class SpherePlanarReplayE2ETest {
     }
 
     private fun wallBudgetMs(manifest: Manifest): Long =
-        if ((manifest.productionReplay || manifest.useProductionWorker) && !manifest.fastE2eTest) {
-            E2E_WALL_MS_PRODUCTION
-        } else {
-            E2E_WALL_MS_FAST
+        when {
+            manifest.sweepFast && manifest.imuDegradeDeg > 0f -> E2E_WALL_MS_SWEEP_FAST_IMU
+            (manifest.productionReplay || manifest.useProductionWorker) && !manifest.fastE2eTest ->
+                E2E_WALL_MS_PRODUCTION
+            else -> E2E_WALL_MS_FAST
         }
 
     private fun planarPsnrGate(manifest: Manifest): Double =

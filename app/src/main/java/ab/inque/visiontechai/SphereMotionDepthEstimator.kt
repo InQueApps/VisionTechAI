@@ -5,7 +5,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Non-blocking nearness maps for sphere stitch (S30/S44).
- * Returns gradient heuristic immediately; refreshes from MiDaS on a background thread when ready.
+ * Returns MiDaS nearness when available; otherwise null (no gradient pseudo-depth).
  */
 class SphereMotionDepthEstimator(
     private val depthProcessor: DepthEstimationProcessor?
@@ -23,7 +23,7 @@ class SphereMotionDepthEstimator(
     private val frameCounter = AtomicInteger(0)
 
     /** Called from [SphereStitchWorker] executor — must not block on MiDaS. */
-    fun estimateForStitch(bitmap: Bitmap): FloatArray {
+    fun estimateForStitch(bitmap: Bitmap): FloatArray? {
         val w = bitmap.width
         val h = bitmap.height
         val n = w * h
@@ -32,12 +32,8 @@ class SphereMotionDepthEstimator(
             scheduleMiDaSRefresh(bitmap)
             return cached
         }
-        val gradient = SphereMotionDepth.gradientNearnessHeuristic(bitmap)
-        cachedNearness = gradient
-        cachedWidth = w
-        cachedHeight = h
         scheduleMiDaSRefresh(bitmap)
-        return gradient
+        return null
     }
 
     private fun scheduleMiDaSRefresh(bitmap: Bitmap) {

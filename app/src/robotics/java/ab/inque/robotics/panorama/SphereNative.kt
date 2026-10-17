@@ -112,6 +112,12 @@ object SphereNative {
         return nativeRefinePending(applyGlobalPose)
     }
 
+    /** Commit deferred live-capture frame stores before export/refine. */
+    fun flushPendingFrameStores() {
+        if (!loaded) return
+        nativeFlushPendingFrameStores()
+    }
+
     /** S32: whether [refinePending] would run (avoids no-op global passes). */
     fun hasRefineWorkPending(applyGlobalPose: Boolean = false): Boolean {
         if (!loaded) return false
@@ -145,10 +151,28 @@ object SphereNative {
         return nativeRefineStoredPoses()
     }
 
-    /** Clear equirect and rebuild from stored frames with full quality align. */
+    /** Resplat from current refined poses at full resolution (does not reset to IMU/fast). */
     fun rebuildFullAlign(): Boolean {
         if (!loaded) return false
         return nativeRebuildFullAlign()
+    }
+
+    /** Targeted GN/small-search polish on outlier frames only. */
+    fun refineTargetedPhotometric(): Int {
+        if (!loaded) return 0
+        return nativeRefineTargetedPhotometric()
+    }
+
+    /** Cheap SO(3) reconciliation after local pose corrections. */
+    fun refineFeatureGraphReconcile(): Boolean {
+        if (!loaded) return false
+        return nativeRefineFeatureGraphReconcile()
+    }
+
+    /** Parallax warp on frames with residual rotation error only. */
+    fun refineConditionalParallax(): Int {
+        if (!loaded) return 0
+        return nativeRefineConditionalParallax()
     }
 
     /** Resplat stored poses with nearest-center overlap (no photometric align). */
@@ -302,6 +326,19 @@ object SphereNative {
     }
 
     /**
+     * DONE preview: cached feature-edge SO(3) solve only (no image SSD global iterations).
+     */
+    fun setPoseGraphOnlyGlobal(enabled: Boolean) {
+        if (loaded) nativeSetPoseGraphOnlyGlobal(enabled)
+    }
+
+    /** Idle pre-finish: BRIEF + relative rotation edges without pose solve. */
+    fun buildFeatureGraphCache(): Boolean {
+        if (!loaded) return false
+        return nativeBuildFeatureGraphCache()
+    }
+
+    /**
      * Grow/shrink internal equirect to export size and resplat all stored frames
      * without photometric align (fast DONE after background pre-finish).
      */
@@ -310,8 +347,46 @@ object SphereNative {
         return nativePrepareExportEquirect(exportW, exportH)
     }
 
+    /** Center-weighted feather resplat for DONE / capture preview (no seams). */
+    fun preparePreviewResplat(outW: Int, outH: Int): Boolean {
+        if (!loaded) return false
+        return nativePreparePreviewResplat(outW, outH)
+    }
+
     /** F2: longest frame side for live-path splat downscale (full-res stored for refine). */
     fun liveSplatDim(): Int = if (loaded) nativeGetLiveSplatDim() else 320
+
+    /** Isolated BRIEF detect + mutual match + RANSAC benchmark (logs SphereProfile). */
+    fun profileFeatureMatcher(bitmapA: Bitmap, bitmapB: Bitmap) {
+        if (!loaded) return
+        val wA = bitmapA.width
+        val hA = bitmapA.height
+        val wB = bitmapB.width
+        val hB = bitmapB.height
+        val pxA = IntArray(wA * hA)
+        val pxB = IntArray(wB * hB)
+        bitmapA.getPixels(pxA, 0, wA, 0, 0, wA, hA)
+        bitmapB.getPixels(pxB, 0, wB, 0, 0, wB, hB)
+        nativeProfileFeatureMatcher(pxA, wA, hA, pxB, wB, hB)
+    }
+
+    /** Live pairwise search vs last stored frame (logs SphereProfile section timers). */
+    fun profileLivePairwise(bitmap: Bitmap, quaternion: FloatArray) {
+        if (!loaded || quaternion.size < 4) return
+        val w = bitmap.width
+        val h = bitmap.height
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        nativeProfileLivePairwise(
+            pixels, w, h,
+            quaternion[0], quaternion[1], quaternion[2], quaternion[3]
+        )
+    }
+
+    /** Feature graph edge build over stored frames (logs SphereProfile). */
+    fun profileFeatureGraph() {
+        if (loaded) nativeProfileFeatureGraph()
+    }
 
     private external fun nativeInit(
         eqW: Int, eqH: Int, fovH: Float, fovV: Float,
@@ -330,6 +405,7 @@ object SphereNative {
         allowReject: Boolean
     ): Int
     private external fun nativeRefinePending(applyGlobalPose: Boolean): Boolean
+    private external fun nativeFlushPendingFrameStores()
     private external fun nativeHasRefineWorkPending(applyGlobalPose: Boolean): Boolean
     private external fun nativeRefineIntrinsicsPending(): Boolean
     private external fun nativeGetEquirect(pixelsOut: IntArray, outW: Int, outH: Int): Boolean
@@ -337,6 +413,9 @@ object SphereNative {
     private external fun nativeRefineSeams(light: Boolean): Boolean
     private external fun nativeRefineStoredPoses(): Boolean
     private external fun nativeRebuildFullAlign(): Boolean
+    private external fun nativeRefineTargetedPhotometric(): Int
+    private external fun nativeRefineFeatureGraphReconcile(): Boolean
+    private external fun nativeRefineConditionalParallax(): Int
     private external fun nativeRebuildExportNearestCenter(): Boolean
     private external fun nativeResetPosesToImu(): Boolean
     private external fun nativeGetRectilinear(pixelsOut: IntArray, outW: Int, outH: Int, azimuth: Float, elevation: Float, fov: Float): Boolean
@@ -355,8 +434,20 @@ object SphereNative {
     private external fun nativeGetLastRefineStats(): FloatArray?
     private external fun nativeSetGlobalRefinePasses(passes: Int)
     private external fun nativeSetFastFinishRefine(enabled: Boolean)
+    private external fun nativeSetPoseGraphOnlyGlobal(enabled: Boolean)
+    private external fun nativeBuildFeatureGraphCache(): Boolean
     private external fun nativePrepareExportEquirect(exportW: Int, exportH: Int): Boolean
+    private external fun nativePreparePreviewResplat(outW: Int, outH: Int): Boolean
     private external fun nativeGetLiveSplatDim(): Int
+    private external fun nativeProfileFeatureMatcher(
+        pixelsA: IntArray, wA: Int, hA: Int,
+        pixelsB: IntArray, wB: Int, hB: Int
+    )
+    private external fun nativeProfileLivePairwise(
+        pixels: IntArray, w: Int, h: Int,
+        qx: Float, qy: Float, qz: Float, qw: Float
+    )
+    private external fun nativeProfileFeatureGraph()
     private external fun nativeReset()
     private external fun nativeSetMirrorCameraX(mirror: Boolean)
     private external fun nativeRelease()

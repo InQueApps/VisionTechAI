@@ -182,14 +182,14 @@ class SphereStitchWorkerTest {
             executor = executor,
             refineExecutor = refineExecutor,
             refineDelayMs = 60_000L,
-            periodicRefineEvery = 6
+            periodicRefineEvery = 5
         )
         val refineLatch = java.util.concurrent.CountDownLatch(1)
         worker.onResult = { result ->
             if (result.refined) refineLatch.countDown()
         }
         val quat = floatArrayOf(0f, 0f, 0f, 1f)
-        repeat(6) { i ->
+        repeat(4) { i ->
             val stitchLatch = java.util.concurrent.CountDownLatch(1)
             worker.onResult = { result ->
                 if (!result.refined) stitchLatch.countDown()
@@ -210,9 +210,9 @@ class SphereStitchWorkerTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             if (System.currentTimeMillis() > refineDeadline) break
         }
-        assertEquals(6, ops.addCount)
+        assertEquals(4, ops.addCount)
         assertEquals(
-            "Periodic refine must not fire during active capture",
+            "Periodic refine must not fire before five accepted frames",
             0,
             ops.refineCount
         )
@@ -337,8 +337,7 @@ class SphereStitchWorkerTest {
         assertTrue(refineExecutor.awaitTermination(3, TimeUnit.SECONDS))
         Shadows.shadowOf(Looper.getMainLooper()).idle()
         assertTrue("Debounced refine should run after frame 2", refineLatch.count == 0L)
-        assertTrue("Capture refine should run at least once", ops.storedCount >= 1)
-        assertTrue("Global refine should run at least once", ops.globalCount >= 1)
+        assertTrue("Capture refine should run global at least once", ops.globalCount >= 1)
         executor.shutdown()
         assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))
         worker.shutdown()
@@ -352,15 +351,18 @@ class SphereStitchWorkerTest {
                 steps.add("refineStored")
                 return true
             }
-            override fun rebuildFullAlign(): Boolean {
-                steps.add("rebuildFullAlign")
+            override fun refineConditionalParallax(): Int {
+                steps.add("conditionalParallax")
+                return 1
+            }
+            override fun refineTargetedPhotometric(): Int {
+                steps.add("targetedPhotometric")
+                return 1
+            }
+            override fun refineFeatureGraphReconcile(): Boolean {
+                steps.add("graphReconcile")
                 return true
             }
-            override fun refineGlobalPose(): Boolean {
-                steps.add("global")
-                return true
-            }
-            override fun refineIntrinsics(): Boolean = false
             override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean {
                 steps.add("prepareExport")
                 return true
@@ -374,6 +376,9 @@ class SphereStitchWorkerTest {
             }
             override fun setGlobalRefinePasses(passes: Int) {
                 steps.add("globalPasses=$passes")
+            }
+            override fun setPoseGraphOnlyGlobal(enabled: Boolean) {
+                steps.add(if (enabled) "poseGraphOnlyOn" else "poseGraphOnlyOff")
             }
         }
         val executor = Executors.newSingleThreadExecutor()
@@ -409,28 +414,16 @@ class SphereStitchWorkerTest {
         worker.shutdown()
         assertTrue(worker.awaitTermination(5, TimeUnit.SECONDS))
         val expectedForeground = listOf(
-            "fastFinishOff",
-            "globalPasses=0",
-            "refineStored",
-            "refineStored",
-            "global", "rebuildFullAlign",
-            "global", "rebuildFullAlign",
-            "refineStored",
-            "global", "rebuildFullAlign",
+            "graphReconcile",
+            "targetedPhotometric",
+            "graphReconcile",
+            "conditionalParallax",
             "prepareExport",
             "seamFull"
         )
         assertEquals(expectedForeground, ops.steps.take(expectedForeground.size))
-        val seamIdx = ops.steps.indexOf("seamFull")
-        val firstGlobal = ops.steps.indexOf("global")
-        assertTrue(
-            "Global pose must run before export seams",
-            firstGlobal >= 0 && firstGlobal < seamIdx
-        )
-        assertTrue(
-            "DONE must run full global + align passes",
-            ops.steps.count { it == "rebuildFullAlign" } >= 2
-        )
+        assertFalse(ops.steps.contains("global"))
+        assertFalse(ops.steps.contains("rebuildFullAlign"))
         executor.shutdown()
         refineExecutor.shutdown()
         intrinsicExecutor.shutdown()
@@ -530,20 +523,20 @@ class SphereStitchWorkerTest {
         val ops = object : FakeOps() {
             val steps = mutableListOf<String>()
             override fun getSolidAngleCoverage(): Float = 0.90f
+            override fun buildFeatureGraphCache(): Boolean {
+                steps.add("graphCache")
+                return true
+            }
             override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean {
                 steps.add("prepareExport")
                 return true
             }
-            override fun refineStoredPoses(): Boolean {
-                steps.add("refineStored")
+            override fun refineGlobalPose(): Boolean {
+                steps.add("global")
                 return true
             }
             override fun rebuildFullAlign(): Boolean {
                 steps.add("rebuildFullAlign")
-                return true
-            }
-            override fun refineGlobalPose(): Boolean {
-                steps.add("global")
                 return true
             }
             override fun refineSeams(light: Boolean): Boolean {
@@ -576,10 +569,7 @@ class SphereStitchWorkerTest {
             }
         }
         val preFinishDeadline = System.currentTimeMillis() + 15000
-        val preFinishConfig = SphereRefinePolicy.preFinishRefinementPasses()
-        val targetRebuilds =
-            preFinishConfig.globalPasses + preFinishConfig.convergePasses
-        while (ops.steps.count { it == "rebuildFullAlign" } < targetRebuilds &&
+        while (!ops.steps.contains("graphCache") &&
             System.currentTimeMillis() < preFinishDeadline
         ) {
             Shadows.shadowOf(Looper.getMainLooper()).idleFor(100, TimeUnit.MILLISECONDS)
@@ -590,8 +580,12 @@ class SphereStitchWorkerTest {
         preFinishExecutor.shutdown()
         assertTrue(preFinishExecutor.awaitTermination(10, TimeUnit.SECONDS))
         assertTrue(
-            "Pre-finish should run full align rebuilds before DONE",
-            ops.steps.count { it == "rebuildFullAlign" } >= preFinishConfig.globalPasses
+            "Pre-finish idle should cache feature graph edges",
+            ops.steps.contains("graphCache")
+        )
+        assertFalse(
+            "Pre-finish must not run full align rebuilds",
+            ops.steps.contains("rebuildFullAlign")
         )
         val rebuildsBeforeFinish = ops.steps.count { it == "rebuildFullAlign" }
         val finishLatch = java.util.concurrent.CountDownLatch(1)
@@ -617,5 +611,67 @@ class SphereStitchWorkerTest {
             "DONE should prepare export resolution",
             ops.steps.contains("prepareExport")
         )
+    }
+
+    @Test
+    fun invalidatePendingRefinement_stillDeliversFinishOnComplete() {
+        val ops = FakeOps()
+        val executor = Executors.newSingleThreadExecutor()
+        val refineExecutor = Executors.newSingleThreadExecutor()
+        val worker = SphereStitchWorker(
+            operations = ops,
+            executor = executor,
+            refineExecutor = refineExecutor
+        )
+        worker.submit(
+            Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            floatArrayOf(0f, 0f, 0f, 1f)
+        )
+        val submitDeadline = System.currentTimeMillis() + 3000
+        while (ops.addCount < 1 && System.currentTimeMillis() < submitDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        val latch = java.util.concurrent.CountDownLatch(1)
+        var finish: SphereFinishResult? = null
+        worker.runFinishGeneration(64, 32) { result ->
+            finish = result
+            latch.countDown()
+        }
+        worker.invalidatePendingRefinement()
+        val deadline = System.currentTimeMillis() + 5000
+        while (finish == null && System.currentTimeMillis() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(10)
+        }
+        assertNotNull("Finish onComplete must fire even when invalidated", finish)
+        refineExecutor.shutdown()
+        executor.shutdown()
+        worker.shutdown()
+    }
+
+    @Test
+    fun runStitch_failureStillReleasesInFlight() {
+        val ops = object : FakeOps() {
+            override fun addFrameFast(bitmap: Bitmap, quaternion: FloatArray, overlapGate: Float): Int {
+                throw RuntimeException("stitch boom")
+            }
+        }
+        val executor = Executors.newSingleThreadExecutor()
+        val worker = SphereStitchWorker(operations = ops, executor = executor)
+        val latch = java.util.concurrent.CountDownLatch(1)
+        worker.onResult = { latch.countDown() }
+        worker.submit(
+            Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            floatArrayOf(0f, 0f, 0f, 1f)
+        )
+        val deadline = System.currentTimeMillis() + 3000
+        while (!worker.awaitStitchIdle(100) && System.currentTimeMillis() < deadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        assertTrue("Worker must not stay busy after stitch failure", worker.awaitStitchIdle(500))
+        executor.shutdown()
+        worker.shutdown()
     }
 }

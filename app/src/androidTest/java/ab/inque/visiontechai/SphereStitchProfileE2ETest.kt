@@ -18,6 +18,8 @@ import java.util.concurrent.TimeUnit
 /**
  * Profiles stitch hot paths after speed optimizations. Logs under TAG=SphereProfile.
  * Not a hard gate — compare before/after on the same device.
+ *
+ * Capture on device: adb logcat -s SphereProfile
  */
 @RunWith(AndroidJUnit4::class)
 class SphereStitchProfileE2ETest {
@@ -40,6 +42,56 @@ class SphereStitchProfileE2ETest {
         }
         bmp.setPixels(px, 0, FRAME_W, 0, 0, FRAME_W, FRAME_H)
         return bmp
+    }
+
+  /** Shifted stripe pattern for feature-matcher A/B pair. */
+    private fun shiftedStripeBitmap(dx: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(FRAME_W, FRAME_H, Bitmap.Config.ARGB_8888)
+        val px = IntArray(FRAME_W * FRAME_H)
+        for (y in 0 until FRAME_H) {
+            for (x in 0 until FRAME_W) {
+                val sx = (x + dx) % FRAME_W
+                px[y * FRAME_W + x] = if ((sx / 16) % 2 == 0) Color.WHITE else Color.BLACK
+            }
+        }
+        bmp.setPixels(px, 0, FRAME_W, 0, 0, FRAME_W, FRAME_H)
+        return bmp
+    }
+
+    @Test
+    fun profile_featureMatcher_isolated() {
+        assumeTrue(SphereNative.isAvailable())
+        SphereNative.init(EQ_W, EQ_H, 65f, 50f)
+        val frameA = stripeBitmap()
+        val frameB = shiftedStripeBitmap(24)
+        Log.i(TAG, "PROFILE featureMatcher isolated (cold + warm x3)")
+        SphereNative.profileFeatureMatcher(frameA, frameB)
+        SphereNative.release()
+    }
+
+    @Test
+    fun profile_livePairwise_and_featureGraph() {
+        assumeTrue(SphereNative.isAvailable())
+        SphereNative.init(EQ_W, EQ_H, 65f, 50f)
+        val frame = stripeBitmap()
+
+        for (i in 0 until 4) {
+            val q = if (i == 0) {
+                floatArrayOf(0f, 0f, 0f, 1f)
+            } else {
+                QuaternionMath.fromAxisAngle(0.0, 0.0, 1.0, Math.toRadians(i * 15.0))
+            }
+            SphereNative.addFrameFast(frame, q, 0.10f)
+        }
+
+        val qNext = QuaternionMath.fromAxisAngle(0.0, 0.0, 1.0, Math.toRadians(60.0))
+        Log.i(TAG, "PROFILE livePairwise (4 stored frames)")
+        SphereNative.profileLivePairwise(frame, qNext)
+
+        Log.i(TAG, "PROFILE featureGraph (${SphereNative.getStoredFrameQuaternions()?.size ?: 0} frames)")
+        SphereNative.profileFeatureGraph()
+
+        SphereNative.release()
     }
 
     @Test

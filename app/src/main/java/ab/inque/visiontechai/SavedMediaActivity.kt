@@ -1,6 +1,6 @@
 package ab.inque.visiontechai
 
-import ab.inque.robotics.panorama.SphereNative
+import ab.inque.robotics.panorama.SphereViewerNative
 
 
 import android.Manifest
@@ -663,8 +663,8 @@ class SavedMediaActivity : AppCompatActivity() {
                 }
             } catch (_: Exception) { null }
 
-            if (bitmap != null && SphereNative.isAvailable()) {
-                SphereNative.loadEquirect(bitmap)
+            if (bitmap != null && SphereViewerNative.isAvailable()) {
+                SphereViewerNative.loadEquirect(bitmap)
                 bitmap.recycle()
                 runOnUiThread { sphereViewer.setLookDirection(0f, 0f, 90f) }
             } else {

@@ -59,7 +59,6 @@ class SphereSessionSaveE2ETest {
         assumeFalse("4096 SAVE skipped on emulator", isEmulator())
 
         val ctrlRef = AtomicReference<SphereCaptureController>()
-        val exportLatch = CountDownLatch(1)
 
         activityScenario.onActivity { activity ->
             val session = sphereSession(activity) ?: error("sphereSession null")
@@ -71,22 +70,13 @@ class SphereSessionSaveE2ETest {
         stitchStripeFrames(stitchWorker(ctrl))
         waitForWorkerIdle(ctrl)
         assertTrue(ctrl.finishCapture())
-        val previewDeadline = System.currentTimeMillis() + 15_000
-        while (ctrl.state != SphereCaptureController.State.PREVIEW && System.currentTimeMillis() < previewDeadline) {
+        val finalizeDeadline = System.currentTimeMillis() + EXPORT_TIMEOUT_SEC * 1000
+        while (!ctrl.isFinalized() && System.currentTimeMillis() < finalizeDeadline) {
             Thread.sleep(50)
         }
-        assertTrue("PREVIEW after DONE", ctrl.state == SphereCaptureController.State.PREVIEW)
+        assertTrue("FINALIZED after DONE", ctrl.isFinalized())
 
-        activityScenario.onActivity {
-            ctrl.startBackgroundFullExport { result ->
-                if (result.equirect != null) exportLatch.countDown()
-            }
-        }
-
-        assertTrue(
-            "Background export did not complete in ${EXPORT_TIMEOUT_SEC}s",
-            exportLatch.await(EXPORT_TIMEOUT_SEC, TimeUnit.SECONDS)
-        )
+        activityScenario.onActivity { session.saveEquirectangular() }
         activityScenario.onActivity {
             val equirect = ctrl.getFullEquirect()
             assertNotNull(equirect)
@@ -95,7 +85,7 @@ class SphereSessionSaveE2ETest {
     }
 
     @Test(timeout = 120_000)
-    fun workflow_reenterBlockedWhileExportInProgress() {
+    fun workflow_reenterBlockedWhileFinalizationInProgress() {
         assumeTrue(SphereNative.isAvailable())
 
         val sessionRef = AtomicReference<SphereSessionController>()
@@ -113,22 +103,14 @@ class SphereSessionSaveE2ETest {
         stitchStripeFrames(stitchWorker(ctrl))
         waitForWorkerIdle(ctrl)
         ctrl.finishCapture()
-        val previewDeadline = System.currentTimeMillis() + 15_000
-        while (ctrl.state != SphereCaptureController.State.PREVIEW && System.currentTimeMillis() < previewDeadline) {
-            Thread.sleep(50)
-        }
-
-        activityScenario.onActivity { session.saveEquirectangular() }
-
-        Thread.sleep(500)
-        val exportStarted = ctrl.isFullExportInProgress() || ctrl.isFullExportComplete()
-        assumeTrue("Export did not start (device too fast?)", exportStarted)
+        assertTrue(ctrl.isPreviewSession())
 
         activityScenario.onActivity { session.enter() }
 
         activityScenario.onActivity {
-            val stillSame = session.controller != null && session.controller!!.hasCapturedFrames
-            assertTrue("Re-enter must not replace the exporting session", stillSame)
+            val stillSame = session.controller != null && session.controller === ctrl
+            assertTrue("Re-enter must not replace session during finalization", stillSame)
+            assertTrue(ctrl.isPreviewSession())
         }
     }
 

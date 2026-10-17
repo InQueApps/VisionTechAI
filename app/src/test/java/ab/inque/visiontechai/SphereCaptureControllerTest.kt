@@ -52,13 +52,24 @@ class SphereCaptureControllerTest {
         override fun getLastFrameInfo(): FrameAlignmentInfo? =
             FrameAlignmentInfo(addCount, 50, 200, 1f, 100f, false)
         override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
-            Bitmap.createBitmap(8, 4, Bitmap.Config.ARGB_8888)
+            Bitmap.createBitmap(
+                eqW.coerceAtMost(SphereCaptureController.EQ_W),
+                eqH.coerceAtMost(SphereCaptureController.EQ_H),
+                Bitmap.Config.ARGB_8888
+            )
         override fun refinePending(applyGlobalPose: Boolean): Boolean = true
         override fun refineGlobalPose(): Boolean = true
         override fun refineIntrinsics(): Boolean = true
         override fun refineStoredPoses(): Boolean = true
         override fun rebuildFullAlign(): Boolean = true
         override fun refineSeams(light: Boolean): Boolean = true
+        override fun preparePreviewResplat(outW: Int, outH: Int): Boolean = true
+        override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean = true
+        override fun flushPendingFrameStores() {}
+        override fun setPoseGraphOnlyGlobal(enabled: Boolean) {}
+        override fun setFastFinishRefine(enabled: Boolean) {}
+        override fun setGlobalRefinePasses(passes: Int) {}
+        override fun buildFeatureGraphCache(): Boolean = false
         override fun getSessionDistortionK1(): Float = sessionK1
         override fun reset() {
             addCount = 0
@@ -140,7 +151,7 @@ class SphereCaptureControllerTest {
         executor.shutdown()
         assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
         Shadows.shadowOf(Looper.getMainLooper()).idle()
-        assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
+        assertTrue(controller.isPreviewSession())
         assertTrue(previewReady)
     }
 
@@ -158,7 +169,15 @@ class SphereCaptureControllerTest {
         executor.shutdown()
         assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
         Shadows.shadowOf(Looper.getMainLooper()).idle()
-        assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
+        val finalizeDeadline = System.currentTimeMillis() + 30_000
+        while (!controller.isFinalized() && System.currentTimeMillis() < finalizeDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+        }
+        worker.shutdown()
+        assertTrue(worker.awaitTermination(30, TimeUnit.SECONDS))
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(SphereCaptureController.State.PREVIEW_FINALIZED, controller.state)
         assertTrue(previewReady)
         assertNotNull(controller.getFullEquirect())
     }
@@ -170,17 +189,16 @@ class SphereCaptureControllerTest {
         submitFrameAndAwait(shutdownExecutor = false)
         assertTrue(controller.finishCapture())
         val deadline = System.currentTimeMillis() + 5000
-        while (controller.state != SphereCaptureController.State.PREVIEW &&
-            System.currentTimeMillis() < deadline
-        ) {
+        while (!controller.isPreviewSession() && System.currentTimeMillis() < deadline) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             Thread.sleep(5)
         }
-        assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
+        worker.shutdown()
+        assertTrue(worker.awaitTermination(30, TimeUnit.SECONDS))
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(controller.isPreviewSession())
         assertTrue(controller.resumeCapture())
         assertEquals(SphereCaptureController.State.CAPTURING, controller.state)
-        executor.shutdown()
-        assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS))
     }
 
     @Test
@@ -246,7 +264,7 @@ class SphereCaptureControllerTest {
         submitFrameAndAwait(shutdownExecutor = false)
         assertTrue(controller.finishCapture())
         val previewDeadline = System.currentTimeMillis() + 5000
-        while (controller.state != SphereCaptureController.State.PREVIEW &&
+        while (!controller.isPreviewSession() &&
             System.currentTimeMillis() < previewDeadline
         ) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -322,6 +340,26 @@ class SphereCaptureControllerTest {
         assertEquals(0, ops.addCount)
     }
 
+    @Test
+    fun release_deliversPendingExportCallbacks() {
+        controller.startSession()
+        submitFrameAndAwait(shutdownExecutor = false)
+        submitFrameAndAwait(shutdownExecutor = false)
+        assertTrue(controller.finishCapture())
+        val previewDeadline = System.currentTimeMillis() + 5000
+        while (!controller.isPreviewSession() &&
+            System.currentTimeMillis() < previewDeadline
+        ) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        var exportDelivered = false
+        assertTrue(controller.startBackgroundFullExport { exportDelivered = true })
+        controller.release()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("Release must deliver pending export callbacks", exportDelivered)
+    }
+
     private fun submitFrameAndAwait(shutdownExecutor: Boolean = true) {
         controller.captureFrame(solidBitmap())
         val deadline = System.currentTimeMillis() + 3000
@@ -329,6 +367,8 @@ class SphereCaptureControllerTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             Thread.sleep(5)
         }
+        worker.awaitStitchIdle()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
         if (shutdownExecutor) {
             executor.shutdown()
             assertTrue(executor.awaitTermination(3, TimeUnit.SECONDS))

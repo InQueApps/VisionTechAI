@@ -45,9 +45,14 @@ class SphereSessionControllerSaveTest {
         override fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap? = null
         override fun getLastFrameInfo() = null
         override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
-            Bitmap.createBitmap(eqW.coerceAtMost(64), eqH.coerceAtMost(32), Bitmap.Config.ARGB_8888).apply {
+            Bitmap.createBitmap(
+                eqW.coerceAtMost(SphereCaptureController.EQ_W),
+                eqH.coerceAtMost(SphereCaptureController.EQ_H),
+                Bitmap.Config.ARGB_8888
+            ).apply {
                 eraseColor(Color.BLUE)
             }
+        override fun preparePreviewResplat(outW: Int, outH: Int): Boolean = true
         override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean = true
         override fun refineSeams(light: Boolean): Boolean = true
         override fun reset() { frames = 0 }
@@ -117,7 +122,7 @@ class SphereSessionControllerSaveTest {
         Shadows.shadowOf(Looper.getMainLooper()).idle()
         assertNotNull(session.controller)
         assertTrue(session.controller!!.hasCapturedFrames)
-        assertTrue(session.controller!!.isFullExportInProgress() || ops.frames > 0)
+        assertTrue(session.controller!!.isFinalized() || ops.frames > 0)
     }
 
     private fun captureFramesAndFinish(count: Int) {
@@ -128,15 +133,15 @@ class SphereSessionControllerSaveTest {
             awaitFrames(it + 1)
         }
         session.finishCapture()
-        val deadline = System.currentTimeMillis() + 5000
+        val deadline = System.currentTimeMillis() + 30_000
         while (
-            session.controller?.state != SphereCaptureController.State.PREVIEW &&
+            session.controller?.isFinalized() != true &&
             System.currentTimeMillis() < deadline
         ) {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
-            Thread.sleep(5)
+            Thread.sleep(20)
         }
-        assertTrue(session.controller?.state == SphereCaptureController.State.PREVIEW)
+        assertTrue(session.controller?.isFinalized() == true)
     }
 
     private fun awaitFrames(count: Int) {

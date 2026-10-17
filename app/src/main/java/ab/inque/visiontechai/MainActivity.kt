@@ -786,6 +786,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun setMode(photo: Boolean) {
         isPhotoMode = photo
+        if (visionState.mode == VisionMode.SPHERE) {
+            sphereSession.onSphereCaptureModeChanged(photo)
+        }
         val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy))
         val redBg = ColorStateList.valueOf(Color.RED)
         val whiteIcon = ColorStateList.valueOf(Color.WHITE)

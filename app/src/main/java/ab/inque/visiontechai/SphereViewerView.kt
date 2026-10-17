@@ -1,7 +1,7 @@
 package ab.inque.visiontechai
 
-import ab.inque.robotics.panorama.SphereNative
-
+import ab.inque.robotics.panorama.SphereLookOrientation
+import ab.inque.robotics.panorama.SphereViewerNative
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -9,19 +9,18 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.util.AttributeSet
+import android.view.Choreographer
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.OverScroller
-import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
 /**
  * Bitmap-based interactive viewer for a 360-degree equirectangular panorama.
- * Supports touch-drag to pan (azimuth/elevation) and pinch to zoom (FOV).
- * Renders a rectilinear (perspective) projection from the equirect via C++.
+ * Uses [SphereViewerNative] only — never loads display bitmaps into [SphereNative].
  */
 class SphereViewerView @JvmOverloads constructor(
     context: Context,
@@ -29,9 +28,15 @@ class SphereViewerView @JvmOverloads constructor(
     defStyleAttr: Int = 0
 ) : View(context, attrs, defStyleAttr) {
 
-    private var azimuth = 0f        // radians
-    private var elevation = 0f      // radians
+    private var azimuth = 0f        // radians (touch-only mode)
+    private var elevation = 0f      // radians (touch-only mode)
     private var fieldOfView = 90f   // degrees
+
+    private var imuModeEnabled = false
+    private var imuReferenceQuat: FloatArray? = null
+    private var touchAzOffset = 0f
+    private var touchElOffset = 0f
+    private var orientationSupplier: (() -> FloatArray)? = null
 
     private var viewBitmap: Bitmap? = null
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -42,14 +47,20 @@ class SphereViewerView @JvmOverloads constructor(
     }
 
     private val scroller = OverScroller(context)
+    private val choreographer = Choreographer.getInstance()
+    private var imuFramePosted = false
+
+    private val imuFrameCallback = Choreographer.FrameCallback {
+        imuFramePosted = false
+        if (imuModeEnabled && orientationSupplier != null) {
+            refreshView()
+            scheduleImuFrame()
+        }
+    }
 
     private val gestureDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
         override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-            val w = width.coerceAtLeast(1).toFloat()
-            val sensitivity = fieldOfView * (Math.PI.toFloat() / 180f) / w
-            azimuth += dx * sensitivity
-            elevation = (elevation - dy * sensitivity).coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
-            refreshView()
+            applyPanDelta(dx, dy)
             return true
         }
 
@@ -74,6 +85,8 @@ class SphereViewerView @JvmOverloads constructor(
     private var lastFlingX = 0
     private var lastFlingY = 0
 
+    val isImuModeEnabled: Boolean get() = imuModeEnabled
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
         scaleDetector.onTouchEvent(event)
         gestureDetector.onTouchEvent(event)
@@ -88,22 +101,56 @@ class SphereViewerView @JvmOverloads constructor(
             val dy = (cy - lastFlingY).toFloat()
             lastFlingX = cx
             lastFlingY = cy
-
-            val w = width.coerceAtLeast(1).toFloat()
-            val sensitivity = fieldOfView * (Math.PI.toFloat() / 180f) / w
-            azimuth -= dx * sensitivity
-            elevation = (elevation + dy * sensitivity).coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
-            refreshView()
+            applyPanDelta(-dx, dy)
             postInvalidateOnAnimation()
         }
     }
 
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (imuModeEnabled) scheduleImuFrame()
+    }
+
+    override fun onDetachedFromWindow() {
+        stopImuFrame()
+        super.onDetachedFromWindow()
+    }
+
+    private fun applyPanDelta(dx: Float, dy: Float) {
+        val w = width.coerceAtLeast(1).toFloat()
+        val sensitivity = fieldOfView * (Math.PI.toFloat() / 180f) / w
+        if (imuModeEnabled) {
+            touchAzOffset += dx * sensitivity
+            touchElOffset = (touchElOffset - dy * sensitivity).coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
+        } else {
+            azimuth += dx * sensitivity
+            elevation = (elevation - dy * sensitivity).coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
+        }
+        refreshView()
+    }
+
+    private fun effectiveLook(): Pair<Float, Float> {
+        if (!imuModeEnabled) return azimuth to elevation
+        val ref = imuReferenceQuat
+        val current = orientationSupplier?.invoke()
+        val (imuDeltaAz, imuDeltaEl) = if (ref != null && current != null) {
+            val (curAz, curEl) = SphereLookOrientation.quatToAzEl(current)
+            val (refAz, refEl) = SphereLookOrientation.quatToAzEl(ref)
+            (curAz - refAz) to (curEl - refEl)
+        } else {
+            0f to 0f
+        }
+        val el = (touchElOffset + imuDeltaEl).coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
+        return (touchAzOffset + imuDeltaAz) to el
+    }
+
     private fun refreshView() {
-        if (width == 0 || height == 0) return
+        if (width == 0 || height == 0 || !SphereViewerNative.isAvailable()) return
+        val (lookAz, lookEl) = effectiveLook()
         val outW = min(width, 960)
         val outH = min(height, 720)
-        val bmp = SphereNative.getRectilinearBitmap(outW, outH, azimuth, elevation, fieldOfView)
-        if (bmp != null) {
+        val bmp = SphereViewerNative.getRectilinearBitmap(outW, outH, lookAz, lookEl, fieldOfView)
+        if (bmp != null && !bmp.isRecycled) {
             viewBitmap?.recycle()
             viewBitmap = bmp
             invalidate()
@@ -136,16 +183,78 @@ class SphereViewerView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Load a display-only equirect snapshot into the viewer. Does not touch stitch state.
+     */
+    fun setEquirectBitmap(bitmap: Bitmap) {
+        if (bitmap.isRecycled || !SphereViewerNative.isAvailable()) return
+        if (!SphereViewerNative.loadEquirect(bitmap)) return
+        refreshView()
+    }
+
     fun setLookDirection(az: Float, el: Float, fov: Float = 90f) {
-        azimuth = az
-        elevation = el
         fieldOfView = fov.coerceIn(MIN_FOV, MAX_FOV)
+        if (imuModeEnabled) {
+            touchAzOffset = az
+            touchElOffset = el.coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
+            imuReferenceQuat = orientationSupplier?.invoke()?.copyOf()
+        } else {
+            azimuth = az
+            elevation = el.coerceIn(-MAX_ELEVATION, MAX_ELEVATION)
+        }
+        refreshView()
+    }
+
+    fun setImuOrientationSupplier(supplier: (() -> FloatArray)?) {
+        orientationSupplier = supplier
+    }
+
+    fun setImuModeEnabled(enabled: Boolean) {
+        if (enabled == imuModeEnabled) return
+        if (enabled) {
+            touchAzOffset = azimuth
+            touchElOffset = elevation
+            imuReferenceQuat = orientationSupplier?.invoke()?.copyOf()
+            imuModeEnabled = true
+            scheduleImuFrame()
+            refreshView()
+        } else {
+            imuModeEnabled = false
+            stopImuFrame()
+            val (lookAz, lookEl) = effectiveLook()
+            azimuth = lookAz
+            elevation = lookEl
+            touchAzOffset = 0f
+            touchElOffset = 0f
+            imuReferenceQuat = null
+            refreshView()
+        }
+    }
+
+    private fun scheduleImuFrame() {
+        if (!imuModeEnabled || imuFramePosted) return
+        imuFramePosted = true
+        choreographer.postFrameCallback(imuFrameCallback)
+    }
+
+    private fun stopImuFrame() {
+        if (imuFramePosted) {
+            choreographer.removeFrameCallback(imuFrameCallback)
+            imuFramePosted = false
+        }
+    }
+
+    /** Re-sample the viewer equirect after a stitch-side refinement pass. */
+    fun requestRender() {
         refreshView()
     }
 
     fun cleanup() {
+        setImuModeEnabled(false)
+        orientationSupplier = null
         viewBitmap?.recycle()
         viewBitmap = null
+        SphereViewerNative.release()
     }
 
     companion object {

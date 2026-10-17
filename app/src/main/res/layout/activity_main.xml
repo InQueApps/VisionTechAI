@@ -533,6 +533,15 @@
             android:background="#80000000">
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereImuButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="IMU"
+                app:strokeColor="@android:color/white" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereSaveButton"
                 style="@style/PrismActionButton"
                 android:layout_width="wrap_content"

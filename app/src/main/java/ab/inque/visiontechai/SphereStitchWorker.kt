@@ -36,9 +36,13 @@ data class SphereFinishResult(
 )
 
 /**
- * Runs [SphereStitchOperations.addFrame] off the UI thread with bounded back-pressure.
- * Queues at most one pending frame while busy (replaces older queued frame).
- * Never recycles the caller's [Bitmap].
+ * Runs [SphereStitchOperations.addFrameFast] off the UI thread with bounded back-pressure.
+ *
+ * Live 360 capture stack:
+ *   CameraX → [VisionAnalysisPipeline] → [SphereCaptureController.captureFrame]
+ *   → IMU quat ([OrientationTracker] + [SphereExtrinsicCalibration])
+ *   → IMU quat → [SphereNative.addFrameFast] → native `processLivePreviewLocked`
+ *   → live preview pose + cheap splat; background refine + full finish on DONE/SAVE.
  */
 class SphereStitchWorker(
     private val operations: SphereStitchOperations = SphereNativeOperations,
@@ -53,7 +57,7 @@ class SphereStitchWorker(
     private val refineDelayMs: Long = DEFAULT_REFINE_DELAY_MS,
     private val intrinsicDelayMs: Long = DEFAULT_INTRINSIC_DELAY_MS,
     private val periodicRefineEvery: Int = PERIODIC_REFINE_FRAMES,
-    private val motionDepthEstimator: ((Bitmap) -> FloatArray)? = null
+    private val motionDepthEstimator: ((Bitmap) -> FloatArray?)? = null
 ) {
     private val inFlight = AtomicBoolean(false)
     private val pendingDrops = AtomicInteger(0)
@@ -78,13 +82,7 @@ class SphereStitchWorker(
     /** Fired on main thread after finish background global + intrinsic polish. */
     var onFinishBackgroundPolish: (() -> Unit)? = null
 
-    private val refineRunnable = Runnable {
-        if (inFlight.get() || synchronized(this) { queuedBitmap != null }) {
-            scheduleCaptureRefine(SphereRefinePolicy.captureRefineDelayMs())
-            return@Runnable
-        }
-        runCaptureRefine()
-    }
+    private val refineRunnable = Runnable { runCaptureRefine(periodic = false) }
     /** When false, [schedulePreFinishDrain] is ignored (sweep-fast replay on constrained devices). */
     @Volatile
     var preFinishDrainEnabled: Boolean = true
@@ -107,18 +105,28 @@ class SphereStitchWorker(
     @Volatile
     private var lastPreviewAtMs = 0L
 
-    @Volatile
-    private var intrinsicRunnable: Runnable? = null
-
     /** Force background refine after this many accepted fast-path frames. */
     private var acceptedSinceRefine = 0
 
     @Volatile
     private var isShutdown = false
 
+    @Volatile
+    private var liveCaptureAborted = false
+
     private val pendingIdleCallbacks = mutableListOf<() -> Unit>()
 
-    val isBusy: Boolean get() = inFlight.get()
+    val isBusy: Boolean
+        get() = inFlight.get() || synchronized(this) { queuedBitmap != null }
+
+    /** Wait until no live stitch frame is in flight or queued (for tests / SAVE). */
+    fun awaitStitchIdle(timeoutMs: Long = 5000L): Boolean {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMs
+        while (isBusy && SystemClock.elapsedRealtime() < deadline) {
+            Thread.sleep(5)
+        }
+        return !isBusy
+    }
 
     /** Submit a task to an executor, ignoring rejection after shutdown. */
     private fun safeExecute(executor: ExecutorService, block: () -> Unit) {
@@ -136,11 +144,39 @@ class SphereStitchWorker(
     fun invalidatePendingRefinement() {
         mainHandler.removeCallbacks(refineRunnable)
         mainHandler.removeCallbacks(preFinishRunnable)
-        cancelIntrinsicRefine()
         preFinishProgress = SpherePoseRefinement.RefineProgress()
         preFinishFrameIndex = 0
         refinementGeneration.incrementAndGet()
+        // Do not clear pendingIdleCallbacks — queued export/finish blocks must run so
+        // their finally blocks can deliver onComplete (generation token drops stale work).
     }
+
+    /**
+     * Stop live capture stitching: cancel refine/pre-finish, drop queued frames, and ignore
+     * in-flight / queued stitch work. Used when the user taps DONE to view immediately.
+     */
+    fun abortLiveCapture() {
+        mainHandler.removeCallbacks(refineRunnable)
+        mainHandler.removeCallbacks(preFinishRunnable)
+        preFinishProgress = SpherePoseRefinement.RefineProgress()
+        preFinishFrameIndex = 0
+        // Do not bump refinementGeneration — SAVE/export must keep its completion token.
+        liveCaptureAborted = true
+        synchronized(this) {
+            queuedBitmap?.recycle()
+            queuedBitmap = null
+            queuedQuaternion = null
+            queuedPhotoMode = false
+        }
+    }
+
+    /** Re-enable live capture after [abortLiveCapture] (e.g. ADD MORE). */
+    fun resumeLiveCapture() {
+        liveCaptureAborted = false
+    }
+
+    @Volatile
+    private var lastAngularVelocityDegPerSec = 0.0
 
     private fun isRefinementGenerationCurrent(generation: Int): Boolean =
         generation == refinementGeneration.get()
@@ -149,8 +185,14 @@ class SphereStitchWorker(
         bitmap: Bitmap,
         quaternion: FloatArray,
         photoMode: Boolean = false,
-        overlapGateOverride: Float? = null
+        overlapGateOverride: Float? = null,
+        angularVelocityDegPerSec: Double = 0.0
     ) {
+        if (liveCaptureAborted) {
+            return
+        }
+        lastAngularVelocityDegPerSec = angularVelocityDegPerSec
+        cancelScheduledCaptureRefine()
         val copy = copyToArgb8888(bitmap)
         if (!inFlight.compareAndSet(false, true)) {
             synchronized(this) {
@@ -172,77 +214,99 @@ class SphereStitchWorker(
         overlapGateOverride: Float? = null
     ) {
         safeExecute(executor) {
-            val start = SystemClock.elapsedRealtime()
-            val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
-            val nearness = motionDepthEstimator?.invoke(bitmap)
-            val gate = overlapGateOverride ?: overlapGate
-            val status = operations.addFrameFast(bitmap, quaternion, gate, nearness)
-            val accepted = status == STITCH_ACCEPTED
-            val lowOverlap = status == STITCH_LOW_OVERLAP
-            val coverage = operations.getCoverage()
-            val solidAngle = operations.getSolidAngleCoverage()
-            val info = operations.getLastFrameInfo()
-            val previewWithHoles = buildPreviewWithHoles(
-                photoMode = photoMode,
-                solidAngle = solidAngle
-            )
-            bitmap.recycle()
-            if (previewWithHoles == null) {
-                android.util.Log.e(
-                    "SphereStitchWorker",
-                    "No preview bitmap after stitch (accepted=$accepted, native=${operations === SphereNativeOperations})"
-                )
-            } else if (!accepted) {
-                android.util.Log.i("SphereStitchWorker", "Frame not merged (lowOverlap=$lowOverlap); preview retained")
-            }
-            val duration = SystemClock.elapsedRealtime() - start
-            SphereStitchTelemetry.recordFrame(duration, accepted)
-            android.util.Log.i(
-                "SphereStitchWorker",
-                "Stitch ${if (photoMode) "photo" else "fast"} ${duration}ms accepted=$accepted"
-            )
-            val result = SphereStitchResult(
-                accepted = accepted,
-                coverage = coverage,
-                solidAngleCoverage = solidAngle,
-                frameInfo = info,
-                previewBitmap = previewWithHoles,
-                durationMs = duration,
-                ranOnMainThread = ranOnMain,
-                rejectedForOverlap = lowOverlap
-            )
-            // Settle in-flight state (and relaunch any queued frame) BEFORE
-            // delivering the result, so an observer that submits a new frame in
-            // its result callback isn't dropped by a stale in-flight flag.
-            //
-            // Refinement is scheduled ONLY on the idle debounce — never mid-burst.
-            // While the user is actively capturing (frames arriving faster than
-            // refineDelayMs), the debounce keeps resetting and the expensive
-            // full re-align/rebuild is deferred until they pause. This is what
-            // keeps per-tap latency low (measured: removes multi-second stalls).
-            if (accepted) {
-                acceptedSinceRefine++
-                preFinishProgress = SpherePoseRefinement.RefineProgress()
-                mainHandler.removeCallbacks(preFinishRunnable)
-                val frameIndex = info?.frameIndex ?: 0
-                if (frameIndex >= SphereRefinePolicy.captureRefineMinFrames()) {
-                    val delay = captureRefineDelay(acceptedSinceRefine)
-                    scheduleCaptureRefine(delay)
-                    schedulePreFinish(delay + 50L)
+            try {
+                if (liveCaptureAborted) {
+                    bitmap.recycle()
+                    return@safeExecute
                 }
+                val start = SystemClock.elapsedRealtime()
+                val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
+                val nearness = if (photoMode) null else motionDepthEstimator?.invoke(bitmap)
+                val gate = overlapGateOverride ?: overlapGate
+                val status = operations.addFrameFast(bitmap, quaternion, gate, nearness)
+                val accepted = status == STITCH_ACCEPTED
+                val lowOverlap = status == STITCH_LOW_OVERLAP
+                val coverage = operations.getCoverage()
+                val solidAngle = operations.getSolidAngleCoverage()
+                val info = operations.getLastFrameInfo()
+                val previewWithHoles = buildPreviewWithHoles(
+                    photoMode = photoMode,
+                    solidAngle = solidAngle,
+                    forceRefresh = accepted
+                )
+                bitmap.recycle()
+                if (previewWithHoles == null) {
+                    android.util.Log.e(
+                        "SphereStitchWorker",
+                        "No preview bitmap after stitch (accepted=$accepted, native=${operations === SphereNativeOperations})"
+                    )
+                } else if (!accepted) {
+                    android.util.Log.i(
+                        "SphereStitchWorker",
+                        "Frame not merged (lowOverlap=$lowOverlap); preview retained"
+                    )
+                }
+                val duration = SystemClock.elapsedRealtime() - start
+                SphereStitchTelemetry.recordFrame(duration, accepted)
+                android.util.Log.i(
+                    "SphereStitchWorker",
+                    "Stitch ${if (photoMode) "photo" else "fast"} ${duration}ms accepted=$accepted"
+                )
+                val result = SphereStitchResult(
+                    accepted = accepted,
+                    coverage = coverage,
+                    solidAngleCoverage = solidAngle,
+                    frameInfo = info,
+                    previewBitmap = previewWithHoles,
+                    durationMs = duration,
+                    ranOnMainThread = ranOnMain,
+                    rejectedForOverlap = lowOverlap
+                )
+                if (liveCaptureAborted) {
+                    return@safeExecute
+                }
+                mainHandler.post { onResult?.invoke(result) }
+                if (accepted) {
+                    acceptedSinceRefine++
+                    preFinishProgress = SpherePoseRefinement.RefineProgress()
+                    mainHandler.removeCallbacks(preFinishRunnable)
+                    val frameIndex = info?.frameIndex ?: 0
+                    if (frameIndex >= SphereRefinePolicy.captureRefineMinFrames()) {
+                        scheduleCaptureRefineMotionAware()
+                        schedulePreFinish(
+                            SphereRefinePolicy.captureMotionRefineStableMs() + 50L
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                bitmap.recycle()
+                android.util.Log.e("SphereStitchWorker", "Stitch failed", t)
+            } finally {
+                drainQueueOrRelease()
             }
-            drainQueueOrRelease()
-            mainHandler.post { onResult?.invoke(result) }
         }
     }
 
     private fun captureRefineDelay(acceptedSinceRefine: Int): Long =
         refineDelayMs.coerceAtLeast(SphereRefinePolicy.captureRefineDelayMs())
 
+    private fun cancelScheduledCaptureRefine() {
+        mainHandler.removeCallbacks(refineRunnable)
+    }
+
+    private fun scheduleCaptureRefineMotionAware() {
+        val vel = lastAngularVelocityDegPerSec
+        val delay = if (vel < SphereRefinePolicy.captureMotionRefineMaxDegPerSec()) {
+            SphereRefinePolicy.captureMotionRefineStableMs()
+        } else {
+            captureRefineDelay(acceptedSinceRefine)
+        }
+        scheduleCaptureRefine(delay)
+    }
+
     /** (Re)arm debounced capture pose refine (rotation + translation graph). */
     private fun scheduleCaptureRefine(delayMs: Long = SphereRefinePolicy.captureRefineDelayMs()) {
         mainHandler.removeCallbacks(refineRunnable)
-        cancelIntrinsicRefine()
         mainHandler.postDelayed(refineRunnable, delayMs)
     }
 
@@ -270,117 +334,96 @@ class SphereStitchWorker(
     }
 
     private fun configureForFinish() {
-        SphereProductionStitchPipeline.configureForFinish(operations)
-    }
-
-    private fun cancelIntrinsicRefine() {
-        intrinsicRunnable?.let { mainHandler.removeCallbacks(it) }
-        intrinsicRunnable = null
+        SphereProductionStitchPipeline.configureForTargetedFinalization(operations)
     }
 
     /**
-     * Mid-capture: chained rotation, motion-warp translation, global 6-DoF graph.
+     * Mid-capture: pose-only global solve + preview feather resplat.
      * Runs on [refineExecutor] so fast-path capture stays off the critical path.
      */
-    private fun runCaptureRefine() {
+    private fun runCaptureRefine(periodic: Boolean = false) {
+        if (isBusy) {
+            if (!periodic) scheduleCaptureRefineMotionAware()
+            return
+        }
         val generation = refinementGeneration.get()
         safeExecute(refineExecutor) {
-            if (!isRefinementGenerationCurrent(generation)) return@safeExecute
+            if (!isRefinementGenerationCurrent(generation) || isBusy) return@safeExecute
+            operations.flushPendingFrameStores()
             configureForCaptureRefine()
             val start = SystemClock.elapsedRealtime()
-            val changed = SphereCaptureRefinement.run(
-                operations = operations,
-                isCancelled = { !isRefinementGenerationCurrent(generation) },
-                onPass = { label ->
-                    android.util.Log.i("SphereStitchWorker", "Capture $label")
-                    if (label.startsWith("global")) {
-                        logRefineStats("Capture $label")
+            val isCancelled = {
+                !isRefinementGenerationCurrent(generation) || isBusy
+            }
+            val changed = if (periodic) {
+                SphereCaptureRefinement.runPeriodic(
+                    operations = operations,
+                    isCancelled = isCancelled,
+                    onPass = { label ->
+                        android.util.Log.i("SphereStitchWorker", "Capture periodic $label")
+                        if (label.startsWith("global")) {
+                            logRefineStats("Capture periodic $label")
+                        }
                     }
-                }
-            )
-            if (!isRefinementGenerationCurrent(generation)) return@safeExecute
+                )
+            } else {
+                SphereCaptureRefinement.run(
+                    operations = operations,
+                    isCancelled = isCancelled,
+                    onPass = { label ->
+                        android.util.Log.i("SphereStitchWorker", "Capture $label")
+                        if (label.startsWith("global")) {
+                            logRefineStats("Capture $label")
+                        }
+                    }
+                )
+            }
+            if (!isRefinementGenerationCurrent(generation) || isBusy) return@safeExecute
             if (!changed) {
-                scheduleIntrinsicRefine(generation)
-                schedulePreFinish(SphereRefinePolicy.preFinishDelayMs())
+                if (!periodic) {
+                    schedulePreFinish(SphereRefinePolicy.preFinishDelayMs())
+                }
                 return@safeExecute
             }
             acceptedSinceRefine = SphereRefinePolicy.acceptedCountAfterPeriodicRefine()
             captureRefinementRan = true
             deliverRefinePreview(start, intrinsicRefined = false, generation)
-            scheduleIntrinsicRefine(generation)
-            schedulePreFinish(SphereRefinePolicy.preFinishDelayMs())
+            if (!periodic) {
+                schedulePreFinish(SphereRefinePolicy.preFinishDelayMs())
+            }
         }
     }
 
+    private fun maybeRunPeriodicCaptureRefine() {
+        if (liveCaptureAborted || isBusy) return
+        if (!SphereRefinePolicy.shouldRunPeriodicRefine(acceptedSinceRefine, periodicRefineEvery)) {
+            return
+        }
+        runCaptureRefine(periodic = true)
+    }
+
     /**
-     * Idle pre-DONE: drain all remaining pre-finish slices on [preFinishExecutor]
-     * while capture stays idle (front-loads heavy work before DONE).
+     * Idle pre-DONE: cache feature graph edges (no panorama rebuild).
      */
     private fun runPreFinishSlice() {
         if (!preFinishDrainEnabled) return
         val generation = refinementGeneration.get()
         safeExecute(preFinishExecutor) {
             if (!isRefinementGenerationCurrent(generation)) return@safeExecute
+            operations.flushPendingFrameStores()
             if (operations.getSolidAngleCoverage() < SphereRefinePolicy.preFinishMinSolidAngle()) {
                 return@safeExecute
             }
             configureForPreFinish()
-            val config = SpherePreFinishRefinement.targetConfig()
-            if (preFinishProgress.isCompleteFor(config)) return@safeExecute
             val start = SystemClock.elapsedRealtime()
-            var changed = false
-            while (
-                !preFinishProgress.isCompleteFor(config) &&
-                isRefinementGenerationCurrent(generation)
-            ) {
-                val prior = preFinishProgress
-                val (sliceChanged, newProgress) = SpherePreFinishRefinement.runOneSlice(
-                    operations = operations,
-                    progress = preFinishProgress,
-                    isCancelled = { !isRefinementGenerationCurrent(generation) },
-                    onPass = { label ->
-                        android.util.Log.i("SphereStitchWorker", label)
-                        if (label.contains("global")) {
-                            logRefineStats(label)
-                        }
-                    }
-                )
-                if (!isRefinementGenerationCurrent(generation)) return@safeExecute
-                changed = changed || sliceChanged
-                preFinishProgress = newProgress
+            if (SpherePreFinishRefinement.runGraphCacheSlice(operations)) {
                 preFinishFrameIndex = operations.getLastFrameInfo()?.frameIndex ?: 0
-                if (newProgress == prior && !newProgress.isCompleteFor(config)) break
-            }
-            if (!isRefinementGenerationCurrent(generation)) return@safeExecute
-            if (changed) {
-                deliverRefinePreview(start, intrinsicRefined = false, generation)
-            }
-            if (preFinishProgress.isCompleteFor(config)) {
-                captureRefinementRan = true
                 android.util.Log.i(
                     "SphereStitchWorker",
-                    "Pre-finish drain complete in ${SystemClock.elapsedRealtime() - start}ms " +
+                    "Pre-finish graph cache in ${SystemClock.elapsedRealtime() - start}ms " +
                         "(frame=$preFinishFrameIndex)"
                 )
             }
-        }
-    }
-
-    /** Layer 3: intrinsic pass — separate thread, never blocks DONE. */
-    private fun scheduleIntrinsicRefine(captureGeneration: Int = refinementGeneration.get()) {
-        cancelIntrinsicRefine()
-        val runnable = Runnable { runIntrinsicRefine(captureGeneration) }
-        intrinsicRunnable = runnable
-        mainHandler.postDelayed(runnable, intrinsicDelayMs)
-    }
-
-    private fun runIntrinsicRefine(generation: Int) {
-        safeExecute(intrinsicExecutor) {
-            if (!isRefinementGenerationCurrent(generation)) return@safeExecute
-            val start = SystemClock.elapsedRealtime()
-            val changed = operations.refineIntrinsics()
-            if (!changed || !isRefinementGenerationCurrent(generation)) return@safeExecute
-            deliverRefinePreview(start, intrinsicRefined = true, generation)
         }
     }
 
@@ -409,6 +452,17 @@ class SphereStitchWorker(
     }
 
     private fun drainQueueOrRelease() {
+        if (liveCaptureAborted) {
+            synchronized(this) {
+                queuedBitmap?.recycle()
+                queuedBitmap = null
+                queuedQuaternion = null
+                queuedPhotoMode = false
+            }
+            inFlight.set(false)
+            dispatchStitchIdleCallbacks()
+            return
+        }
         val nextBitmap: Bitmap?
         val nextQuat: FloatArray?
         val nextPhotoMode: Boolean
@@ -425,6 +479,7 @@ class SphereStitchWorker(
         } else {
             inFlight.set(false)
             dispatchStitchIdleCallbacks()
+            maybeRunPeriodicCaptureRefine()
         }
     }
 
@@ -452,82 +507,275 @@ class SphereStitchWorker(
     }
 
     /**
-     * Final panorama generation: refine + seam blend + full equirect, entirely
-     * off the UI thread. [onComplete] is invoked on the main thread.
+     * DONE viewer: one fast orientation solve + preview rebuild (capture resolution).
+     */
+    fun runPreviewRefine(
+        eqW: Int,
+        eqH: Int,
+        onProgress: ((Int, String) -> Unit)? = null,
+        onStageViewerRefresh: (() -> Unit)? = null,
+        onComplete: (SphereFinishResult) -> Unit
+    ) {
+        mainHandler.removeCallbacks(refineRunnable)
+        mainHandler.removeCallbacks(preFinishRunnable)
+        val finishGeneration = refinementGeneration.get()
+        runWhenStitchIdle {
+            safeExecute(refineExecutor) {
+                val start = SystemClock.elapsedRealtime()
+                val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
+                var equirect: Bitmap? = null
+                try {
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    val frameNow = operations.getLastFrameInfo()?.frameIndex ?: 0
+                    val startProgress = if (preFinishFrameIndex == frameNow) {
+                        preFinishProgress
+                    } else {
+                        SpherePoseRefinement.RefineProgress()
+                    }
+                    val previewConfig = SphereRefinePolicy.donePreviewRefinementPasses()
+                    val totalSlices = SpherePoseRefinement.RefineProgress()
+                        .totalSlicesFor(previewConfig).coerceAtLeast(1)
+                    var slicesDone = startProgress.slicesDoneFor(previewConfig)
+                    SphereProductionStitchPipeline.runDonePreviewRefine(
+                        operations = operations,
+                        startProgress = startProgress,
+                        isCancelled = { !isRefinementGenerationCurrent(finishGeneration) },
+                        onPass = { label ->
+                            android.util.Log.i("SphereStitchWorker", "Preview $label")
+                            if (label.contains("global")) {
+                                logRefineStats("Preview $label")
+                            }
+                            slicesDone = (slicesDone + 1).coerceAtMost(totalSlices)
+                            val percent = ((slicesDone * 85) / totalSlices).coerceIn(10, 85)
+                            onProgress?.invoke(percent, label)
+                            postStageViewerRefresh(onStageViewerRefresh)
+                        }
+                    )
+                    captureRefinementRan = false
+                    preFinishProgress = SpherePoseRefinement.RefineProgress()
+                    preFinishFrameIndex = 0
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    equirect = operations.getEquirectBitmap(eqW, eqH)
+                    postStageViewerRefresh(onStageViewerRefresh)
+                    onProgress?.invoke(100, "done")
+                } catch (t: Throwable) {
+                    android.util.Log.e("SphereStitchWorker", "Preview refine failed", t)
+                } finally {
+                    val result = SphereFinishResult(
+                        equirect = retainFinishEquirect(equirect),
+                        durationMs = SystemClock.elapsedRealtime() - start,
+                        ranOnMainThread = ranOnMain
+                    )
+                    mainHandler.post { onComplete(result) }
+                }
+            }
+        }
+    }
+
+    /**
+     * Post-DONE: 2048 feather preview then adaptive 4096 finalization.
+     */
+    fun runPostDoneFinalization(
+        previewW: Int,
+        previewH: Int,
+        exportW: Int,
+        exportH: Int,
+        onProgress: ((Int, String) -> Unit)? = null,
+        onStageViewerRefresh: (() -> Unit)? = null,
+        onIntermediatePreview: ((Bitmap) -> Unit)? = null,
+        onComplete: (SphereFinishResult) -> Unit
+    ) {
+        mainHandler.removeCallbacks(refineRunnable)
+        mainHandler.removeCallbacks(preFinishRunnable)
+        val finishGeneration = refinementGeneration.get()
+        runWhenStitchIdle {
+            safeExecute(refineExecutor) {
+                val start = SystemClock.elapsedRealtime()
+                val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
+                var equirect: Bitmap? = null
+                var completed = false
+                try {
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    val frameNow = operations.getLastFrameInfo()?.frameIndex ?: 0
+                    val startProgress = if (preFinishFrameIndex == frameNow) {
+                        preFinishProgress
+                    } else {
+                        SpherePoseRefinement.RefineProgress()
+                    }
+                    val previewConfig = SphereRefinePolicy.donePreviewRefinementPasses()
+                    val previewSlices = SpherePoseRefinement.RefineProgress()
+                        .totalSlicesFor(previewConfig).coerceAtLeast(1)
+                    var slicesDone = startProgress.slicesDoneFor(previewConfig)
+                    SphereProductionStitchPipeline.runDonePreviewRefine(
+                        operations = operations,
+                        startProgress = startProgress,
+                        isCancelled = { !isRefinementGenerationCurrent(finishGeneration) },
+                        onPass = { label ->
+                            android.util.Log.i("SphereStitchWorker", "Finalizing $label")
+                            if (label.contains("global")) {
+                                logRefineStats("Finalizing $label")
+                            }
+                            slicesDone = (slicesDone + 1).coerceAtMost(previewSlices)
+                            val percent = ((slicesDone * 30) / previewSlices).coerceIn(5, 30)
+                            onProgress?.invoke(percent, label)
+                            postStageViewerRefresh(onStageViewerRefresh)
+                        }
+                    )
+                    captureRefinementRan = false
+                    preFinishProgress = SpherePoseRefinement.RefineProgress()
+                    preFinishFrameIndex = 0
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    val intermediate = retainFinishEquirect(
+                        operations.getEquirectBitmap(previewW, previewH)
+                    )
+                    if (intermediate != null) {
+                        onProgress?.invoke(35, "previewResplat")
+                        mainHandler.post { onIntermediatePreview?.invoke(intermediate) }
+                    }
+                    val finalizeSlices = SphereRefinePolicy.targetedFinalizationPassCount().coerceAtLeast(1)
+                    var finalizeDone = 0
+                    SphereProductionStitchPipeline.runPostDoneFinalization(
+                        operations = operations,
+                        exportW = exportW,
+                        exportH = exportH,
+                        isCancelled = { !isRefinementGenerationCurrent(finishGeneration) },
+                        onPass = { label ->
+                            android.util.Log.i("SphereStitchWorker", "Finalizing $label")
+                            if (label.contains("global") || label.startsWith("converge")) {
+                                logRefineStats("Finalizing $label")
+                            }
+                            if (!label.startsWith("prepare") && !label.startsWith("seams") &&
+                                !label.startsWith("finalResplat")
+                            ) {
+                                finalizeDone = (finalizeDone + 1).coerceAtMost(finalizeSlices)
+                            }
+                            val percent = 35 + ((finalizeDone * 55) / finalizeSlices).coerceIn(0, 55)
+                            onProgress?.invoke(percent.coerceIn(35, 90), label)
+                            postStageViewerRefresh(onStageViewerRefresh)
+                        }
+                    )
+                    onProgress?.invoke(95, "Encoding…")
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    equirect = operations.getEquirectBitmap(exportW, exportH)
+                    postStageViewerRefresh(onStageViewerRefresh)
+                    completed = true
+                } catch (t: Throwable) {
+                    android.util.Log.e("SphereStitchWorker", "Post-DONE finalization failed", t)
+                } finally {
+                    val result = SphereFinishResult(
+                        equirect = retainFinishEquirect(equirect),
+                        durationMs = SystemClock.elapsedRealtime() - start,
+                        ranOnMainThread = ranOnMain
+                    )
+                    mainHandler.post { onComplete(result) }
+                    if (!completed) {
+                        android.util.Log.w(
+                            "SphereStitchWorker",
+                            "Post-DONE finalization ended without equirect (cancelled or error)"
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * SAVE gallery: full polish at export resolution, off the UI thread.
      */
     fun runFinishGeneration(
         eqW: Int,
         eqH: Int,
         onProgress: ((Int, String) -> Unit)? = null,
+        onStageViewerRefresh: (() -> Unit)? = null,
         onComplete: (SphereFinishResult) -> Unit
     ) {
         mainHandler.removeCallbacks(refineRunnable)
         mainHandler.removeCallbacks(preFinishRunnable)
-        cancelIntrinsicRefine()
         val finishGeneration = refinementGeneration.get()
         runWhenStitchIdle {
             safeExecute(refineExecutor) {
-                if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
                 val start = SystemClock.elapsedRealtime()
                 val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
-                val frameNow = operations.getLastFrameInfo()?.frameIndex ?: 0
-                val startProgress = if (preFinishFrameIndex == frameNow) {
-                    preFinishProgress
-                } else {
-                    SpherePoseRefinement.RefineProgress()
-                }
-                val preFinishConfig = SphereRefinePolicy.preFinishRefinementPasses()
-                val totalSlices = startProgress.totalSlicesFor(preFinishConfig).coerceAtLeast(1)
-                var slicesDone = startProgress.slicesDoneFor(preFinishConfig)
-                SphereProductionStitchPipeline.runFinishExport(
-                    operations = operations,
-                    exportW = eqW,
-                    exportH = eqH,
-                    startProgress = startProgress,
-                    isCancelled = { !isRefinementGenerationCurrent(finishGeneration) },
-                    onPass = { label ->
-                        android.util.Log.i("SphereStitchWorker", "Finish $label")
-                        if (label.startsWith("global") || label.startsWith("converge")) {
-                            logRefineStats("Finish $label")
+                var equirect: Bitmap? = null
+                var completed = false
+                try {
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    val totalSlices = SphereRefinePolicy.targetedFinalizationPassCount().coerceAtLeast(1)
+                    var slicesDone = 0
+                    SphereProductionStitchPipeline.runSavePolish(
+                        operations = operations,
+                        exportW = eqW,
+                        exportH = eqH,
+                        isCancelled = { !isRefinementGenerationCurrent(finishGeneration) },
+                        onPass = { label ->
+                            android.util.Log.i("SphereStitchWorker", "Save $label")
+                            if (label.contains("global") || label.startsWith("converge")) {
+                                logRefineStats("Save $label")
+                            }
+                            if (!label.startsWith("prepare") && !label.startsWith("seams")) {
+                                slicesDone = (slicesDone + 1).coerceAtMost(totalSlices)
+                            }
+                            val percent = ((slicesDone * 80) / totalSlices).coerceIn(5, 80)
+                            onProgress?.invoke(percent, label)
+                            postStageViewerRefresh(onStageViewerRefresh)
                         }
-                        slicesDone = (slicesDone + 1).coerceAtMost(totalSlices)
-                        val percent = ((slicesDone * 70) / totalSlices).coerceIn(5, 70)
-                        onProgress?.invoke(percent, label)
-                    }
-                )
-                onProgress?.invoke(85, "Blending seams…")
-                captureRefinementRan = false
-                preFinishProgress = SpherePoseRefinement.RefineProgress()
-                preFinishFrameIndex = 0
-                if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
-                val equirect = operations.getEquirectBitmap(eqW, eqH)
-                val result = SphereFinishResult(
-                    equirect = equirect,
-                    durationMs = SystemClock.elapsedRealtime() - start,
-                    ranOnMainThread = ranOnMain
-                )
-                mainHandler.post { onComplete(result) }
-                // L2b global + L3 intrinsics in background; light seams only (no viewer replace).
-                safeExecute(intrinsicExecutor) {
-                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
-                    val iStart = SystemClock.elapsedRealtime()
-                    if (SphereRefinePolicy.runBackgroundGlobalPose()) {
-                        operations.refineGlobalPose()
-                        logRefineStats("L2 finish background")
-                        operations.refineSeams(light = true)
-                    }
-                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
-                    operations.refineIntrinsics()
-                    operations.refineSeams(light = true)
-                    android.util.Log.i(
-                        "SphereStitchWorker",
-                        "Finish background polish (light seams) done in " +
-                            "${SystemClock.elapsedRealtime() - iStart}ms"
                     )
-                    mainHandler.post { onFinishBackgroundPolish?.invoke() }
+                    onProgress?.invoke(90, "Encoding…")
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    equirect = operations.getEquirectBitmap(eqW, eqH)
+                    postStageViewerRefresh(onStageViewerRefresh)
+                    completed = true
+                    // L2b global in background; light seams only (no viewer replace).
+                    safeExecute(intrinsicExecutor) {
+                        if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                        val iStart = SystemClock.elapsedRealtime()
+                        if (SphereRefinePolicy.runBackgroundGlobalPose()) {
+                            operations.refineGlobalPose()
+                            logRefineStats("L2 finish background")
+                            if (SphereRefinePolicy.runExportSeamRefine()) {
+                                operations.refineSeams(light = true)
+                            }
+                        }
+                        if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                        android.util.Log.i(
+                            "SphereStitchWorker",
+                            "Finish background polish (light seams) done in " +
+                                "${SystemClock.elapsedRealtime() - iStart}ms"
+                        )
+                        postStageViewerRefresh(onStageViewerRefresh)
+                        mainHandler.post { onFinishBackgroundPolish?.invoke() }
+                    }
+                } catch (t: Throwable) {
+                    android.util.Log.e("SphereStitchWorker", "Finish export failed", t)
+                } finally {
+                    val ownedEquirect = retainFinishEquirect(equirect)
+                    val result = SphereFinishResult(
+                        equirect = ownedEquirect,
+                        durationMs = SystemClock.elapsedRealtime() - start,
+                        ranOnMainThread = ranOnMain
+                    )
+                    mainHandler.post { onComplete(result) }
+                    if (!completed) {
+                        android.util.Log.w(
+                            "SphereStitchWorker",
+                            "Finish export ended without equirect (cancelled or error)"
+                        )
+                    }
                 }
             }
         }
+    }
+
+    private fun postStageViewerRefresh(onStageViewerRefresh: (() -> Unit)?) {
+        if (onStageViewerRefresh == null) return
+        mainHandler.post(onStageViewerRefresh)
+    }
+
+    private fun retainFinishEquirect(bitmap: Bitmap?): Bitmap? {
+        if (bitmap == null || bitmap.isRecycled) return null
+        val copy = copyToArgb8888(bitmap)
+        if (copy !== bitmap) bitmap.recycle()
+        return copy
     }
 
     /**
@@ -543,27 +791,32 @@ class SphereStitchWorker(
     ) {
         mainHandler.removeCallbacks(refineRunnable)
         mainHandler.removeCallbacks(preFinishRunnable)
-        cancelIntrinsicRefine()
         val finishGeneration = refinementGeneration.get()
         runWhenStitchIdle {
             safeExecute(refineExecutor) {
-                if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
                 val start = SystemClock.elapsedRealtime()
                 val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
-                SphereProductionStitchPipeline.runSweepFastFinishExport(
-                    operations = operations,
-                    exportW = eqW,
-                    exportH = eqH,
-                    imuDegradeDeg = imuDegradeDeg
-                )
-                if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
-                val equirect = operations.getEquirectBitmap(eqW, eqH)
-                val result = SphereFinishResult(
-                    equirect = equirect,
-                    durationMs = SystemClock.elapsedRealtime() - start,
-                    ranOnMainThread = ranOnMain
-                )
-                mainHandler.post { onComplete(result) }
+                var equirect: Bitmap? = null
+                try {
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    SphereProductionStitchPipeline.runSweepFastFinishExport(
+                        operations = operations,
+                        exportW = eqW,
+                        exportH = eqH,
+                        imuDegradeDeg = imuDegradeDeg
+                    )
+                    if (!isRefinementGenerationCurrent(finishGeneration)) return@safeExecute
+                    equirect = operations.getEquirectBitmap(eqW, eqH)
+                } catch (t: Throwable) {
+                    android.util.Log.e("SphereStitchWorker", "Sweep-fast export failed", t)
+                } finally {
+                    val result = SphereFinishResult(
+                        equirect = equirect,
+                        durationMs = SystemClock.elapsedRealtime() - start,
+                        ranOnMainThread = ranOnMain
+                    )
+                    mainHandler.post { onComplete(result) }
+                }
             }
         }
     }
@@ -575,9 +828,9 @@ class SphereStitchWorker(
 
     fun shutdown() {
         isShutdown = true
+        abortLiveCapture()
         mainHandler.removeCallbacks(refineRunnable)
         mainHandler.removeCallbacks(preFinishRunnable)
-        cancelIntrinsicRefine()
         synchronized(pendingIdleCallbacks) { pendingIdleCallbacks.clear() }
         lastPreviewBitmap?.recycle()
         lastPreviewBitmap = null
@@ -599,10 +852,14 @@ class SphereStitchWorker(
             intrinsicExecutor.awaitTermination(timeout, unit) &&
             preFinishExecutor.awaitTermination(timeout, unit)
 
-    private fun buildPreviewWithHoles(photoMode: Boolean, solidAngle: Float): Bitmap? {
+    private fun buildPreviewWithHoles(
+        photoMode: Boolean,
+        solidAngle: Float,
+        forceRefresh: Boolean = false
+    ): Bitmap? {
         val now = SystemClock.elapsedRealtime()
         val throttleMs = SphereRefinePolicy.previewThrottleMs()
-        if (!photoMode && now - lastPreviewAtMs < throttleMs) {
+        if (!forceRefresh && !photoMode && now - lastPreviewAtMs < throttleMs) {
             return lastPreviewBitmap
         }
         val preview = operations.getEquirectBitmap(previewWidth, previewHeight) ?: return null
@@ -649,7 +906,7 @@ class SphereStitchWorker(
         const val DEFAULT_INTRINSIC_DELAY_MS = 150L
 
         /** Refine at least every N accepted frames during continuous capture. */
-        const val PERIODIC_REFINE_FRAMES = 6
+        const val PERIODIC_REFINE_FRAMES = 5
 
         /** Full visual re-align passes on DONE (matches offline replay). */
         const val FINISH_ALIGN_PASSES = 3

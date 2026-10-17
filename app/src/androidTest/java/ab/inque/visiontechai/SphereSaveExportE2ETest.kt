@@ -205,14 +205,14 @@ class SphereSaveExportE2ETest {
         }
         assertTrue(controller.hasCapturedFrames)
         assertTrue(controller.finishCapture())
-        val previewDeadline = SystemClock.elapsedRealtime() + 15_000L
+        val previewDeadline = SystemClock.elapsedRealtime() + 480_000L
         while (
-            controller.state != SphereCaptureController.State.PREVIEW &&
+            !controller.isFinalized() &&
             SystemClock.elapsedRealtime() < previewDeadline
         ) {
             Thread.sleep(50)
         }
-        assertEquals(SphereCaptureController.State.PREVIEW, controller.state)
+        assertTrue(controller.isFinalized())
         return controller
     }
 

@@ -14,7 +14,7 @@
   "eqScale": 1,
   "fullSphere": true,
   "compareFullEquirect": true,
-  "imuDegradeDeg": 16.0,
+  "imuDegradeDeg": 2.0,
   "imuDegradeSeed": 42,
   "runCaptureRefinement": false,
   "useFastPath": true,

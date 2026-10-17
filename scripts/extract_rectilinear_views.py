@@ -193,6 +193,52 @@ def elevation_tag(elevation_deg: float) -> str:
     return f"el{elevation_deg:+.0f}".replace("+", "p").replace("-", "m")
 
 
+def weighted_planar_luminance(
+    view: np.ndarray, fov_deg: float, width: int, height: int
+) -> float:
+    """
+    Solid-angle-weighted mean luminance of a rectilinear view.
+    Weights by forward ray component (cos off-axis) so edge pixels stretched
+    from more equirect area contribute less — matches splat cos(lat) weighting.
+    """
+    half_fov = fov_deg * 0.5 * DEG2RAD
+    tan_fov = math.tan(half_fov)
+    aspect = width / max(height, 1)
+    ys = np.arange(height, dtype=np.float64)
+    xs = np.arange(width, dtype=np.float64)
+    xg, yg = np.meshgrid(xs, ys)
+    up_off = (0.5 - yg / max(height - 1, 1)) * 2.0 * tan_fov
+    right_off = (xg / max(width - 1, 1) - 0.5) * 2.0 * tan_fov * aspect
+    length = np.sqrt(right_off * right_off + 1.0 + up_off * up_off)
+    cos_axis = 1.0 / length
+    lum = (
+        0.299 * view[:, :, 0]
+        + 0.587 * view[:, :, 1]
+        + 0.114 * view[:, :, 2]
+    )
+    wgt = np.maximum(cos_axis, 0.05)
+    return float(np.sum(lum * wgt) / max(np.sum(wgt), 1e-6))
+
+
+def equalize_views_luminance(
+    views: list[np.ndarray],
+    fov_deg: float,
+    width: int,
+    height: int,
+) -> tuple[list[np.ndarray], float, list[float]]:
+    """Scale each view so solid-angle-weighted luminance matches the median."""
+    lums = [weighted_planar_luminance(v, fov_deg, width, height) for v in views]
+    target = float(np.median(lums))
+    out: list[np.ndarray] = []
+    for view, lum in zip(views, lums):
+        if lum < 2.0:
+            out.append(view)
+            continue
+        scale = float(np.clip(target / lum, 0.55, 2.0))
+        out.append(np.clip(view * scale, 0, 255).astype(np.uint8))
+    return out, target, lums
+
+
 def jitter_view_pose(
     azimuth_deg: float,
     elevation_deg: float,
@@ -353,6 +399,14 @@ def parse_args() -> argparse.Namespace:
         default=42,
         help="RNG seed for roll/heading/elevation jitter (default: 42)",
     )
+    p.add_argument(
+        "--equalize-luminance",
+        action="store_true",
+        help=(
+            "Match solid-angle-weighted luminance across views (compensates source "
+            "region brightness and rectilinear stretch)"
+        ),
+    )
     return p.parse_args()
 
 
@@ -421,6 +475,8 @@ def main() -> None:
     stem = input_path.stem
     saved: list[Path] = []
     manifest_frames: list[dict] = []
+    extracted_views: list[np.ndarray] = []
+    pending_meta: list[dict] = []
     for i, (nom_az, nom_el, label) in enumerate(view_specs):
         az, el = nom_az, nom_el
         if args.random_heading or args.random_elevation:
@@ -445,6 +501,36 @@ def main() -> None:
             fov_deg=args.fov,
             roll_deg=roll_deg,
         )
+        extracted_views.append(view)
+        pending_meta.append(
+            {
+                "i": i,
+                "nom_az": nom_az,
+                "nom_el": nom_el,
+                "label": label,
+                "az": az,
+                "el": el,
+                "roll_deg": roll_deg,
+            }
+        )
+
+    if args.equalize_luminance and extracted_views:
+        extracted_views, lum_target, lum_before = equalize_views_luminance(
+            extracted_views, args.fov, args.width, args.height
+        )
+        print(
+            f"Luminance equalize: target={lum_target:.1f} "
+            f"(per-view before: {', '.join(f'{x:.0f}' for x in lum_before)})"
+        )
+
+    for view, meta in zip(extracted_views, pending_meta):
+        i = meta["i"]
+        nom_az = meta["nom_az"]
+        nom_el = meta["nom_el"]
+        label = meta["label"]
+        az = meta["az"]
+        el = meta["el"]
+        roll_deg = meta["roll_deg"]
         el_tag = elevation_tag(el)
         out_path = (
             out_dir
@@ -498,6 +584,7 @@ def main() -> None:
         "random_elevation": args.random_elevation,
         "elevation_range": args.elevation_range if args.random_elevation else None,
         "layout_seed": layout_seed,
+        "equalize_luminance": args.equalize_luminance,
         "frames": manifest_frames,
         "reference_band": ref_path.name,
     }

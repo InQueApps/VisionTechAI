@@ -63,8 +63,17 @@ interface SphereStitchOperations {
     /** Chained pose + motion-warp refine on stored frames (offline replay pass). */
     fun refineStoredPoses(): Boolean = false
 
-    /** Clear equirect and rebuild every stored frame with full visual alignment. */
+    /** Resplat from current refined poses (does not reset to fast/IMU seeds). */
     fun rebuildFullAlign(): Boolean = false
+
+    /** Targeted photometric polish on outlier frames (GN + small search). */
+    fun refineTargetedPhotometric(): Int = 0
+
+    /** SO(3) feature-graph reconciliation after local corrections. */
+    fun refineFeatureGraphReconcile(): Boolean = false
+
+    /** Conditional parallax warp where rotation-only residual remains. */
+    fun refineConditionalParallax(): Int = 0
 
     /** Truth export: nearest-center resplat at current equirect resolution (no photometric align). */
     fun rebuildExportNearestCenter(): Boolean = false
@@ -73,14 +82,29 @@ interface SphereStitchOperations {
     fun resetPosesToImu(): Boolean = false
 
     /**
+     * Commit queued live-capture frames (pixels + pose) into the stored-frame
+     * buffer. Required before DONE export / refine when using deferred store.
+     */
+    fun flushPendingFrameStores(): Unit = Unit
+
+    /**
      * Resize internal equirect to export resolution and resplat stored frames
      * (no photometric align — poses already refined at capture resolution).
      */
     fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean = false
 
+    /**
+     * Center-weighted feather resplat at preview resolution (capture / DONE viewer).
+     */
+    fun preparePreviewResplat(outW: Int, outH: Int): Boolean = false
+
     fun setGlobalRefinePasses(passes: Int) {}
 
     fun setFastFinishRefine(enabled: Boolean) {}
+
+    fun setPoseGraphOnlyGlobal(enabled: Boolean) {}
+
+    fun buildFeatureGraphCache(): Boolean = false
 
     fun getCoverage(): Float
     fun getSolidAngleCoverage(): Float
@@ -127,22 +151,39 @@ object SphereNativeOperations : SphereStitchOperations {
 
     override fun refineGlobalPose(): Boolean = SphereNative.refinePending(applyGlobalPose = true)
 
-    override fun refineIntrinsics(): Boolean = SphereNative.refineIntrinsicsPending()
+    override fun refineIntrinsics(): Boolean = false
 
     override fun refineStoredPoses(): Boolean = SphereNative.refineStoredPoses()
 
     override fun rebuildFullAlign(): Boolean = SphereNative.rebuildFullAlign()
 
+    override fun refineTargetedPhotometric(): Int = SphereNative.refineTargetedPhotometric()
+
+    override fun refineFeatureGraphReconcile(): Boolean =
+        SphereNative.refineFeatureGraphReconcile()
+
+    override fun refineConditionalParallax(): Int = SphereNative.refineConditionalParallax()
+
     override fun rebuildExportNearestCenter(): Boolean = SphereNative.rebuildExportNearestCenter()
 
     override fun resetPosesToImu(): Boolean = SphereNative.resetPosesToImu()
 
+    override fun flushPendingFrameStores() = SphereNative.flushPendingFrameStores()
+
     override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean =
         SphereNative.prepareExportEquirect(exportW, exportH)
+
+    override fun preparePreviewResplat(outW: Int, outH: Int): Boolean =
+        SphereNative.preparePreviewResplat(outW, outH)
 
     override fun setGlobalRefinePasses(passes: Int) = SphereNative.setGlobalRefinePasses(passes)
 
     override fun setFastFinishRefine(enabled: Boolean) = SphereNative.setFastFinishRefine(enabled)
+
+    override fun setPoseGraphOnlyGlobal(enabled: Boolean) =
+        SphereNative.setPoseGraphOnlyGlobal(enabled)
+
+    override fun buildFeatureGraphCache(): Boolean = SphereNative.buildFeatureGraphCache()
 
     override fun getCoverage(): Float = SphereNative.getCoverage()
 

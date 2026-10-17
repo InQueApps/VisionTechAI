@@ -7,13 +7,15 @@ import ab.inque.robotics.panorama.SphereNative
 
 
 import android.graphics.Bitmap
+import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
  * Manages the sphere panorama capture session.
- * State machine: IDLE -> CAPTURING -> PREVIEW
+ * State machine: IDLE -> CAPTURING -> PREVIEW_REFINING -> PREVIEW_FINALIZED
  */
 class SphereCaptureController(
     private val orientationTracker: OrientationTracker,
@@ -24,7 +26,7 @@ class SphereCaptureController(
     private val onFrameAccepted: (() -> Unit)? = null,
     private val onIntrinsicsConverged: ((LensDistortion) -> Unit)? = null,
     private val operations: SphereStitchOperations = SphereNativeOperations,
-    private val motionDepthEstimator: ((Bitmap) -> FloatArray)? = null,
+    private val motionDepthEstimator: ((Bitmap) -> FloatArray?)? = null,
     stitchWorker: SphereStitchWorker = SphereStitchWorker(
         operations = operations,
         motionDepthEstimator = motionDepthEstimator
@@ -40,7 +42,10 @@ class SphereCaptureController(
         INSUFFICIENT_OVERLAP
     }
 
-    enum class State { IDLE, CAPTURING, PREVIEW }
+    enum class State { IDLE, CAPTURING, PREVIEW_REFINING, PREVIEW_FINALIZED }
+
+    fun isPreviewSession(): Boolean =
+        state == State.PREVIEW_REFINING || state == State.PREVIEW_FINALIZED
 
     @Volatile var state = State.IDLE
         private set
@@ -56,19 +61,54 @@ class SphereCaptureController(
 
     @Volatile private var lastFullEquirect: Bitmap? = null
 
-    @Volatile private var fullExportInProgress = false
+    @Volatile private var finalizationInProgress = false
 
-    @Volatile private var fullExportComplete = false
+    fun isFinalizationInProgress(): Boolean = finalizationInProgress
+
+    fun isFinalized(): Boolean =
+        state == State.PREVIEW_FINALIZED && hasFullResExportReady()
+
+    private fun hasFullResExportReady(): Boolean {
+        val bmp = lastFullEquirect
+        return bmp != null && !bmp.isRecycled && bmp.width >= EQ_W && bmp.height >= EQ_H
+    }
+
+    /** @deprecated use [isFinalizationInProgress] */
+    fun isPreviewRefineInProgress(): Boolean = isFinalizationInProgress()
+
+    /** @deprecated use [isFinalized] */
+    fun isPreviewRefineComplete(): Boolean = isFinalized()
+
+    /** @deprecated use [isFinalizationInProgress] */
+    fun isFullExportInProgress(): Boolean = isFinalizationInProgress()
+
+    /** @deprecated use [isFinalized] */
+    fun isFullExportComplete(): Boolean = isFinalized()
+
+    private var lastViewerRefreshMs = 0L
+
+    private val viewerSnapshotRunnable = Runnable { requestViewerSnapshot(force = true) }
+
+    private val viewerSnapshotExecutor = Executors.newSingleThreadExecutor()
 
     private val pendingExportCallbacks = CopyOnWriteArrayList<(SphereFinishResult) -> Unit>()
 
     private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
 
-    /** Optional hook when gallery-quality export finishes (background SAVE path). */
+    /** Final 4096 gallery bitmap ready — SAVE can write immediately. */
     var onFullExportReady: ((Bitmap) -> Unit)? = null
+
+    /** Stitch snapshot copied off the worker thread for the display-only viewer. */
+    var onExportViewerSnapshot: ((Bitmap) -> Unit)? = null
+
+    /** Progress while post-DONE finalization runs (percent, stage label). */
+    var onExportProgress: ((Int, String) -> Unit)? = null
 
     /** Fired on main thread after idle pre-DONE / post-DONE alignment polish updates the viewer. */
     var onBackgroundPolishReady: (() -> Unit)? = null
+
+    /** True while a frame stitch (or queued stitch) is running on the worker. */
+    var onStitchProcessingChanged: ((Boolean) -> Unit)? = null
 
     /** Debug capture hook: bitmap + camera timestamp + raw IMU + calibrated quaternions. */
     var onDebugFrameCaptured: ((Bitmap, Long, FloatArray, FloatArray) -> Unit)? = null
@@ -88,9 +128,6 @@ class SphereCaptureController(
 
     val hasCapturedFrames: Boolean get() = frameCount > 0
 
-    fun isFullExportInProgress(): Boolean = fullExportInProgress
-
-    fun isFullExportComplete(): Boolean = fullExportComplete
     private var sessionFovH = 65f
     private var sessionFovV = 50f
     /** FOV passed to native for the actual stitch bitmap (center square when enabled). */
@@ -119,14 +156,17 @@ class SphereCaptureController(
             }
         }
         stitchWorker.onFinishBackgroundPolish = {
-            if (state == State.PREVIEW && frameCount >= 2) {
+            if (isPreviewSession() && frameCount >= 2) {
                 notifyIntrinsicsConverged()
                 if (SphereRefinePolicy.refreshViewerAfterBackgroundFinish()) {
-                    val polished = operations.getEquirectBitmap(EQ_W, EQ_H) ?: lastFullEquirect
+                    val polished = retainBitmap(
+                        operations.getEquirectBitmap(EQ_W, EQ_H) ?: lastFullEquirect
+                    )
                     if (polished != null) {
-                        lastFullEquirect = polished
+                        replaceFullEquirect(polished)
                         onFullExportReady?.invoke(polished)
                     }
+                    requestViewerSnapshot(force = true)
                 }
                 onBackgroundPolishReady?.invoke()
             }
@@ -154,6 +194,7 @@ class SphereCaptureController(
         if (!ok) {
             Log.e(TAG, "Sphere native init failed — is vision_sphere loaded?")
         }
+        SphereStitchTelemetry.reset()
         this.bitmapAlreadyMirrored = bitmapAlreadyMirrored
         orientationResolved = !shouldProbeMirror(operations, bitmapAlreadyMirrored)
         heldProbeFrame?.first?.recycle()
@@ -164,13 +205,14 @@ class SphereCaptureController(
         continuousCapture = false
         lastCoverage = 0f
         lastSolidAngleCoverage = 0f
+        lastPreviewBitmap?.recycle()
         lastPreviewBitmap = null
-        lastFullEquirect = null
-        fullExportInProgress = false
-        fullExportComplete = false
+        replaceFullEquirect(null)
+        finalizationInProgress = false
         lastMotionQuat = null
         lastMotionTimeMs = 0L
         orientationTracker.clockSync.reset()
+        stitchWorker.resumeLiveCapture()
         Log.i(TAG, "Sphere session started (sensorFov=${sensorFovH}x${sensorFovV} effFov=${fovH}x${fovV})")
     }
 
@@ -228,7 +270,8 @@ class SphereCaptureController(
         bitmap: Bitmap,
         frameTimestampNanos: Long = 0,
         photoMode: Boolean = true,
-        imageRotationDegrees: Int = 0
+        imageRotationDegrees: Int = 0,
+        angularVelocityDegPerSec: Double? = null
     ) {
         if (state != State.CAPTURING) return
         ensureSessionGeometry(bitmap, imageRotationDegrees)
@@ -247,11 +290,13 @@ class SphereCaptureController(
                     "rot=$imageRotationDegrees stitchFov=${"%.1f".format(frame.fovH)}x${"%.1f".format(frame.fovV)}"
             )
         }
+        val angularVel = angularVelocityDegPerSec
+            ?: estimateAngularVelocity(calQuat, SystemClock.elapsedRealtime())
         if (shouldProbeMirror() && !orientationResolved) {
             val held = heldProbeFrame
             if (held == null) {
                 heldProbeFrame = frame.bitmap.copy(Bitmap.Config.ARGB_8888, false) to stitchQuat.copyOf()
-                submitStitchFrame(frame, stitchQuat, photoMode)
+                submitStitchFrame(frame, stitchQuat, photoMode, angularVel)
                 return
             }
             val mirror = ab.inque.visiontechai.sphere.debug.SphereStitchOrientationProbe.resolveLiveMirror(
@@ -266,13 +311,36 @@ class SphereCaptureController(
                 operations.init(CAPTURE_EQ_W, CAPTURE_EQ_H, stitchFovH, stitchFovV, sessionDistortion)
                 SphereNative.setMirrorCameraX(mirror)
                 mirrorCameraXApplied = mirror
-                stitchWorker.submit(heldBitmap, heldQuat, photoMode = photoMode)
+                stitchWorker.submit(
+                    heldBitmap,
+                    heldQuat,
+                    photoMode = photoMode,
+                    angularVelocityDegPerSec = angularVel
+                )
             } else {
                 heldBitmap.recycle()
             }
             orientationResolved = true
         }
-        submitStitchFrame(frame, stitchQuat, photoMode)
+        submitStitchFrame(frame, stitchQuat, photoMode, angularVel)
+    }
+
+    private fun submitStitchFrame(
+        frame: SphereStitchFramePrep.Result,
+        stitchQuat: FloatArray,
+        photoMode: Boolean,
+        angularVelocityDegPerSec: Double
+    ) {
+        stitchWorker.submit(
+            frame.bitmap,
+            stitchQuat,
+            photoMode = photoMode,
+            angularVelocityDegPerSec = angularVelocityDegPerSec
+        )
+        notifyStitchProcessingChanged()
+        if (frame.cropped) {
+            frame.bitmap.recycle()
+        }
     }
 
     private fun prepareStitchFrame(bitmap: Bitmap): SphereStitchFramePrep.Result {
@@ -295,23 +363,26 @@ class SphereCaptureController(
         }
     }
 
-    private fun submitStitchFrame(
-        frame: SphereStitchFramePrep.Result,
-        stitchQuat: FloatArray,
-        photoMode: Boolean
-    ) {
-        stitchWorker.submit(frame.bitmap, stitchQuat, photoMode = photoMode)
-        if (frame.cropped) {
-            frame.bitmap.recycle()
-        }
+    private fun notifyStitchProcessingChanged() {
+        onStitchProcessingChanged?.invoke(isStitchBusy())
     }
 
     private fun handleStitchResult(result: SphereStitchResult) {
+        if (isPreviewSession() && !result.refined) {
+            notifyStitchProcessingChanged()
+            return
+        }
+        if (isPreviewSession() && result.refined && !finalizationInProgress) {
+            return
+        }
         // Background refinement finished: refresh coverage + preview, no frame accounting.
         if (result.refined) {
             lastCoverage = result.coverage
             lastSolidAngleCoverage = result.solidAngleCoverage
-            result.previewBitmap?.let { lastPreviewBitmap = it }
+            result.previewBitmap?.let { bmp ->
+                lastPreviewBitmap?.recycle()
+                lastPreviewBitmap = retainBitmap(bmp)
+            }
             onCoverageUpdate(
                 result.coverage,
                 result.solidAngleCoverage,
@@ -339,9 +410,13 @@ class SphereCaptureController(
             }
             lastCoverage = result.coverage
             lastSolidAngleCoverage = result.solidAngleCoverage
-            val preview = result.previewBitmap ?: lastPreviewBitmap
-            if (result.previewBitmap != null) lastPreviewBitmap = result.previewBitmap
+            val preview = result.previewBitmap?.let { retainBitmap(it) } ?: lastPreviewBitmap
+            if (result.previewBitmap != null) {
+                lastPreviewBitmap?.recycle()
+                lastPreviewBitmap = preview
+            }
             onCoverageUpdate(result.coverage, result.solidAngleCoverage, preview)
+            notifyStitchProcessingChanged()
             return
         }
 
@@ -358,9 +433,10 @@ class SphereCaptureController(
         }
         lastCoverage = result.coverage
         lastSolidAngleCoverage = result.solidAngleCoverage
-        val preview = result.previewBitmap ?: lastPreviewBitmap
+        val preview = result.previewBitmap?.let { retainBitmap(it) } ?: lastPreviewBitmap
         if (result.previewBitmap != null) {
-            lastPreviewBitmap = result.previewBitmap
+            lastPreviewBitmap?.recycle()
+            lastPreviewBitmap = preview
         }
         onCoverageUpdate(result.coverage, result.solidAngleCoverage, preview)
         if (result.accepted && preview == null) {
@@ -375,6 +451,7 @@ class SphereCaptureController(
             )
             SphereAlignmentPolicy.classifyWarning(info)?.let { onFrameWarning?.invoke(it) }
         }
+        notifyStitchProcessingChanged()
         if (BuildConfig.DEBUG && result.ranOnMainThread) {
             Log.e(TAG, "Sphere stitch ran on main thread — this should never happen")
         }
@@ -404,7 +481,13 @@ class SphereCaptureController(
         ) {
             SphereAdaptiveThrottler.Decision.ACCEPT -> {
                 lastCaptureTimeMs = now
-                captureFrame(bitmap, frameTimestampNanos, photoMode = false, imageRotationDegrees)
+                captureFrame(
+                    bitmap,
+                    frameTimestampNanos,
+                    photoMode = false,
+                    imageRotationDegrees,
+                    angularVelocityDegPerSec = angularVel
+                )
             }
             SphereAdaptiveThrottler.Decision.SKIP_FAST_PAN ->
                 onFrameWarning?.invoke(FrameWarning.EXCESSIVE_SHIFT)
@@ -440,84 +523,209 @@ class SphereCaptureController(
     fun isStitchBusy(): Boolean = stitchWorker.isBusy
 
     /**
-     * Stop capture and open the viewer immediately with the current stitch preview
-     * (no full global refine — that runs on SAVE via [startBackgroundFullExport]).
+     * Stop capture, show live preview immediately, then finalize asynchronously.
      */
     fun finishCapture(): Boolean {
         if (state != State.CAPTURING || frameCount == 0) return false
         continuousCapture = false
-        stitchWorker.runWhenStitchIdle {
-            val previewBmp = operations.getEquirectBitmap(
-                SphereStitchWorker.PREVIEW_W,
-                SphereStitchWorker.PREVIEW_H
-            ) ?: lastPreviewBitmap
-            mainHandler.post {
-                if (state != State.CAPTURING) return@post
-                lastFullEquirect = previewBmp
-                fullExportComplete = false
-                state = State.PREVIEW
-                Log.i(
-                    TAG,
-                    "Capture preview ready ($frameCount frames), coverage=$lastCoverage " +
-                        "solid=$lastSolidAngleCoverage — full export on SAVE"
+        stitchWorker.abortLiveCapture()
+        stitchWorker.awaitStitchIdle()
+        operations.flushPendingFrameStores()
+        state = State.PREVIEW_REFINING
+        finalizationInProgress = false
+        val previewBmp = retainBitmap(
+            lastPreviewBitmap
+                ?: operations.getEquirectBitmap(
+                    SphereStitchWorker.PREVIEW_W,
+                    SphereStitchWorker.PREVIEW_H
                 )
-                previewBmp?.let { onPreviewReady(it) }
-                stitchWorker.schedulePreFinishDrain(0L)
+        )
+        lastPreviewBitmap?.recycle()
+        lastPreviewBitmap = previewBmp
+        replaceFullEquirect(previewBmp)
+        mainHandler.post {
+            Log.i(
+                TAG,
+                "Capture preview ready ($frameCount frames), coverage=$lastCoverage " +
+                    "solid=$lastSolidAngleCoverage — finalizing in background"
+            )
+            if (previewBmp != null) {
+                onPreviewReady(previewBmp)
+            } else {
+                Log.w(TAG, "DONE with no preview bitmap — viewer may be empty")
             }
+            notifyStitchProcessingChanged()
         }
+        startBackgroundFinalization(
+            onProgress = { percent, stage ->
+                mainHandler.post { onExportProgress?.invoke(percent, stage) }
+            }
+        )
         return true
     }
 
     /**
-     * Production finish (global refine + export res) on a background thread.
-     * Safe to call while the user has left sphere mode.
+     * Post-DONE: 2048 feather preview then adaptive 4096 finalization (align, warp, seams).
      */
-    fun startBackgroundFullExport(
+    fun startBackgroundFinalization(
         onProgress: ((Int, String) -> Unit)? = null,
         onComplete: ((SphereFinishResult) -> Unit)? = null
     ): Boolean {
         if (state == State.IDLE || frameCount == 0) return false
-        if (fullExportComplete && lastFullEquirect != null) {
-            val bmp = lastFullEquirect!!
+        if (isFinalized() && lastFullEquirect != null) {
+            val bmp = retainBitmap(lastFullEquirect)!!
             onComplete?.invoke(SphereFinishResult(bmp, 0L, ranOnMainThread = false))
             onFullExportReady?.invoke(bmp)
             return true
         }
         onComplete?.let { pendingExportCallbacks.add(it) }
-        if (fullExportInProgress) return true
-        fullExportInProgress = true
-        stitchWorker.runFinishGeneration(
-            EQ_W,
-            EQ_H,
-            onProgress = onProgress
-        ) { result ->
-            fullExportInProgress = false
+        if (finalizationInProgress) return true
+        finalizationInProgress = true
+        state = State.PREVIEW_REFINING
+        val onFinish: (SphereFinishResult) -> Unit = { result ->
+            finalizationInProgress = false
             if (BuildConfig.DEBUG && result.ranOnMainThread) {
-                Log.e(TAG, "Finish generation ran on main thread — this should never happen")
+                Log.e(TAG, "Finalization ran on main thread — this should never happen")
             }
-            if (result.equirect != null) {
-                fullExportComplete = true
-                lastFullEquirect = result.equirect
-                onFullExportReady?.invoke(result.equirect!!)
+            val exportBmp = resolveFullResExportBitmap(result.equirect)
+            if (exportBmp != null) {
+                state = State.PREVIEW_FINALIZED
+                replaceFullEquirect(exportBmp)
+                onFullExportReady?.invoke(exportBmp)
+                postViewerSnapshotCopy(exportBmp)
+            } else {
+                Log.e(
+                    TAG,
+                    "Post-DONE finalization failed — no ${EQ_W}x${EQ_H} export " +
+                        "(frames=$frameCount, hadResult=${result.equirect != null})"
+                )
+                state = State.PREVIEW_REFINING
+            }
+            if (frameCount >= 2) {
+                notifyIntrinsicsConverged()
             }
             Log.i(
                 TAG,
-                "Background full export done in ${result.durationMs}ms " +
-                    "(frames=$frameCount)"
+                "Post-DONE finalization done in ${result.durationMs}ms (frames=$frameCount, " +
+                    "export=${lastFullEquirect?.width}x${lastFullEquirect?.height})"
             )
+            mainHandler.post {
+                onExportProgress?.invoke(
+                    if (hasFullResExportReady()) 100 else 0,
+                    if (hasFullResExportReady()) "finalized" else "finalization_failed"
+                )
+            }
             val callbacks = pendingExportCallbacks.toList()
             pendingExportCallbacks.clear()
             callbacks.forEach { it(result) }
         }
+        stitchWorker.runPostDoneFinalization(
+            previewW = SphereRefinePolicy.donePreviewWidth(),
+            previewH = SphereRefinePolicy.donePreviewHeight(),
+            exportW = EQ_W,
+            exportH = EQ_H,
+            onProgress = onProgress,
+            onStageViewerRefresh = { requestViewerSnapshot() },
+            onIntermediatePreview = { intermediate ->
+                replaceFullEquirect(intermediate)
+                postViewerSnapshotCopy(intermediate)
+            },
+            onComplete = onFinish
+        )
         return true
+    }
+
+    /** @deprecated use [startBackgroundFinalization] */
+    fun startBackgroundPreviewRefine(
+        onProgress: ((Int, String) -> Unit)? = null,
+        onComplete: ((SphereFinishResult) -> Unit)? = null
+    ): Boolean = startBackgroundFinalization(onProgress, onComplete)
+
+    /**
+     * @deprecated Finalization runs after DONE; SAVE only writes the finalized bitmap.
+     */
+    fun startBackgroundFullExport(
+        onProgress: ((Int, String) -> Unit)? = null,
+        onComplete: ((SphereFinishResult) -> Unit)? = null
+    ): Boolean = startBackgroundFinalization(onProgress, onComplete)
+
+    /**
+     * Snapshot stitch state into a display bitmap (off stitch thread) and deliver to the viewer.
+     * Never loads into [SphereNative] — viewer uses [SphereViewerNative].
+     */
+    private fun requestViewerSnapshot(force: Boolean = false) {
+        if (!isPreviewSession()) return
+        val throttleMs = SphereRefinePolicy.viewerRefreshThrottleMs()
+        val now = SystemClock.elapsedRealtime()
+        val elapsed = now - lastViewerRefreshMs
+        mainHandler.removeCallbacks(viewerSnapshotRunnable)
+        if (!force && elapsed < throttleMs) {
+            mainHandler.postDelayed(viewerSnapshotRunnable, throttleMs - elapsed)
+            return
+        }
+        viewerSnapshotExecutor.execute {
+            if (!isPreviewSession()) return@execute
+            val raw = operations.getEquirectBitmap(
+                SphereStitchWorker.PREVIEW_W,
+                SphereStitchWorker.PREVIEW_H
+            )
+            val copy = retainBitmap(raw)
+            if (raw != null && raw !== copy) raw.recycle()
+            if (copy == null) return@execute
+            lastViewerRefreshMs = SystemClock.elapsedRealtime()
+            mainHandler.post { onExportViewerSnapshot?.invoke(copy) }
+        }
+    }
+
+    private fun postViewerSnapshotCopy(source: Bitmap) {
+        val copy = retainBitmap(source)
+        if (copy != null) {
+            mainHandler.post { onExportViewerSnapshot?.invoke(copy) }
+        }
+    }
+
+    private fun resolveFullResExportBitmap(primary: Bitmap?): Bitmap? {
+        val fromPrimary = primary?.takeIf { !it.isRecycled && it.width >= EQ_W && it.height >= EQ_H }
+        if (fromPrimary != null) return retainBitmap(fromPrimary)
+        val native = operations.getEquirectBitmap(EQ_W, EQ_H)
+        val fromNative = native?.takeIf { !it.isRecycled && it.width >= EQ_W && it.height >= EQ_H }
+        val copy = retainBitmap(fromNative)
+        if (native != null && native !== copy) native.recycle()
+        return copy
+    }
+
+    private fun replaceFullEquirect(bitmap: Bitmap?) {
+        if (bitmap == null) {
+            lastFullEquirect?.let { prev ->
+                if (prev !== lastPreviewBitmap) prev.recycle()
+            }
+            lastFullEquirect = null
+            return
+        }
+        val prev = lastFullEquirect
+        if (prev != null && prev !== lastPreviewBitmap && prev !== bitmap) {
+            prev.recycle()
+        }
+        lastFullEquirect = bitmap
+    }
+
+    private fun retainBitmap(bitmap: Bitmap?): Bitmap? {
+        if (bitmap == null || bitmap.isRecycled) return null
+        return bitmap.copy(Bitmap.Config.ARGB_8888, false)
     }
 
     /**
      * Return from post-DONE preview to live capture without clearing the stitched panorama.
      */
     fun resumeCapture(): Boolean {
-        if (state != State.PREVIEW || fullExportInProgress) return false
-        stitchWorker.invalidatePendingRefinement()
+        if (!isPreviewSession()) return false
+        if (finalizationInProgress) {
+            stitchWorker.invalidatePendingRefinement()
+            finalizationInProgress = false
+        } else {
+            stitchWorker.invalidatePendingRefinement()
+        }
+        stitchWorker.resumeLiveCapture()
         continuousCapture = false
         state = State.CAPTURING
         val preview = operations.getEquirectBitmap(
@@ -542,10 +750,11 @@ class SphereCaptureController(
     }
 
     private fun handleIntrinsicEquirectUpdate(equirect: Bitmap) {
-        lastFullEquirect = equirect
-        if (state == State.PREVIEW) {
+        val copy = retainBitmap(equirect) ?: return
+        replaceFullEquirect(copy)
+        if (isPreviewSession()) {
             Log.i(TAG, "Intrinsic finish pass updated preview equirect")
-            onPreviewReady(equirect)
+            onPreviewReady(copy)
             if (frameCount >= 2) {
                 notifyIntrinsicsConverged()
             }
@@ -555,13 +764,57 @@ class SphereCaptureController(
     fun getPreviewBitmap(): Bitmap? = lastPreviewBitmap
 
     /** Returns the full equirect from the last finish, or null if not yet generated. */
-    fun getFullEquirect(): Bitmap? = lastFullEquirect
+    fun getFullEquirect(): Bitmap? =
+        lastFullEquirect?.takeIf { !it.isRecycled }
+
+    /**
+     * Full-resolution bitmap for SAVE. Stitching runs at capture resolution; this may
+     * resplat from full-res frame sources at [EQ_W]×[EQ_H].
+     */
+    fun ensureFullResExportBitmap(): Bitmap? {
+        val cached = lastFullEquirect
+        if (
+            cached != null &&
+            !cached.isRecycled &&
+            cached.width >= EQ_W &&
+            cached.height >= EQ_H
+        ) {
+            return retainBitmap(cached)
+        }
+        operations.flushPendingFrameStores()
+        if (!operations.prepareExportEquirect(EQ_W, EQ_H)) {
+            Log.w(TAG, "prepareExportEquirect($EQ_W x $EQ_H) failed")
+            return null
+        }
+        val native = operations.getEquirectBitmap(EQ_W, EQ_H)
+        val copy = retainBitmap(native)
+        if (native != null && native !== copy) native.recycle()
+        if (copy != null && copy.width >= EQ_W && copy.height >= EQ_H) {
+            replaceFullEquirect(copy)
+            if (state == State.PREVIEW_REFINING) {
+                state = State.PREVIEW_FINALIZED
+            }
+        }
+        return copy
+    }
 
     /** Latest native equirect for export (includes in-progress intrinsic pass if done). */
     fun exportFullEquirect(): Bitmap? =
-        operations.getEquirectBitmap(EQ_W, EQ_H) ?: lastFullEquirect
+        operations.getEquirectBitmap(EQ_W, EQ_H)?.takeIf { !it.isRecycled }
+            ?: getFullEquirect()?.takeIf { it.width >= EQ_W && it.height >= EQ_H }
 
     fun resetSession() {
+        val failedExport = SphereFinishResult(
+            equirect = null,
+            durationMs = 0L,
+            ranOnMainThread = false
+        )
+        val callbacks = pendingExportCallbacks.toList()
+        pendingExportCallbacks.clear()
+        if (finalizationInProgress) {
+            stitchWorker.invalidatePendingRefinement()
+        }
+        operations.flushPendingFrameStores()
         operations.reset()
         heldProbeFrame?.first?.recycle()
         heldProbeFrame = null
@@ -571,10 +824,11 @@ class SphereCaptureController(
         continuousCapture = false
         lastCoverage = 0f
         lastSolidAngleCoverage = 0f
+        lastPreviewBitmap?.recycle()
         lastPreviewBitmap = null
-        lastFullEquirect = null
-        fullExportInProgress = false
-        fullExportComplete = false
+        replaceFullEquirect(null)
+        finalizationInProgress = false
+        callbacks.forEach { it(failedExport) }
     }
 
     /**
@@ -586,7 +840,7 @@ class SphereCaptureController(
         fovV: Float = 50f,
         distortion: LensDistortion = LensDistortion.NONE
     ): Boolean {
-        if (fullExportInProgress) return false
+        if (finalizationInProgress) return false
         continuousCapture = false
         stitchWorker.shutdown()
         stitchWorker = SphereStitchWorker(
@@ -606,18 +860,29 @@ class SphereCaptureController(
     }
 
     fun release(awaitWorkerMs: Long = RELEASE_AWAIT_MS) {
+        val failedExport = SphereFinishResult(
+            equirect = null,
+            durationMs = 0L,
+            ranOnMainThread = false
+        )
+        val callbacks = pendingExportCallbacks.toList()
         pendingExportCallbacks.clear()
-        if (fullExportInProgress) {
+        if (finalizationInProgress) {
             stitchWorker.invalidatePendingRefinement()
         }
         stitchWorker.shutdown()
         if (!stitchWorker.awaitTermination(awaitWorkerMs, TimeUnit.MILLISECONDS)) {
             Log.w(TAG, "Stitch worker did not terminate within ${awaitWorkerMs}ms")
         }
+        viewerSnapshotExecutor.shutdown()
+        if (!viewerSnapshotExecutor.awaitTermination(2_000L, TimeUnit.MILLISECONDS)) {
+            viewerSnapshotExecutor.shutdownNow()
+        }
+        operations.flushPendingFrameStores()
         operations.release()
         state = State.IDLE
-        fullExportInProgress = false
-        fullExportComplete = false
+        finalizationInProgress = false
+        callbacks.forEach { it(failedExport) }
     }
 
     companion object {

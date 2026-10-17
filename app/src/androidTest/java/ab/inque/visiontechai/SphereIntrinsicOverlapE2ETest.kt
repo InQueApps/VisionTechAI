@@ -10,6 +10,8 @@ import android.graphics.Color
 import android.util.Log
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
@@ -110,75 +112,73 @@ class SphereIntrinsicOverlapE2ETest {
         assertTrue("bank should grow after overlapping second frame", bankAfterTwo > 0)
     }
 
-    /** I1: ~2% FOV mismatch is corrected by focal-scale search during global refine. */
+    /** Frozen intrinsics: focal scale stays 1.0; global pose refine still improves SSD. */
     @Test
-    fun intrinsicRefine_focalScale_reducesRaySSD() {
+    fun globalRefine_improvesRaySSD_withWrongFovSeed() {
         val wrongFovH = TRUE_FOV_H * 1.02f
         addThreeOverlappingFrames(fovH = wrongFovH, fovV = TRUE_FOV_V)
 
         val bankSize = SphereNative.getOverlapBankSize()
-        Log.i(TAG, "bank=$bankSize focal before=${SphereNative.getSessionFocalScale()}")
-        assertTrue("need overlap bank for intrinsic test", bankSize > 20)
+        assertTrue("need overlap bank", bankSize > 20)
 
         val ssdBefore = SphereNative.evalOverlapBankSSD()
         assertTrue("global pose refine should run", SphereNative.refinePending(applyGlobalPose = true))
         val ssdAfterGlobal = SphereNative.evalOverlapBankSSD()
-        SphereNative.refineIntrinsicsPending()
-        val scale = SphereNative.getSessionFocalScale()
-        val ssdAfter = SphereNative.evalOverlapBankSSD()
-        Log.i(TAG, "scale=$scale ssd $ssdBefore -> global=$ssdAfterGlobal -> $ssdAfter")
+        assertFalse("intrinsic optimization disabled", SphereNative.refineIntrinsicsPending())
+        assertEquals(1f, SphereNative.getSessionFocalScale(), 0.001f)
+        Log.i(TAG, "ssd $ssdBefore -> global=$ssdAfterGlobal scale=1.0")
 
         assertTrue("global refine should improve overlap SSD", ssdAfterGlobal < ssdBefore * 0.85f)
-        assertTrue("intrinsic pass must not regress SSD", ssdAfter <= ssdAfterGlobal * 1.02f)
     }
 
-    /** Strong λ_K prior: correct FOV should not drift on a short session. */
+    /** Correct FOV: focal scale remains 1.0 after global refine. */
     @Test
-    fun intrinsicRefine_doesNotDriftWithoutMismatch() {
+    fun globalRefine_doesNotChangeFocalScale() {
         addThreeOverlappingFrames()
 
         val ssdBefore = SphereNative.evalOverlapBankSSD()
         SphereNative.refinePending(applyGlobalPose = true)
         val ssdAfterGlobal = SphereNative.evalOverlapBankSSD()
-        SphereNative.refineIntrinsicsPending()
+        assertFalse(SphereNative.refineIntrinsicsPending())
         val scale = SphereNative.getSessionFocalScale()
         val ssdAfter = SphereNative.evalOverlapBankSSD()
-        Log.i(TAG, "no-mismatch scale=$scale ssd $ssdBefore -> global=$ssdAfterGlobal -> $ssdAfter")
+        Log.i(TAG, "scale=$scale ssd $ssdBefore -> global=$ssdAfterGlobal -> $ssdAfter")
 
-        assertTrue("focal scale should stay near 1.0", scale in 0.995f..1.005f)
-        assertTrue("SSD should not regress after intrinsic pass", ssdAfter <= ssdAfterGlobal * 1.05f)
+        assertEquals(1f, scale, 0.001f)
+        assertTrue("SSD should not regress", ssdAfter <= ssdAfterGlobal * 1.05f)
     }
 
-    /** I2: positive k1 prior on pinhole content is pulled toward zero. */
+    /** Frozen k1: session distortion stays at init value. */
     @Test
-    fun intrinsicRefine_k1_reducesRaySSD() {
+    fun globalRefine_doesNotOptimizeK1() {
         val k1Before = 0.04f
         addThreeOverlappingFrames(distortion = LensDistortion(k1 = k1Before))
 
         val ssdBefore = SphereNative.evalOverlapBankSSD()
         assertTrue("global pose refine should run", SphereNative.refinePending(applyGlobalPose = true))
         val ssdAfterGlobal = SphereNative.evalOverlapBankSSD()
-        SphereNative.refineIntrinsicsPending()
+        assertFalse(SphereNative.refineIntrinsicsPending())
         val k1 = SphereNative.getSessionDistortionK1()
         val ssdAfter = SphereNative.evalOverlapBankSSD()
         Log.i(TAG, "k1=$k1 ssd $ssdBefore -> global=$ssdAfterGlobal -> $ssdAfter")
 
         assertTrue("global refine should improve overlap SSD", ssdAfterGlobal < ssdBefore * 0.85f)
-        assertTrue("intrinsic pass must not regress SSD", ssdAfter <= ssdAfterGlobal * 1.02f)
+        assertEquals(k1Before, k1, 0.002f)
+        assertTrue("SSD stable after noop intrinsic", ssdAfter <= ssdAfterGlobal * 1.02f)
     }
 
-    /** I-R3: converged k1 persisted in store is used on the next native init. */
+    /** Persisted k1 from store is used on the next native init. */
     @Test
     fun nextSession_usesPersistedK1() {
         val ctx: Context = InstrumentationRegistry.getInstrumentation().targetContext
         val store = LensDistortionStore(ctx.applicationContext)
         store.reset()
 
-        addThreeOverlappingFrames(distortion = LensDistortion(k1 = 0.04f))
+        val k1Seed = 0.04f
+        addThreeOverlappingFrames(distortion = LensDistortion(k1 = k1Seed))
         SphereNative.refinePending(applyGlobalPose = true)
-        SphereNative.refineIntrinsicsPending()
-        val convergedK1 = SphereNative.getSessionDistortionK1()
-        store.set(LensDistortion(k1 = convergedK1))
+        assertFalse(SphereNative.refineIntrinsicsPending())
+        store.set(LensDistortion(k1 = k1Seed))
         SphereNative.release()
 
         val loaded = store.get()

@@ -3,6 +3,7 @@ package ab.inque.visiontechai
 import android.graphics.Bitmap
 import android.graphics.Color
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -11,23 +12,34 @@ import org.robolectric.RobolectricTestRunner
 class SphereMotionDepthEstimatorTest {
 
     @Test
-    fun estimateForStitch_returnsGradientWithoutProcessor() {
+    fun estimateForStitch_returnsNullWithoutProcessor() {
         val estimator = SphereMotionDepthEstimator(depthProcessor = null)
         val bmp = Bitmap.createBitmap(32, 24, Bitmap.Config.ARGB_8888)
         val px = IntArray(32 * 24) { Color.GRAY }
         bmp.setPixels(px, 0, 32, 0, 0, 32, 24)
-        val map = estimator.estimateForStitch(bmp)
-        assertEquals(32 * 24, map.size)
+        assertNull(estimator.estimateForStitch(bmp))
     }
 
     @Test
     fun estimateForStitch_reusesCachedMapForSameSize() {
         val estimator = SphereMotionDepthEstimator(depthProcessor = null)
         val bmp = checkerboard(32, 24)
-        val first = estimator.estimateForStitch(bmp)
+        val cached = FloatArray(32 * 24) { 0.6f }
+        estimator.javaClass.getDeclaredField("cachedNearness").apply {
+            isAccessible = true
+            set(estimator, cached)
+        }
+        estimator.javaClass.getDeclaredField("cachedWidth").apply {
+            isAccessible = true
+            set(estimator, 32)
+        }
+        estimator.javaClass.getDeclaredField("cachedHeight").apply {
+            isAccessible = true
+            set(estimator, 24)
+        }
         val second = estimator.estimateForStitch(bmp)
-        assertEquals(first.size, second.size)
-        assertEquals(first[0], second[0], 1e-6f)
+        assertEquals(cached.size, second!!.size)
+        assertEquals(cached[0], second[0], 1e-6f)
     }
 
     private fun checkerboard(w: Int, h: Int): Bitmap {

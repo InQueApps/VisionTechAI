@@ -11,7 +11,8 @@ from pathlib import Path
 
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _REPO_ROOT = _SCRIPT_DIR.parent
-_ROUNDTRIP_ROOT = _REPO_ROOT / "scripts" / "images" / "roundtrip_output"
+_DEFAULT_ROUNDTRIP_ROOT = "roundtrip_output"
+_ROUNDTRIP_ROOT = _REPO_ROOT / "scripts" / "images" / _DEFAULT_ROUNDTRIP_ROOT
 _STITCH_SCRIPT = _SCRIPT_DIR / "stitch_planar_roundtrip.py"
 
 DEFAULT_IMU_LEVELS = [0.0, 5.0, 10.0, 15.0]
@@ -124,6 +125,9 @@ def run_roundtrip(
     no_build: bool,
     imu_seed: int,
     sweep_fast: bool,
+    slow_e2e: bool,
+    output_root: str | None = None,
+    images_dir: str | None = None,
 ) -> int:
     cmd = [
         sys.executable,
@@ -140,12 +144,18 @@ def run_roundtrip(
         "--no-random-heading",
         "--no-random-elevation",
     ]
+    if images_dir:
+        cmd.extend(["--images", images_dir])
     if device:
         cmd.extend(["--device", device])
     if no_build:
         cmd.append("--no-build")
     if sweep_fast:
         cmd.append("--sweep-fast")
+    if slow_e2e:
+        cmd.append("--slow-e2e")
+    if output_root:
+        cmd.extend(["--output-root", output_root])
 
     print()
     print("=" * 72)
@@ -183,11 +193,30 @@ def main() -> None:
         action="store_true",
         help="Fast sweep: 1024 export, skip long pre-finish/polish; rebuild APK once",
     )
+    p.add_argument(
+        "--slow-e2e",
+        action="store_true",
+        help="Full production: 4096 export and slow E2E timeouts",
+    )
+    p.add_argument(
+        "--output-root",
+        type=str,
+        default=None,
+        help="Folder under scripts/images/ for per-level outputs (default: roundtrip_output)",
+    )
+    p.add_argument(
+        "--images",
+        type=str,
+        default=None,
+        help="Folder with source equirect and planars (default: scripts/images/)",
+    )
     args = p.parse_args()
 
+    output_root_name = args.output_root or _DEFAULT_ROUNDTRIP_ROOT
+    roundtrip_root = _REPO_ROOT / "scripts" / "images" / output_root_name
     source_stem = Path(args.source).stem
-    out_plot = args.out_plot or (_ROUNDTRIP_ROOT / "imu_degrade_sweep_summary.png")
-    summary_json = _ROUNDTRIP_ROOT / "imu_degrade_sweep_summary.json"
+    out_plot = args.out_plot or (roundtrip_root / "imu_degrade_sweep_summary.png")
+    summary_json = roundtrip_root / "imu_degrade_sweep_summary.json"
 
     if not args.plot_only:
         for i, deg in enumerate(args.imu_levels):
@@ -201,6 +230,9 @@ def main() -> None:
                 no_build=no_build,
                 imu_seed=args.imu_degrade_seed,
                 sweep_fast=args.sweep_fast,
+                slow_e2e=args.slow_e2e,
+                output_root=output_root_name if args.output_root else None,
+                images_dir=args.images,
             )
             if code != 0:
                 print(f"Warning: roundtrip at {deg}° exited with code {code} (metrics may still exist)")
@@ -208,7 +240,7 @@ def main() -> None:
     rows: list[dict] = []
     for deg in args.imu_levels:
         subdir = subdir_for_level(source_stem, deg)
-        folder = _ROUNDTRIP_ROOT / subdir
+        folder = roundtrip_root / subdir
         metrics = load_metrics(folder)
         if metrics is None:
             print(f"Missing metrics.json in {folder}")

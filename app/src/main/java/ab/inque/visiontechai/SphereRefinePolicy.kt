@@ -6,58 +6,101 @@ package ab.inque.visiontechai
 object SphereRefinePolicy {
 
     /**
-     * When true, periodic capture refine runs every [SphereStitchWorker.PERIODIC_REFINE_FRAMES]
-     * accepted frames (on stitch idle, without waiting for long pause).
-     */
-    /**
-     * Mid-capture periodic refine disabled for tap latency — pose recovery runs on
-     * pause debounce ([captureRefineDelayMs]) and pre-finish/DONE instead.
+     * When true, periodic capture refine runs every [periodicRefineEvery] accepted
+     * frames while the stitch queue is idle (pose-only + preview resplat).
      */
     fun shouldRunPeriodicRefine(
         acceptedSinceRefine: Int,
-        every: Int = SphereStitchWorker.PERIODIC_REFINE_FRAMES
-    ): Boolean = false
+        every: Int = periodicRefineEvery()
+    ): Boolean = acceptedSinceRefine >= every
 
     fun acceptedCountAfterPeriodicRefine(): Int = 0
+
+    fun periodicRefineEvery(): Int = 5
 
     /** Minimum stored frames before capture pose refine runs. */
     fun captureRefineMinFrames(): Int = 2
 
-    fun captureRefineDelayMs(): Long = 350L
+    fun captureRefineDelayMs(): Long = 300L
+
+    /** When angular velocity is below [captureMotionRefineMaxDegPerSec], refine sooner. */
+    fun captureMotionRefineStableMs(): Long = 200L
+
+    /** Max angular speed (deg/s) to treat capture as paused for motion-aware refine. */
+    fun captureMotionRefineMaxDegPerSec(): Double = 10.0
+
+    /** Active capture preview equirect width (matches [SphereCaptureController.CAPTURE_EQ_W]). */
+    fun capturePreviewWidth(): Int = 1024
+
+    /** Active capture preview equirect height. */
+    fun capturePreviewHeight(): Int = 512
+
+    /** DONE refined viewer preview (async after tap). */
+    fun donePreviewWidth(): Int = 2048
+
+    fun donePreviewHeight(): Int = 1024
 
     /** Shorter debounce when [shouldRunPeriodicRefine] during live capture. */
     fun capturePeriodicDelayMs(): Long = 120L
 
-    /** Mid-capture periodic refine: pose graph only — no full rebuild (keeps JNI lock short). */
+    /** Mid-capture periodic refine: pose graph only — no full align / warp. */
     fun capturePeriodicRefinementPasses(): SpherePoseRefinement.PassConfig =
-        captureRefinementPasses()
+        SpherePoseRefinement.PassConfig(
+            chainedPasses = 0,
+            globalPasses = 1,
+            convergePasses = 0,
+            fullAlignOnGlobal = false
+        )
 
     /**
-     * Mid-capture L2: chained + global with full align at capture resolution (1024²).
+     * Idle debounce: one cached feature-graph orientation solve, no full align / warp.
      */
     fun captureRefinementPasses(): SpherePoseRefinement.PassConfig =
         SpherePoseRefinement.PassConfig(
-            chainedPasses = 1,
+            chainedPasses = 0,
             globalPasses = 1,
             convergePasses = 0,
-            fullAlignOnGlobal = true
+            fullAlignOnGlobal = false
         )
 
     /**
-     * Full finish schedule for idle pre-DONE drain on [preFinishExecutor].
-     * Heavy pose + align work runs here, not on DONE.
+     * Idle pre-DONE: cache BRIEF features + relative rotation edges only (no panorama rebuild).
      */
     fun preFinishRefinementPasses(): SpherePoseRefinement.PassConfig =
         SpherePoseRefinement.PassConfig(
-            chainedPasses = 2,
-            globalPasses = 2,
-            convergePasses = 1,
-            fullAlignOnGlobal = true
+            chainedPasses = 0,
+            globalPasses = 0,
+            convergePasses = 0,
+            fullAlignOnGlobal = false
         )
 
-    /** DONE fallback when pre-finish did not complete before tap (same schedule as pre-finish). */
+    /** DONE viewer: one fast orientation solve + native preview rebuild (no full align). */
+    fun donePreviewRefinementPasses(): SpherePoseRefinement.PassConfig =
+        SpherePoseRefinement.PassConfig(
+            chainedPasses = 0,
+            globalPasses = 1,
+            convergePasses = 0,
+            fullAlignOnGlobal = false
+        )
+
+    /** Post-DONE stage 2: targeted polish slices for progress UI (not [PassConfig] slices). */
+    fun targetedFinalizationPassCount(): Int = 4
+
+    /** Stage 2 uses full-quality native mode — not pose-graph-only preview. */
+    fun targetedFinalizationPoseGraphOnly(): Boolean = false
+
+    fun targetedFinalizationFastFinish(): Boolean = false
+
+    /** Targeted path does not use [globalRefinePosesLocked] multi-pass schedule. */
+    fun targetedFinalizationGlobalRefinePasses(): Int = 0
+
+    /** Legacy [PassConfig] for adaptive slice runner; export-only (targeted path is separate). */
+    fun savePolishRefinementPasses(): SpherePoseRefinement.PassConfig =
+        finishRefinementPassesExportOnly()
+
+    /** DONE fallback when pre-finish did not complete before tap (same as preview). */
     fun finishRefinementPassesMinimal(): SpherePoseRefinement.PassConfig =
-        preFinishRefinementPasses()
+        donePreviewRefinementPasses()
 
     fun finishRefinementPassesExportOnly(): SpherePoseRefinement.PassConfig =
         SpherePoseRefinement.PassConfig(
@@ -68,7 +111,7 @@ object SphereRefinePolicy {
         )
 
     fun finishRefinementPassesFull(): SpherePoseRefinement.PassConfig =
-        preFinishRefinementPasses()
+        savePolishRefinementPasses()
 
     /** DONE when capture already ran global + warps: polish only. */
     fun finishRefinementPassesAfterCapture(): SpherePoseRefinement.PassConfig =
@@ -89,6 +132,15 @@ object SphereRefinePolicy {
 
     /** When true, DONE skips full global if capture refine already ran (hurts live quality). */
     fun useLightFinishWhenCaptureRefined(): Boolean = false
+
+    /** After DONE stage-1 SO(3), skip expensive image-space global only when overlap SSD proves convergence. */
+    fun shouldSkipStrongGlobalFinalization(stats: ab.inque.robotics.panorama.RefineStats?): Boolean {
+        if (stats == null) return false
+        if (!stats.applyGlobalPose) return false
+        // Pose-graph-only refine leaves SSD at 0 — not evidence that full global is unnecessary.
+        if (stats.ssdBefore <= 0f && stats.ssdAfter <= 0f) return false
+        return shouldStopAfterGlobalPass(stats)
+    }
 
     /** S17: L2b global finish uses liveRecency replace (native); stored exposure via forceStoredExposure. */
     fun useRecencyCompositeOnGlobalFinish(): Boolean = false
@@ -129,6 +181,12 @@ object SphereRefinePolicy {
     /** PG-R3: global refine must lower overlap-bank SSD by at least this fraction. */
     fun minRefineSsdImprovementRatio(): Double = 0.05
 
+    /** Overlap-bank SSD below this → skip additional global passes. */
+    fun goodGlobalRefineSsdThreshold(): Float = 250f
+
+    /** Min fractional SSD drop to justify another global pass (production adaptive finish). */
+    fun minGlobalPassSsdImprovementRatio(): Double = 0.01
+
     /** Finish export vs last fast preview before DONE (worker path; L2b global finish shifts composite). */
     fun minFinishVsPreviewCorrelation(): Double = 0.48
 
@@ -153,8 +211,20 @@ object SphereRefinePolicy {
     /** S12/S23: full multiband seam pass on gallery export (light seams on live preview only). */
     fun useFullSeamsOnExport(): Boolean = true
 
+    /** Skip seam refinement on DONE preview (SAVE runs seams at gallery resolution). */
+    fun runPreviewSeamRefine(): Boolean = false
+
+    /**
+     * When false, DONE export skips seam refinement to isolate resampling/compositing blur.
+     * Re-enable after nearest-center + rotation-only baseline is sharp.
+     */
+    fun runExportSeamRefine(): Boolean = true
+
     /** When false, background finish polish does not replace the sharp DONE export in the viewer. */
     fun refreshViewerAfterBackgroundFinish(): Boolean = true
+
+    /** Min interval between live viewer redraws during post-DONE refinement (avoids ANR). */
+    fun viewerRefreshThrottleMs(): Long = 400L
 
     /** Overlap-band correlation: preview vs export after finish (stripe synth ~0.5 after global pose). */
     fun minFinishOverlapBandCorrelation(): Double = 0.51
@@ -176,14 +246,14 @@ object SphereRefinePolicy {
 
     fun maxWarpSeedDisagreementPx(): Float = 4f
 
-    /** Neighbor-only chained pose passes in pre-finish schedule. */
-    fun finishChainedPosePasses(): Int = 2
+    /** Neighbor-only chained pose passes in pre-finish schedule (legacy — now 0). */
+    fun finishChainedPosePasses(): Int = 0
 
-    /** Global passes in pre-finish schedule. */
-    fun finishGlobalPosePasses(): Int = 2
+    /** Global passes on SAVE polish schedule. */
+    fun finishGlobalPosePasses(): Int = 1
 
-    /** Converge pass in pre-finish schedule. */
-    fun finishConvergePasses(): Int = 1
+    /** Converge pass in finish schedule (legacy — now 0). */
+    fun finishConvergePasses(): Int = 0
 
     /**
      * Global graph outer passes during mid-capture L2.
@@ -191,11 +261,16 @@ object SphereRefinePolicy {
      */
     fun captureGlobalRefinePasses(): Int = 0
 
-    /** Global graph outer passes on DONE. 0 = production default (full 6-DoF). */
+    /** Global graph outer passes on SAVE. 0 = production default (full 6-DoF). */
     fun finishGlobalRefinePassesCap(): Int = 0
 
     /**
-     * When false, global pose runs only in foreground finish (viewer export quality).
+     * Fast stitch / sweep-fast export: capped rotation-only global graph in native
+     * ([sGlobalRefinePassesOverride] > 0). Target &lt;30s for 16 frames at 1024².
+     */
+    fun fastFinishGlobalRefinePasses(): Int = 2
+
+    /**
      * Background polish keeps intrinsics + light seams only.
      * Pre-finish already drains 2 global + 1 converge before DONE.
      */
@@ -219,7 +294,7 @@ object SphereRefinePolicy {
     /** S25: max fraction of frames rejected for overlap / align. */
     fun maxFrameRejectRate(): Float = 0.10f
 
-    /** Solid-angle coverage before pre-finish drain (low bar — front-load early). */
+    /** Solid-angle coverage before pre-finish graph cache (low bar — front-load early). */
     fun preFinishMinSolidAngle(): Float = 0.15f
 
     /** Idle delay after last frame before pre-finish drain. */
@@ -227,4 +302,16 @@ object SphereRefinePolicy {
 
     /** Not used when draining all slices in one idle window. */
     fun preFinishInterSliceDelayMs(): Long = 50L
+
+    /** True when another global pass is unlikely to help (SSD gate for SAVE polish). */
+    fun shouldStopAfterGlobalPass(stats: ab.inque.robotics.panorama.RefineStats?): Boolean {
+        if (stats == null || !stats.applyGlobalPose) return true
+        if (stats.ssdBefore <= 0f && stats.ssdAfter <= 0f) return true
+        if (stats.ssdAfter < goodGlobalRefineSsdThreshold()) return true
+        if (stats.ssdBefore > 1e-6f) {
+            val improvement = (stats.ssdBefore - stats.ssdAfter) / stats.ssdBefore
+            if (improvement < minGlobalPassSsdImprovementRatio()) return true
+        }
+        return false
+    }
 }

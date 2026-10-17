@@ -60,21 +60,20 @@ When `overlapGate=0`: no G1-fast; `fastCorrectedQuat` ≈ raw degraded IMU.
 
 **Native tuning added during this work:** gradient-magnitude Sobel on equirect + planar overlap, ZNCC for coarse edge alignment, IMU-gap-scaled search radii, `globalImuPriorLambda` → 0 when gap > 8° or SSD > 3000.
 
-### Export — sweep-fast degraded path (`SphereProductionStitchPipeline.runSweepFastFinishExport`)
-
-Current production path for degraded IMU (reverted after failed experiment):
+### Export — sweep-fast / Fast stitch (`runSweepFastFinishExport` / `runFastStitchFinishExport`)
 
 ```
-setFastFinishRefine(true)
-setGlobalRefinePasses(0)          // C++: override 0 = production default (5 passes, full 6-DoF)
-configureForCaptureRefine()       // also sets global passes to 0 (same effect)
-refineGlobalPose()                // nativeRefinePending(applyGlobalPose=true)
-rebuildFullAlign()                // nativeRebuildFullAlign
-prepareExportEquirect()
-refineSeams(light=true)
+resetPosesToImu()
+configureForFastFinishRefine()   // fastFinish ON, globalPasses=2 (rotation-only in C++)
+refineGlobalPose()               // 2-pass rot graph only when imuDegrade > 0
+prepareExportEquirect()          // nearest-view resplat (skips feather rebuild after global)
 ```
 
-**0° truth path:** `rebuildExportNearestCenter()` only (no global, no full align).
+**Do not** call `configureForCaptureRefine()` here — it turns off fast-finish and runs full 5-pass 6-DoF global (~minutes).
+
+**0° truth path:** reset + nearest-center export only (no global).
+
+Target wall time: **&lt;60s** for 16 frames at 1024² on device (was ~5 min before trim).
 
 ### What `refineGlobalPose()` does (`nativeRefinePending`, `applyGlobalPose=true`)
 
