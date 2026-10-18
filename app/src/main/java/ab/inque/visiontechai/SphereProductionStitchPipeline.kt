@@ -68,7 +68,7 @@ object SphereProductionStitchPipeline {
     }
 
     /**
-     * DONE viewer stage 1: cached feature SO(3) graph + 2048 feather preview resplat.
+     * DONE viewer stage 1: cached feature SO(3) graph + capture-resolution preview resplat.
      */
     fun runDonePreviewRefine(
         operations: SphereStitchOperations,
@@ -138,7 +138,10 @@ object SphereProductionStitchPipeline {
         onPass("conditionalParallax:$warped")
         if (isCancelled()) return
 
-        operations.prepareExportEquirect(exportW, exportH)
+        if (!operations.prepareExportEquirect(exportW, exportH)) {
+            onPass("prepareExport failed")
+            return
+        }
         onPass("prepareExport")
         if (SphereRefinePolicy.runExportSeamRefine()) {
             val lightSeams = !SphereRefinePolicy.useFullSeamsOnExport()

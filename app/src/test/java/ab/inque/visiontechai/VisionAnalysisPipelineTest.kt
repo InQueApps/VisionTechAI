@@ -103,6 +103,7 @@ class VisionAnalysisPipelineTest {
 
         val result = pipeline.processFrame(input, 99L)
         assertSame(input, result.rawBitmap)
+        assertNull(result.histograms)
     }
 
     @Test

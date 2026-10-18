@@ -12,6 +12,7 @@ import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -27,7 +28,7 @@ import java.util.concurrent.TimeUnit
 @Config(sdk = [28])
 class SphereCaptureControllerTest {
 
-    private class FakeOps : SphereStitchOperations {
+    private open class FakeOps : SphereStitchOperations {
         var solidAngle = 0.1f
         var areaCoverage = 0.1f
         var addCount = 0
@@ -51,7 +52,7 @@ class SphereCaptureControllerTest {
         override fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap? = null
         override fun getLastFrameInfo(): FrameAlignmentInfo? =
             FrameAlignmentInfo(addCount, 50, 200, 1f, 100f, false)
-        override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
+        open override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
             Bitmap.createBitmap(
                 eqW.coerceAtMost(SphereCaptureController.EQ_W),
                 eqH.coerceAtMost(SphereCaptureController.EQ_H),
@@ -313,6 +314,46 @@ class SphereCaptureControllerTest {
         assertEquals(0f, controller.lastSolidAngleCoverage, 0.001f)
         assertEquals(null, controller.getPreviewBitmap())
         assertEquals(null, controller.getFullEquirect())
+    }
+
+    @Test
+    fun restartCapture_duringFinalization_staysCapturing() {
+        controller.startSession()
+        submitFrameAndAwait(shutdownExecutor = false)
+        assertTrue(controller.finishCapture())
+        assertTrue(controller.restartCapture())
+        assertEquals(SphereCaptureController.State.CAPTURING, controller.state)
+        repeat(10) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(20)
+            assertEquals(SphereCaptureController.State.CAPTURING, controller.state)
+        }
+    }
+
+    @Test
+    fun ensureFullResExportBitmap_rejectsUndersizedNativeBuffer() {
+        val undersized = object : FakeOps() {
+            override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
+                Bitmap.createBitmap(16, 8, Bitmap.Config.ARGB_8888)
+        }
+        val undersizedWorker = SphereStitchWorker(
+            operations = undersized,
+            executor = Executors.newSingleThreadExecutor()
+        )
+        val ctrl = SphereCaptureController(
+            orientationTracker,
+            calibration,
+            onCoverageUpdate = { _, _, _ -> },
+            onPreviewReady = {},
+            stitchWorker = undersizedWorker,
+            operations = undersized
+        )
+        ctrl.startSession()
+        ctrl.captureFrame(solidBitmap())
+        undersizedWorker.awaitStitchIdle()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertNull(ctrl.ensureFullResExportBitmap())
+        undersizedWorker.shutdown()
     }
 
     @Test

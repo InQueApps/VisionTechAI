@@ -90,7 +90,8 @@ object SphereNative {
         quaternion: FloatArray,
         overlapGate: Float,
         nearnessMap: FloatArray? = null,
-        allowReject: Boolean = true
+        allowReject: Boolean = true,
+        cameraEv: Float = 0f
     ): Int {
         if (!loaded || quaternion.size < 4) return 0
         val w = bitmap.width
@@ -103,7 +104,8 @@ object SphereNative {
             quaternion[0], quaternion[1], quaternion[2], quaternion[3],
             overlapGate,
             depth,
-            allowReject
+            allowReject,
+            cameraEv
         )
     }
 
@@ -187,12 +189,25 @@ object SphereNative {
         return nativeResetPosesToImu()
     }
 
-    fun getEquirectBitmap(eqW: Int = 4096, eqH: Int = 2048): Bitmap? {
+    fun equirectWidth(): Int = if (loaded) nativeGetEquirectWidth() else 0
+    fun equirectHeight(): Int = if (loaded) nativeGetEquirectHeight() else 0
+
+    /**
+     * Copy the native stitch buffer. Never upscales: a larger request returns null
+     * so SAVE cannot treat a preview buffer as the final 360.
+     */
+    fun getEquirectBitmap(eqW: Int = 0, eqH: Int = 0): Bitmap? {
         if (!loaded) return null
-        val pixels = IntArray(eqW * eqH)
-        if (!nativeGetEquirect(pixels, eqW, eqH)) return null
-        val bmp = Bitmap.createBitmap(eqW, eqH, Bitmap.Config.ARGB_8888)
-        bmp.setPixels(pixels, 0, eqW, 0, 0, eqW, eqH)
+        val nativeW = nativeGetEquirectWidth()
+        val nativeH = nativeGetEquirectHeight()
+        if (nativeW <= 0 || nativeH <= 0) return null
+        if (eqW > 0 && eqH > 0 && (eqW > nativeW || eqH > nativeH)) return null
+        val w = if (eqW <= 0) nativeW else eqW
+        val h = if (eqH <= 0) nativeH else eqH
+        val pixels = IntArray(w * h)
+        if (!nativeGetEquirect(pixels, w, h)) return null
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        bmp.setPixels(pixels, 0, w, 0, 0, w, h)
         return bmp
     }
 
@@ -402,13 +417,16 @@ object SphereNative {
         qx: Float, qy: Float, qz: Float, qw: Float,
         overlapGate: Float,
         depth: FloatArray?,
-        allowReject: Boolean
+        allowReject: Boolean,
+        cameraEv: Float
     ): Int
     private external fun nativeRefinePending(applyGlobalPose: Boolean): Boolean
     private external fun nativeFlushPendingFrameStores()
     private external fun nativeHasRefineWorkPending(applyGlobalPose: Boolean): Boolean
     private external fun nativeRefineIntrinsicsPending(): Boolean
     private external fun nativeGetEquirect(pixelsOut: IntArray, outW: Int, outH: Int): Boolean
+    private external fun nativeGetEquirectWidth(): Int
+    private external fun nativeGetEquirectHeight(): Int
     private external fun nativeSetSessionFov(fovH: Float, fovV: Float): Boolean
     private external fun nativeRefineSeams(light: Boolean): Boolean
     private external fun nativeRefineStoredPoses(): Boolean

@@ -74,6 +74,9 @@ class SphereStitchWorker(
     @Volatile
     private var queuedPhotoMode: Boolean = false
 
+    @Volatile
+    private var queuedCameraEv: Float = 0f
+
     var onResult: ((SphereStitchResult) -> Unit)? = null
 
     /** Layer 3 finish/capture: full-res equirect after intrinsic pass (may arrive after DONE). */
@@ -167,6 +170,7 @@ class SphereStitchWorker(
             queuedBitmap = null
             queuedQuaternion = null
             queuedPhotoMode = false
+            queuedCameraEv = 0f
         }
     }
 
@@ -186,7 +190,8 @@ class SphereStitchWorker(
         quaternion: FloatArray,
         photoMode: Boolean = false,
         overlapGateOverride: Float? = null,
-        angularVelocityDegPerSec: Double = 0.0
+        angularVelocityDegPerSec: Double = 0.0,
+        cameraEv: Float = 0f
     ) {
         if (liveCaptureAborted) {
             return
@@ -200,18 +205,20 @@ class SphereStitchWorker(
                 queuedBitmap = copy
                 queuedQuaternion = quaternion.copyOf()
                 queuedPhotoMode = photoMode
+                queuedCameraEv = cameraEv
             }
             pendingDrops.incrementAndGet()
             return
         }
-        runStitch(copy, quaternion, photoMode, overlapGateOverride)
+        runStitch(copy, quaternion, photoMode, overlapGateOverride, cameraEv)
     }
 
     private fun runStitch(
         bitmap: Bitmap,
         quaternion: FloatArray,
         photoMode: Boolean = false,
-        overlapGateOverride: Float? = null
+        overlapGateOverride: Float? = null,
+        cameraEv: Float = 0f
     ) {
         safeExecute(executor) {
             try {
@@ -223,7 +230,7 @@ class SphereStitchWorker(
                 val ranOnMain = Looper.myLooper() == Looper.getMainLooper()
                 val nearness = if (photoMode) null else motionDepthEstimator?.invoke(bitmap)
                 val gate = overlapGateOverride ?: overlapGate
-                val status = operations.addFrameFast(bitmap, quaternion, gate, nearness)
+                val status = operations.addFrameFast(bitmap, quaternion, gate, nearness, cameraEv)
                 val accepted = status == STITCH_ACCEPTED
                 val lowOverlap = status == STITCH_LOW_OVERLAP
                 val coverage = operations.getCoverage()
@@ -458,6 +465,7 @@ class SphereStitchWorker(
                 queuedBitmap = null
                 queuedQuaternion = null
                 queuedPhotoMode = false
+                queuedCameraEv = 0f
             }
             inFlight.set(false)
             dispatchStitchIdleCallbacks()
@@ -466,16 +474,19 @@ class SphereStitchWorker(
         val nextBitmap: Bitmap?
         val nextQuat: FloatArray?
         val nextPhotoMode: Boolean
+        val nextCameraEv: Float
         synchronized(this) {
             nextBitmap = queuedBitmap
             nextQuat = queuedQuaternion
             nextPhotoMode = queuedPhotoMode
+            nextCameraEv = queuedCameraEv
             queuedBitmap = null
             queuedQuaternion = null
             queuedPhotoMode = false
+            queuedCameraEv = 0f
         }
         if (nextBitmap != null && nextQuat != null) {
-            runStitch(nextBitmap, nextQuat, nextPhotoMode)
+            runStitch(nextBitmap, nextQuat, nextPhotoMode, cameraEv = nextCameraEv)
         } else {
             inFlight.set(false)
             dispatchStitchIdleCallbacks()
@@ -826,8 +837,15 @@ class SphereStitchWorker(
         runWhenStitchIdle { mainHandler.post(onComplete) }
     }
 
+    fun detachCallbacks() {
+        onResult = null
+        onIntrinsicEquirectUpdated = null
+        onFinishBackgroundPolish = null
+    }
+
     fun shutdown() {
         isShutdown = true
+        detachCallbacks()
         abortLiveCapture()
         mainHandler.removeCallbacks(refineRunnable)
         mainHandler.removeCallbacks(preFinishRunnable)
@@ -839,6 +857,8 @@ class SphereStitchWorker(
             queuedBitmap?.recycle()
             queuedBitmap = null
             queuedQuaternion = null
+            queuedPhotoMode = false
+            queuedCameraEv = 0f
         }
         executor.shutdown()
         refineExecutor.shutdown()

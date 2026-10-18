@@ -32,9 +32,7 @@ import android.graphics.Bitmap
 import android.os.Build
 import android.provider.MediaStore
 import android.util.Log
-import android.view.Gravity
 import android.view.View
-import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
@@ -43,6 +41,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Manages 360° sphere capture lifecycle and equirectangular export.
@@ -85,6 +84,8 @@ class SphereSessionController(
     @Volatile
     var sphereCaptureIsPhotoMode: Boolean = true
 
+    var onSphereAnalysisPriority: ((Boolean) -> Unit)? = null
+
     @Volatile
     var lastRawFrame: Bitmap? = null
         private set
@@ -120,6 +121,7 @@ class SphereSessionController(
         invalidateSphereUiCallbacks()
         val uiGeneration = sphereUiGeneration
         setVisionMode(VisionMode.SPHERE)
+        onSphereAnalysisPriority?.invoke(true)
         orientationTracker.start()
         wireViewerOrientation()
         clearSphereCapturePreview()
@@ -188,8 +190,11 @@ class SphereSessionController(
             activity.runOnUiThread {
                 if (!isCurrentSphereUi(uiGeneration)) return@runOnUiThread
                 if (binding.sphereViewerOverlay.visibility == View.VISIBLE) {
-                    binding.sphereSaveButton.isEnabled = !ctrl.isFinalizationInProgress()
-                    binding.sphereSaveButton.text = if (ctrl.isFinalized()) "SAVE" else "SAVE"
+                    setFinalizeProgress(
+                        visible = ctrl.isFinalizationInProgress(),
+                        percent = if (ctrl.isFinalized()) 100 else null,
+                        enableSave = !ctrl.isFinalizationInProgress()
+                    )
                 }
             }
         }
@@ -197,32 +202,24 @@ class SphereSessionController(
             activity.runOnUiThread {
                 if (!isCurrentSphereUi(uiGeneration)) return@runOnUiThread
                 if (binding.sphereViewerOverlay.visibility != View.VISIBLE) return@runOnUiThread
-                val refining = ctrl.isFinalizationInProgress()
-                binding.sphereSaveButton.isEnabled = !refining
-                binding.sphereSaveButton.text = when {
-                    refining && percent < 100 -> when {
-                        stage.contains("seams", ignoreCase = true) -> "Finalizing… seams"
-                        stage == "prepareExport" -> "Finalizing… export"
-                        stage == "previewResplat" -> "Finalizing… preview"
-                        stage == "finalization_failed" -> "Finalizing failed"
-                        percent < 35 -> "Finalizing… align"
-                        else -> "Finalizing… $percent%"
-                    }
-                    ctrl.isFinalized() -> "SAVE"
-                    stage == "finalization_failed" -> "Retry SAVE"
-                    else -> "Finalizing…"
-                }
+                val failed = stage == "finalization_failed"
+                val refining = ctrl.isFinalizationInProgress() && !failed && percent < 100
+                setFinalizeProgress(
+                    visible = refining,
+                    percent = percent,
+                    enableSave = !refining
+                )
             }
         }
         ctrl.onBackgroundPolishReady = {
             activity.runOnUiThread {
                 if (!isCurrentSphereUi(uiGeneration)) return@runOnUiThread
                 if (binding.sphereViewerOverlay.visibility == View.VISIBLE) {
-                    Toast.makeText(
-                        activity,
-                        "Preview improved — finalizing full quality",
-                        Toast.LENGTH_SHORT
-                    ).show()
+                    setFinalizeProgress(
+                        visible = ctrl.isFinalizationInProgress(),
+                        percent = if (ctrl.isFinalized()) 100 else null,
+                        enableSave = ctrl.isFinalized()
+                    )
                 }
             }
         }
@@ -294,14 +291,13 @@ class SphereSessionController(
         Toast.makeText(activity, "Sphere mode — scan your surroundings", Toast.LENGTH_SHORT).show()
     }
 
-    /** Use analysis frames for live view; hide CameraX preview. Layout matches stitch crop (center square, full width). */
+    /** Native CameraX preview stays live; analysis bitmaps are only used when snapping a stitch frame. */
     private fun setLiveCameraFeedActive(active: Boolean) {
-        binding.viewFinder.visibility = if (active) View.INVISIBLE else View.VISIBLE
+        binding.viewFinder.visibility = View.VISIBLE
+        binding.sphereCameraFeed.visibility = View.GONE
+        binding.sphereCameraFeed.setImageDrawable(null)
         if (active) {
-            layoutSquareCapturePreview()
             syncSpherePhotoCaptureButton()
-        } else {
-            binding.sphereCameraFeed.setImageDrawable(null)
         }
     }
 
@@ -318,23 +314,6 @@ class SphereSessionController(
     fun onSphereCaptureModeChanged(isPhotoMode: Boolean) {
         sphereCaptureIsPhotoMode = isPhotoMode
         syncSpherePhotoCaptureButton()
-    }
-
-    /** Square viewport sized to overlay width — same aspect as [SphereStitchFramePrep.cropCenterSquare]. */
-    private fun layoutSquareCapturePreview() {
-        val overlay = binding.sphereCaptureOverlay
-        overlay.post {
-            val side = overlay.width
-            if (side <= 0) return@post
-            val views = listOf(binding.sphereCameraFeed, binding.spherePreviewImage)
-            for (view in views) {
-                view.layoutParams = (view.layoutParams as FrameLayout.LayoutParams).apply {
-                    width = side
-                    height = side
-                    gravity = Gravity.CENTER
-                }
-            }
-        }
     }
 
     fun resetExtrinsicCalibration() {
@@ -354,13 +333,8 @@ class SphereSessionController(
     fun capturePhotoFrame() {
         val ctrl = controller ?: return
         if (ctrl.state != SphereCaptureController.State.CAPTURING) return
-        val raw = lastRawFrame
-        if (raw != null && !raw.isRecycled) {
-            ctrl.captureFrame(raw, lastRawFrameTimestampNanos, imageRotationDegrees = lastImageRotationDegrees)
-        } else {
-            captureNextFrame = true
-            Toast.makeText(activity, "Capturing frame…", Toast.LENGTH_SHORT).show()
-        }
+        captureNextFrame = true
+        Toast.makeText(activity, "Capturing frame…", Toast.LENGTH_SHORT).show()
     }
 
     fun exit() {
@@ -368,7 +342,7 @@ class SphereSessionController(
             stopDebugRecording(runOfflineReplay = false)
         }
         val ctrl = controller
-        if (ctrl != null && isBackgroundExportActive()) {
+        if (ctrl != null && shouldFinishInBackground(ctrl) && enqueueBackgroundSave(ctrl)) {
             dismissSphereUiKeepSession()
             Toast.makeText(
                 activity,
@@ -379,6 +353,7 @@ class SphereSessionController(
         }
         cancelPendingBackgroundSave()
         invalidateSphereUiCallbacks()
+        setFinalizeProgress(visible = false, enableSave = true)
         setLiveCameraFeedActive(false)
         controller?.release()
         controller = null
@@ -389,6 +364,7 @@ class SphereSessionController(
         clearSphereCapturePreview()
         binding.recordButton.isEnabled = true
         binding.recordButton.alpha = 1f
+        onSphereAnalysisPriority?.invoke(false)
         setVisionMode(VisionMode.NONE)
     }
 
@@ -412,6 +388,7 @@ class SphereSessionController(
         binding.sphereCaptureOverlay.visibility = View.GONE
         binding.sphereViewerOverlay.visibility = View.GONE
         binding.sphereViewerView.cleanup()
+        onSphereAnalysisPriority?.invoke(false)
         if (isBackgroundExportActive()) {
             Log.i(TAG, "Keeping sphere session alive for background export")
             return
@@ -423,7 +400,30 @@ class SphereSessionController(
 
     private fun isBackgroundExportActive(): Boolean {
         val ctrl = controller ?: return pendingBackgroundSave
-        return pendingBackgroundSave || ctrl.isFinalizationInProgress()
+        return pendingBackgroundSave || saveInFlight.get() || ctrl.isFinalizationInProgress()
+    }
+
+    private fun shouldFinishInBackground(ctrl: SphereCaptureController): Boolean {
+        if (pendingBackgroundSave) return true
+        return ctrl.hasCapturedFrames && ctrl.isPreviewSession()
+    }
+
+    private fun enqueueBackgroundSave(ctrl: SphereCaptureController): Boolean {
+        if (pendingBackgroundSave) return true
+        pendingBackgroundSave = true
+        SphereExportPersistence.markPending(activity)
+        exportNotificationHelper.showExportStarted()
+        val queued = ctrl.startBackgroundFinalization(
+            onProgress = { percent, stage ->
+                exportNotificationHelper.showExportProgress(percent, stage)
+            },
+            onComplete = { result -> deliverBackgroundSaveResult(result) }
+        )
+        if (!queued) {
+            cancelPendingBackgroundSave()
+            return false
+        }
+        return true
     }
 
     /** S42: notify user if a background SAVE was interrupted by process death. */
@@ -466,6 +466,8 @@ class SphereSessionController(
 
     @Volatile
     private var pendingBackgroundSave = false
+
+    private val saveInFlight = AtomicBoolean(false)
 
     fun toggleImuViewerMode() {
         if (binding.sphereViewerOverlay.visibility != View.VISIBLE) return
@@ -514,11 +516,6 @@ class SphereSessionController(
             immediatePreview.recycle()
         }
         SphereStitchTelemetry.logSummary("capture")
-        Toast.makeText(
-            activity,
-            "Finalizing 360° panorama — quality will improve",
-            Toast.LENGTH_SHORT
-        ).show()
     }
 
     private fun showSphereViewer(equirect: Bitmap) {
@@ -531,8 +528,7 @@ class SphereSessionController(
         updateImuViewerButton()
         binding.sphereViewerView.setEquirectBitmap(equirect)
         binding.sphereViewerView.setLookDirection(0f, 0f, 90f)
-        binding.sphereSaveButton.isEnabled = false
-        binding.sphereSaveButton.text = "Finalizing…"
+        setFinalizeProgress(visible = true, percent = 0, enableSave = false)
     }
 
     private fun updateSphereViewerEquirect(equirect: Bitmap) {
@@ -567,7 +563,7 @@ class SphereSessionController(
     }
 
     fun cancelCapture() {
-        if (isBackgroundExportActive()) {
+        if (pendingBackgroundSave || saveInFlight.get()) {
             Toast.makeText(activity, "Wait for 360° export to finish", Toast.LENGTH_SHORT).show()
             return
         }
@@ -581,7 +577,7 @@ class SphereSessionController(
      * Close the viewer (e.g. after save) and reset so the user can scan again.
      */
     fun closeViewerAndReset() {
-        if (isBackgroundExportActive()) {
+        if (pendingBackgroundSave || saveInFlight.get()) {
             Toast.makeText(activity, "Wait for 360° export to finish", Toast.LENGTH_SHORT).show()
             return
         }
@@ -594,7 +590,33 @@ class SphereSessionController(
         }
     }
 
+    /**
+     * Bottom-of-image finalize bar. SAVE stays labeled SAVE; the bar carries progress.
+     */
+    private fun setFinalizeProgress(
+        visible: Boolean,
+        percent: Int? = null,
+        enableSave: Boolean
+    ) {
+        binding.sphereSaveButton.text = "SAVE"
+        binding.sphereSaveButton.isEnabled = enableSave
+        val bar = binding.sphereFinalizeProgress
+        if (!visible) {
+            bar.visibility = View.GONE
+            return
+        }
+        bar.visibility = View.VISIBLE
+        if (percent != null) {
+            bar.isIndeterminate = false
+            bar.max = 100
+            bar.progress = percent.coerceIn(0, 100)
+        } else {
+            bar.isIndeterminate = true
+        }
+    }
+
     private fun showCaptureOverlay() {
+        setFinalizeProgress(visible = false, enableSave = true)
         binding.sphereViewerOverlay.visibility = View.GONE
         binding.sphereViewerView.cleanup()
         binding.sphereCaptureOverlay.visibility = View.VISIBLE
@@ -625,16 +647,22 @@ class SphereSessionController(
             ).show()
             return
         }
+        if (!saveInFlight.compareAndSet(false, true)) {
+            Toast.makeText(activity, "Already saving your 360° photo…", Toast.LENGTH_SHORT).show()
+            return
+        }
         saveExecutor.execute {
             val equirect = ctrl.ensureFullResExportBitmap()
             activity.runOnUiThread {
                 if (activity.isDestroyed) {
                     equirect?.recycle()
+                    saveInFlight.set(false)
                     return@runOnUiThread
                 }
                 if (equirect != null) {
-                    attemptSaveEquirectangular(ctrl, equirect)
+                    attemptSaveEquirectangular(ctrl, equirect, recycleAfter = true)
                 } else {
+                    saveInFlight.set(false)
                     Toast.makeText(
                         activity,
                         "Could not finish 360° photo — try again in a moment",
@@ -647,21 +675,28 @@ class SphereSessionController(
 
     private fun deliverBackgroundSaveResult(result: ab.inque.visiontechai.SphereFinishResult) {
         activity.runOnUiThread {
+            val bmp = result.equirect
             if (activity.isDestroyed) {
+                recycleBitmap(bmp)
                 cancelPendingBackgroundSave()
                 releaseControllerIfIdle()
                 return@runOnUiThread
             }
             if (!pendingBackgroundSave) {
+                recycleBitmap(bmp)
                 releaseControllerIfIdle()
                 return@runOnUiThread
             }
             cancelPendingBackgroundSave()
             val ctrl = controller
-            val bmp = result.equirect
             if (bmp != null && ctrl != null) {
-                attemptSaveEquirectangular(ctrl, bmp)
+                if (!saveInFlight.compareAndSet(false, true)) {
+                    recycleBitmap(bmp)
+                } else {
+                    attemptSaveEquirectangular(ctrl, bmp, recycleAfter = true)
+                }
             } else {
+                recycleBitmap(bmp)
                 exportNotificationHelper.showExportComplete(success = false)
                 Toast.makeText(
                     activity,
@@ -674,8 +709,13 @@ class SphereSessionController(
         }
     }
 
-    private fun attemptSaveEquirectangular(ctrl: SphereCaptureController, bitmap: Bitmap) {
+    private fun attemptSaveEquirectangular(
+        ctrl: SphereCaptureController,
+        bitmap: Bitmap,
+        recycleAfter: Boolean
+    ) {
         if (bitmap.isRecycled) {
+            saveInFlight.set(false)
             exportNotificationHelper.showExportComplete(success = false)
             Toast.makeText(activity, "Could not finish 360° photo", Toast.LENGTH_SHORT).show()
             return
@@ -685,6 +725,8 @@ class SphereSessionController(
                 TAG,
                 "Rejecting save at ${bitmap.width}x${bitmap.height} — expected ${ctrl.exportWidth}x${ctrl.exportHeight}"
             )
+            if (recycleAfter) recycleBitmap(bitmap)
+            saveInFlight.set(false)
             exportNotificationHelper.showExportComplete(success = false)
             Toast.makeText(
                 activity,
@@ -710,9 +752,11 @@ class SphereSessionController(
                                 "\n\nSave anyway?"
                         )
                         .setPositiveButton("Save anyway") { _, _ ->
-                            saveEquirectangularBitmapAsync(bitmap)
+                            saveEquirectangularBitmapAsync(bitmap, recycleAfter)
                         }
                         .setNegativeButton(android.R.string.cancel) { _, _ ->
+                            if (recycleAfter) recycleBitmap(bitmap)
+                            saveInFlight.set(false)
                             exportNotificationHelper.showExportComplete(success = false)
                             Toast.makeText(
                                 activity,
@@ -722,6 +766,8 @@ class SphereSessionController(
                         }
                         .show()
                 } else {
+                    if (recycleAfter) recycleBitmap(bitmap)
+                    saveInFlight.set(false)
                     exportNotificationHelper.showExportComplete(success = false)
                     Toast.makeText(
                         activity,
@@ -733,12 +779,23 @@ class SphereSessionController(
                 return
             }
         }
-        saveEquirectangularBitmapAsync(bitmap)
+        saveEquirectangularBitmapAsync(bitmap, recycleAfter)
     }
 
-    private fun saveEquirectangularBitmapAsync(bitmap: Bitmap) {
-        if (activity.isDestroyed || bitmap.isRecycled) return
+    private fun saveEquirectangularBitmapAsync(bitmap: Bitmap, recycleAfter: Boolean) {
+        if (activity.isDestroyed || bitmap.isRecycled) {
+            if (recycleAfter) recycleBitmap(bitmap)
+            saveInFlight.set(false)
+            return
+        }
         val copy = bitmap.copy(Bitmap.Config.ARGB_8888, false)
+        if (recycleAfter) recycleBitmap(bitmap)
+        if (copy == null) {
+            saveInFlight.set(false)
+            exportNotificationHelper.showExportComplete(success = false)
+            Toast.makeText(activity, "Failed to save sphere photo", Toast.LENGTH_SHORT).show()
+            return
+        }
         saveExecutor.execute {
             val success = try {
                 saveBitmapToMediaStore(copy)
@@ -746,9 +803,10 @@ class SphereSessionController(
                 Log.e(TAG, "Failed to save sphere: ${e.message}")
                 false
             } finally {
-                copy.recycle()
+                recycleBitmap(copy)
             }
             activity.runOnUiThread {
+                saveInFlight.set(false)
                 if (activity.isDestroyed) return@runOnUiThread
                 exportNotificationHelper.showExportComplete(success = success)
                 if (success) {
@@ -757,10 +815,14 @@ class SphereSessionController(
                     Toast.makeText(activity, "Failed to save sphere photo", Toast.LENGTH_SHORT).show()
                 }
                 if (binding.sphereViewerOverlay.visibility == View.VISIBLE) {
-                    binding.sphereSaveButton.text = "SAVE"
+                    setFinalizeProgress(visible = false, enableSave = true)
                 }
             }
         }
+    }
+
+    private fun recycleBitmap(bitmap: Bitmap?) {
+        if (bitmap != null && !bitmap.isRecycled) bitmap.recycle()
     }
 
     /** Hide sphere UI but keep [controller] alive for background export. */
@@ -771,6 +833,7 @@ class SphereSessionController(
         binding.sphereViewerOverlay.visibility = View.GONE
         binding.sphereViewerView.cleanup()
         clearSphereCapturePreview()
+        onSphereAnalysisPriority?.invoke(false)
         setVisionMode(VisionMode.NONE)
     }
 
@@ -794,7 +857,7 @@ class SphereSessionController(
             }
         }
         val jpegBytes = ByteArrayOutputStream()
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 95, jpegBytes)
+        bitmap.compress(Bitmap.CompressFormat.JPEG, 100, jpegBytes)
         val xmpData = SphereXmpMetadata.buildGpanoXmp(bitmap.width, bitmap.height).toByteArray(Charsets.UTF_8)
         val finalData = injectXmpIntoJpeg(jpegBytes.toByteArray(), xmpData)
         val uri = activity.contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)

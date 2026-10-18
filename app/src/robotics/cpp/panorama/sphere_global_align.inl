@@ -14,6 +14,37 @@
 #include <thread>
 #include <numeric>
 #include <cstdlib>
+#include <cstdint>
+
+static float kSrgbToLin[256];
+static uint8_t kLinToSrgb[4096];
+static bool kSrgbLutReady = false;
+
+static void initSrgbLuts() {
+    if (kSrgbLutReady) return;
+    for (int i = 0; i < 256; i++) {
+        const double u = i / 255.0;
+        kSrgbToLin[i] = (float)(u <= 0.04045 ? u / 12.92 : std::pow((u + 0.055) / 1.055, 2.4));
+    }
+    for (int i = 0; i < 4096; i++) {
+        const double l = (i / 4095.0) * 8.0;
+        const double u = l <= 0.0031308 ? 12.92 * l : 1.055 * std::pow(std::max(0.0, l), 1.0 / 2.4) - 0.055;
+        kLinToSrgb[i] = (uint8_t)std::lround(std::max(0.0, std::min(1.0, u)) * 255.0);
+    }
+    kSrgbLutReady = true;
+}
+
+static inline float srgb8ToLin(int s) {
+    return kSrgbToLin[std::max(0, std::min(255, s))];
+}
+
+static inline float linToSrgb8(double l) {
+    if (l <= 0.0) return 0.f;
+    int i = (int)std::lround(l / 8.0 * 4095.0);
+    if (i >= 4095) return 255.f;
+    if (i < 0) return 0.f;
+    return (float)kLinToSrgb[i];
+}
 
 namespace ga {
 
@@ -86,12 +117,17 @@ static bool sGaDebug = std::getenv("SPHERE_GA_DEBUG") != nullptr;
 static float sGaHoleFraction = 0.f;
 static int sGaFrameCount = 0;
 static double sGaVig[2] = {0.0, 0.0};  // log V(r) = a1 r² + a2 r⁴, r² ∈ [0,1] (corner = 1)
+/** First accepted frame's camera EV; stitch gains are relative to this look. */
+static float sRefCameraEv = 0.f;
+static bool sHaveCameraEv = false;
 
 static void gaResetLocked() {
     sGaFrames.clear();
     sGaValid = false;
     sGaFrameCount = 0;
     sGaVig[0] = sGaVig[1] = 0.0;
+    sRefCameraEv = 0.f;
+    sHaveCameraEv = false;
 }
 
 static bool gaValidForCurrentFramesLocked() {
@@ -856,24 +892,29 @@ static inline bool sampleLow(const FrameData& fd, double lx, double ly, float* o
     return true;
 }
 
-/** Fit shared vignette + per-frame per-channel affine from overlap samples. */
+/**
+ * Equalize AE/WB with shared vignette + per-frame RGB gain (inverse of observed log-brightness).
+ * Residual DC is tightly clamped. Camera EV gains are kept when present.
+ */
 static void fitPhotometric(const std::vector<PhotoSample>& samples, int n,
                            const std::vector<int>& use,
                            double* vig, std::vector<FrameState>& st) {
     vig[0] = vig[1] = 0.0;
-    if (samples.size() < 50) return;
-    // Stage 1: log-luminance gains + vignette (unknowns: lg[n], a1, a2).
-    {
+    for (int i = 0; i < n; i++) {
+        st[i].offset[0] = st[i].offset[1] = st[i].offset[2] = 0.f;
+    }
+    if (sHaveCameraEv) return;
+    if (samples.size() >= 20) {
         const int dim = n + 2;
         std::vector<double> wts(samples.size(), 1.0);
         std::vector<double> x(dim, 0.0);
-        for (int it = 0; it < 3; it++) {
+        for (int it = 0; it < 5; it++) {
             std::vector<double> A((size_t)dim * dim, 0.0), b(dim, 0.0);
             for (size_t s = 0; s < samples.size(); s++) {
                 const PhotoSample& p = samples[s];
                 const double li = 0.299 * p.ci[0] + 0.587 * p.ci[1] + 0.114 * p.ci[2];
                 const double lj = 0.299 * p.cj[0] + 0.587 * p.cj[1] + 0.114 * p.cj[2];
-                const double y = std::log(li) - std::log(lj);
+                const double y = std::log(std::max(1.0, li)) - std::log(std::max(1.0, lj));
                 double row[4];
                 int idx[4];
                 row[0] = 1.0; idx[0] = p.i;
@@ -891,62 +932,88 @@ static void fitPhotometric(const std::vector<PhotoSample>& samples, int n,
             }
             const double ridge = 1e-3 * samples.size() / std::max(1, n);
             for (int i = 0; i < n; i++) {
-                A[(size_t)i * dim + i] += ridge + (use[i] ? 0.0 : 1e6);
-                for (int k = 0; k < n; k++) A[(size_t)i * dim + k] += 1.0;  // Σ lg = 0 gauge
+                if (sHaveCameraEv) {
+                    const double lg0 = std::log(std::max(0.05, (double)st[i].gain[0]));
+                    const double lockW = 1e4 * samples.size() / std::max(1, n);
+                    A[(size_t)i * dim + i] += lockW + (use[i] ? 0.0 : 1e6);
+                    b[i] += lockW * lg0;
+                } else {
+                    A[(size_t)i * dim + i] += ridge + (use[i] ? 0.0 : 1e6);
+                    for (int k = 0; k < n; k++) A[(size_t)i * dim + k] += 1.0;  // Σ lg = 0 gauge
+                }
             }
             A[(size_t)n * dim + n] += 1.0;
             A[(size_t)(n + 1) * dim + n + 1] += 1.0;
-            if (!choleskySolve(A, b, dim)) return;
+            if (!choleskySolve(A, b, dim)) break;
             x = b;
         }
         vig[0] = std::max(-1.5, std::min(0.5, x[n]));
         vig[1] = std::max(-1.0, std::min(1.0, x[n + 1]));
-    }
-    // Stage 2: per-channel affine on vignette-corrected values (unknowns α[n], β[n]).
-    auto V = [&](double r2) { return std::exp(vig[0] * r2 + vig[1] * r2 * r2); };
-    const int dim = 2 * n;
-    for (int c = 0; c < 3; c++) {
-        std::vector<double> x(dim, 0.0);
-        for (int i = 0; i < n; i++) x[i] = 1.0;
-        for (int it = 0; it < 3; it++) {
-            std::vector<double> A((size_t)dim * dim, 0.0), b(dim, 0.0);
-            for (const PhotoSample& p : samples) {
-                const double xi = p.ci[c] / V(p.ri2) / 255.0;
-                const double xj = p.cj[c] / V(p.rj2) / 255.0;
-                const double row[4] = {xi, 1.0, -xj, -1.0};
-                const int idx[4] = {p.i, n + p.i, p.j, n + p.j};
-                double pred = 0;
-                for (int k = 0; k < 4; k++) pred += row[k] * x[idx[k]];
-                const double w = std::fabs(pred) < 0.03 ? 1.0 : 0.03 / std::fabs(pred);
-                for (int r = 0; r < 4; r++)
-                    for (int q = 0; q < 4; q++) A[(size_t)idx[r] * dim + idx[q]] += w * row[r] * row[q];
-            }
-            const double spf = (double)samples.size() / std::max(1, n);
-            const double lamA = 2e-3 * spf, lamB = 2e-3 * spf;
-            const double gauge = 10.0 * spf;
-            int nu = 0;
-            for (int i = 0; i < n; i++) nu += use[i] ? 1 : 0;
-            nu = std::max(1, nu);
+        if (!sHaveCameraEv) {
+            // x[i] is observed log-brightness. Compose multiplies by gain, so store 1/exp(x).
+            std::vector<double> lumaLg(n, 0.0);
             for (int i = 0; i < n; i++) {
-                const double lockW = use[i] ? 0.0 : 1e6;
-                A[(size_t)i * dim + i] += lamA + lockW;
-                b[i] += lamA + lockW;
-                A[(size_t)(n + i) * dim + n + i] += lamB + lockW;
-                if (!use[i]) continue;
-                for (int k = 0; k < n; k++) {
-                    if (!use[k]) continue;
-                    // gauge: mean α = 1, mean β = 0 over used frames
-                    A[(size_t)i * dim + k] += gauge / ((double)nu * nu);
-                    A[(size_t)(n + i) * dim + n + k] += gauge / ((double)nu * nu);
-                }
-                b[i] += gauge / nu;
+                lumaLg[i] = -x[i];
+                const float g = (float)std::max(0.20, std::min(5.0, std::exp(-x[i])));
+                st[i].gain[0] = st[i].gain[1] = st[i].gain[2] = g;
             }
-            if (!choleskySolve(A, b, dim)) break;
-            x = b;
-        }
-        for (int i = 0; i < n; i++) {
-            st[i].gain[c] = (float)std::max(0.25, std::min(4.0, x[i]));
-            st[i].offset[c] = (float)std::max(-60.0, std::min(60.0, x[n + i] * 255.0));
+            auto Vfn = [&](double r2) { return std::exp(vig[0] * r2 + vig[1] * r2 * r2); };
+            for (int c = 0; c < 3; c++) {
+                std::vector<double> lg = lumaLg;
+                for (int it = 0; it < 2; it++) {
+                    std::vector<double> A((size_t)n * n, 0.0), b(n, 0.0);
+                    for (const PhotoSample& p : samples) {
+                        const double y = std::log(std::max(1.0, (double)p.cj[c] / std::max(1e-4, Vfn(p.rj2))))
+                            - std::log(std::max(1.0, (double)p.ci[c] / std::max(1e-4, Vfn(p.ri2))));
+                        const double pred = lg[p.i] - lg[p.j];
+                        const double res = y - pred;
+                        const double w = std::fabs(res) < 0.08 ? 1.0 : 0.08 / std::fabs(res);
+                        A[(size_t)p.i * n + p.i] += w;
+                        A[(size_t)p.j * n + p.j] += w;
+                        A[(size_t)p.i * n + p.j] -= w;
+                        A[(size_t)p.j * n + p.i] -= w;
+                        b[p.i] += w * y;
+                        b[p.j] -= w * y;
+                    }
+                    const double spf = (double)samples.size() / std::max(1, n);
+                    for (int i = 0; i < n; i++) {
+                        const double lockW = use[i] ? 0.0 : 1e6;
+                        const double towardLuma = 0.25 * spf;
+                        A[(size_t)i * n + i] += towardLuma + lockW;
+                        b[i] += towardLuma * lumaLg[i];
+                        for (int k = 0; k < n; k++) A[(size_t)i * n + k] += 1.0;
+                    }
+                    if (!choleskySolve(A, b, n)) break;
+                    lg = b;
+                }
+                for (int i = 0; i < n; i++) {
+                    st[i].gain[c] = (float)std::max(0.20, std::min(5.0, std::exp(lg[i])));
+                }
+            }
+            // Residual DC after gain+vignette. Tight clamp so AE hunts cannot milk/crush.
+            for (int c = 0; c < 3; c++) {
+                std::vector<double> A((size_t)n * n, 0.0), b(n, 0.0);
+                for (const PhotoSample& p : samples) {
+                    const double yi = st[p.i].gain[c] * p.ci[c] / std::max(1e-4, Vfn(p.ri2));
+                    const double yj = st[p.j].gain[c] * p.cj[c] / std::max(1e-4, Vfn(p.rj2));
+                    const double y = yj - yi;
+                    A[(size_t)p.i * n + p.i] += 1.0;
+                    A[(size_t)p.j * n + p.j] += 1.0;
+                    A[(size_t)p.i * n + p.j] -= 1.0;
+                    A[(size_t)p.j * n + p.i] -= 1.0;
+                    b[p.i] += y;
+                    b[p.j] -= y;
+                }
+                const double spf = (double)samples.size() / std::max(1, n);
+                for (int i = 0; i < n; i++) {
+                    A[(size_t)i * n + i] += 40.0 * spf + (use[i] ? 0.0 : 1e6);
+                    for (int k = 0; k < n; k++) A[(size_t)i * n + k] += 1.0;
+                }
+                if (!choleskySolve(A, b, n)) continue;
+                for (int i = 0; i < n; i++) {
+                    st[i].offset[c] = (float)std::max(-18.0, std::min(18.0, b[i]));
+                }
+            }
         }
     }
 }
@@ -1689,8 +1756,19 @@ static bool gaGlobalAlignLocked() {
             }
         }
         std::vector<int> use(n);
-        for (int i = 0; i < n; i++) use[i] = reliable[i] && !sGaFrames[i].discard ? 1 : 0;
+        for (int i = 0; i < n; i++) {
+            use[i] = reliable[i] && !sGaFrames[i].discard ? 1 : 0;
+            const float live = (sFrames[i].expGainR + sFrames[i].expGainG + sFrames[i].expGainB) / 3.f;
+            const float g = std::max(0.20f, std::min(5.0f, live));
+            sGaFrames[i].gain[0] = sGaFrames[i].gain[1] = sGaFrames[i].gain[2] = g;
+            sGaFrames[i].offset[0] = sGaFrames[i].offset[1] = sGaFrames[i].offset[2] = 0.f;
+        }
         fitPhotometric(samples, n, use, sGaVig, sGaFrames);
+        for (int i = 0; i < n; i++) {
+            sFrames[i].expGainR = sGaFrames[i].gain[0];
+            sFrames[i].expGainG = sGaFrames[i].gain[1];
+            sFrames[i].expGainB = sGaFrames[i].gain[2];
+        }
     }
 
     const bool keepInputPoses = std::getenv("SPHERE_GA_KEEP_POSES") != nullptr;
@@ -1727,6 +1805,7 @@ static bool gaGlobalAlignLocked() {
 /** Nearest-centre compositor with narrow seam feather and photometric correction. */
 static void gaComposeEquirectLocked(int outW, int outH) {
     using namespace ga;
+    initSrgbLuts();
     const int n = (int)sFrames.size();
     auto t0 = SteadyClock::now();
     double tanH, tanV;
@@ -1762,8 +1841,6 @@ static void gaComposeEquirectLocked(int outW, int outH) {
     eqWeight.assign((size_t)outW * outH, 0.f);
 
     constexpr int TILE = 32;
-    constexpr double BAND = 0.08;
-    constexpr double EDGE_TAPER = 0.02;
     const int tilesX = (outW + TILE - 1) / TILE;
     const int tilesY = (outH + TILE - 1) / TILE;
     const double vig0 = sGaVig[0], vig1 = sGaVig[1];
@@ -1822,41 +1899,63 @@ static void gaComposeEquirectLocked(int outW, int outH) {
                         if (!v.fill) anyPrimary = true;
                     }
                     if (nh == 0) continue;
+                    int bestK = -1;
                     double best = 1e9;
                     for (int k = 0; k < nh; k++) {
                         if (anyPrimary && views[hits[k].i].fill) continue;
-                        best = std::min(best, hits[k].s);
-                    }
-                    double acc[3] = {0, 0, 0}, wsum = 0;
-                    for (int k = 0; k < nh; k++) {
-                        const Hit& h = hits[k];
-                        const FrameView& v = views[h.i];
-                        if (anyPrimary && v.fill) continue;
-                        double wt = 1.0 - (h.s - best) / BAND;
-                        if (wt <= 0) continue;
-                        wt *= std::min(1.0, h.edge / EDGE_TAPER);
-                        if (wt <= 1e-4) continue;
-                        const int ix = std::min(v.w - 2, std::max(0, (int)h.fx));
-                        const int iy = std::min(v.h - 2, std::max(0, (int)h.fy));
-                        const double ax = std::min(1.0, std::max(0.0, h.fx - ix));
-                        const double ay = std::min(1.0, std::max(0.0, h.fy - iy));
-                        const int32_t* p0 = v.px + (size_t)iy * v.w + ix;
-                        const int32_t* p1 = p0 + v.w;
-                        const double invV = std::exp(-(vig0 * h.r2 + vig1 * h.r2 * h.r2));
-                        for (int c = 0; c < 3; c++) {
-                            const int sh = 16 - 8 * c;
-                            const double s =
-                                (1 - ax) * (1 - ay) * ((p0[0] >> sh) & 0xff) + ax * (1 - ay) * ((p0[1] >> sh) & 0xff) +
-                                (1 - ax) * ay * ((p1[0] >> sh) & 0xff) + ax * ay * ((p1[1] >> sh) & 0xff);
-                            acc[c] += wt * (v.gain[c] * s * invV + v.offset[c]);
+                        const Hit& candH = hits[k];
+                        const FrameView& candV = views[candH.i];
+                        const int cx = std::min(candV.w - 1, std::max(0, (int)std::lround(candH.fx)));
+                        const int cy = std::min(candV.h - 1, std::max(0, (int)std::lround(candH.fy)));
+                        const int32_t cp = candV.px[(size_t)cy * candV.w + cx];
+                        const int cr = (cp >> 16) & 0xff, cg = (cp >> 8) & 0xff, cb = cp & 0xff;
+                        double score = candH.s;
+                        if (cr >= 248 || cg >= 248 || cb >= 248) score += 2.0;
+                        if (cr <= 6 && cg <= 6 && cb <= 6) score += 2.0;
+                        if (sHaveCameraEv) {
+                            const double gn = (candV.gain[0] + candV.gain[1] + candV.gain[2]) / 3.0;
+                            score += 0.55 * std::fabs(std::log(std::max(0.05, gn)));
                         }
-                        wsum += wt;
+                        if (score < best) { best = score; bestK = k; }
                     }
-                    if (wsum <= 0) continue;
+                    if (bestK < 0) continue;
+                    const Hit& h = hits[bestK];
+                    const FrameView& v = views[h.i];
+                    const double invV = sHaveCameraEv ? 1.0
+                        : std::exp(-(vig0 * h.r2 + vig1 * h.r2 * h.r2));
                     const size_t idx = (size_t)y * outW + x;
-                    eqR[idx] = (float)std::max(1.0, std::min(255.0, acc[0] / wsum));
-                    eqG[idx] = (float)std::max(0.0, std::min(255.0, acc[1] / wsum));
-                    eqB[idx] = (float)std::max(0.0, std::min(255.0, acc[2] / wsum));
+                    const double fx = std::max(0.0, std::min((double)(v.w - 1), h.fx));
+                    const double fy = std::max(0.0, std::min((double)(v.h - 1), h.fy));
+                    const int x0 = (int)fx, y0 = (int)fy;
+                    const int x1 = std::min(v.w - 1, x0 + 1), y1p = std::min(v.h - 1, y0 + 1);
+                    const double ax = fx - x0, ay = fy - y0;
+                    const int32_t p00 = v.px[(size_t)y0 * v.w + x0];
+                    const int32_t p10 = v.px[(size_t)y0 * v.w + x1];
+                    const int32_t p01 = v.px[(size_t)y1p * v.w + x0];
+                    const int32_t p11 = v.px[(size_t)y1p * v.w + x1];
+                    auto chan = [](int32_t p, int sh) { return (p >> sh) & 0xff; };
+                    for (int c = 0; c < 3; c++) {
+                        const int sh = 16 - 8 * c;
+                        double out;
+                        if (sHaveCameraEv) {
+                            const double lin =
+                                (1.0 - ax) * (1.0 - ay) * srgb8ToLin(chan(p00, sh)) +
+                                ax * (1.0 - ay) * srgb8ToLin(chan(p10, sh)) +
+                                (1.0 - ax) * ay * srgb8ToLin(chan(p01, sh)) +
+                                ax * ay * srgb8ToLin(chan(p11, sh));
+                            out = linToSrgb8(lin * v.gain[c] * invV);
+                        } else {
+                            const double s =
+                                (1.0 - ax) * (1.0 - ay) * (double)chan(p00, sh) +
+                                ax * (1.0 - ay) * (double)chan(p10, sh) +
+                                (1.0 - ax) * ay * (double)chan(p01, sh) +
+                                ax * ay * (double)chan(p11, sh);
+                            out = v.gain[c] * s * invV + v.offset[c];
+                        }
+                        if (c == 0) eqR[idx] = (float)std::max(1.0, std::min(255.0, out));
+                        else if (c == 1) eqG[idx] = (float)std::max(0.0, std::min(255.0, out));
+                        else eqB[idx] = (float)std::max(0.0, std::min(255.0, out));
+                    }
                     eqWeight[idx] = 1.f;
                 }
             }

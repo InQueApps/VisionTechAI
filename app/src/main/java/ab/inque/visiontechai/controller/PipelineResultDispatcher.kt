@@ -6,8 +6,6 @@ import ab.inque.visiontechai.ProcessedVideoRecorder
 import ab.inque.visiontechai.SphereCaptureController
 import ab.inque.visiontechai.SphereCoverageFormatter
 import ab.inque.visiontechai.SpherePreviewBinder
-import ab.inque.visiontechai.SphereRefinePolicy
-import ab.inque.visiontechai.SphereStitchFramePrep
 import ab.inque.visiontechai.VisionMode
 import ab.inque.visiontechai.VisionState
 import ab.inque.visiontechai.databinding.ActivityMainBinding
@@ -54,21 +52,21 @@ class PipelineResultDispatcher(
             result.rawBitmap?.let { raw ->
                 val ts = result.frameTimestampNanos
                 onSphereRawFrame?.invoke(raw, ts, result.imageRotationDegrees)
-                // Match the center-square region sent to the stitch worker (not full sensor / PreviewView).
-                val feedBitmap = if (SphereRefinePolicy.useCenterSquareStitch()) {
-                    SphereStitchFramePrep.cropCenterSquare(raw)
-                } else {
-                    raw
-                }
-                SpherePreviewBinder.apply(binding.sphereCameraFeed, feedBitmap)
-                if (feedBitmap !== raw) {
-                    feedBitmap.recycle()
-                }
                 if (sphereCaptureNextFrame()) {
                     clearSphereCaptureNextFrame()
-                    sphereController.captureFrame(raw, ts, imageRotationDegrees = result.imageRotationDegrees)
+                    sphereController.captureFrame(
+                        raw,
+                        ts,
+                        imageRotationDegrees = result.imageRotationDegrees,
+                        cameraEv = result.cameraEv
+                    )
                 }
-                sphereController.feedContinuousFrame(raw, ts, result.imageRotationDegrees)
+                sphereController.feedContinuousFrame(
+                    raw,
+                    ts,
+                    result.imageRotationDegrees,
+                    cameraEv = result.cameraEv
+                )
                 binding.sphereCoverageText.text =
                     SphereCoverageFormatter.format(
                         sphereController.lastCoverage,

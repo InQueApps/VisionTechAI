@@ -16,6 +16,8 @@ object SphereExportSize {
 
     const val MIN_WIDTH = 1024
     const val MAX_WIDTH = 8192
+    /** Interactive viewer cap — SAVE still uses [fromFrame], this only avoids 128MB GL copies. */
+    const val VIEWER_MAX_WIDTH = 4096
     const val ALIGN = 16
 
     fun fromFrame(
@@ -38,6 +40,17 @@ object SphereExportSize {
         width = (width / ALIGN) * ALIGN
         if (width < minWidth) width = minWidth
         if (width % 2 != 0) width -= 1
+        return Size(width, width / 2)
+    }
+
+    /** Display-only 2:1 size; never larger than the export, never above [VIEWER_MAX_WIDTH]. */
+    fun viewerSize(exportWidth: Int, exportHeight: Int, maxWidth: Int = VIEWER_MAX_WIDTH): Size {
+        if (exportWidth <= 0 || exportHeight <= 0) {
+            return Size(SphereCaptureController.CAPTURE_EQ_W, SphereCaptureController.CAPTURE_EQ_H)
+        }
+        var width = exportWidth.coerceAtMost(maxWidth.coerceAtLeast(MIN_WIDTH))
+        width = (width / 2) * 2
+        if (width < MIN_WIDTH) width = MIN_WIDTH
         return Size(width, width / 2)
     }
 

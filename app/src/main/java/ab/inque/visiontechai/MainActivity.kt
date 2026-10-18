@@ -738,7 +738,20 @@ class MainActivity : AppCompatActivity() {
             getState = { visionState },
             processors = frameProcessors,
             detectObjects = objectDetectionProcessor::detectObjects,
-            applyFlip = { b -> if (useFrontCamera) ImageUtils.flipBitmapHorizontally(b) else b }
+            applyFlip = { b -> if (useFrontCamera) ImageUtils.flipBitmapHorizontally(b) else b },
+            shouldDecodeFrame = {
+                if (visionState.mode != VisionMode.SPHERE) {
+                    true
+                } else if (sphereSession.captureNextFrame) {
+                    true
+                } else {
+                    val ctrl = sphereSession.controller
+                    ctrl?.isContinuousCapturing == true && !ctrl.isStitchBusy()
+                }
+            },
+            exposureEvForTimestamp = { ts ->
+                if (::cameraController.isInitialized) cameraController.exposureEvFor(ts) else 0f
+            }
         )
 
         cameraController = CameraController(
@@ -755,6 +768,9 @@ class MainActivity : AppCompatActivity() {
                 cameraFovV = v
             }
         )
+        sphereSession.onSphereAnalysisPriority = { enabled ->
+            cameraController.setSphereAnalysisPriority(enabled)
+        }
 
         permissionCoordinator.checkAndRequest()
         binding.infoButton.bringToFront()
@@ -1402,11 +1418,11 @@ class MainActivity : AppCompatActivity() {
     override fun onResume() {
         super.onResume()
         if (!::cameraController.isInitialized) return
-        if (permissionCoordinator.allGranted() && cameraController.imageCapture == null) {
+        if (permissionCoordinator.allGranted() && !cameraController.isCameraBound) {
             startCamera()
-        } else if (permissionCoordinator.hasMinimum() && cameraController.imageCapture == null) {
+        } else if (permissionCoordinator.hasMinimum() && !cameraController.isCameraBound) {
             startCamera()
-        } else if (cameraController.imageCapture == null) {
+        } else if (!cameraController.isCameraBound) {
             permissionCoordinator.checkAndRequest()
         }
     }

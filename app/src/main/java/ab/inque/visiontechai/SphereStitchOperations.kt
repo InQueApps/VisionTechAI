@@ -41,6 +41,14 @@ interface SphereStitchOperations {
         nearnessMap: FloatArray?
     ): Int = if (addFrame(bitmap, quaternion)) STITCH_ACCEPTED else STITCH_REJECTED
 
+    fun addFrameFast(
+        bitmap: Bitmap,
+        quaternion: FloatArray,
+        overlapGate: Float,
+        nearnessMap: FloatArray?,
+        cameraEv: Float
+    ): Int = addFrameFast(bitmap, quaternion, overlapGate, nearnessMap)
+
     /**
      * Background refinement: re-align newly added frames and rebuild the
      * panorama. Returns true if the buffer changed (a refreshed preview is
@@ -110,7 +118,7 @@ interface SphereStitchOperations {
     fun getSolidAngleCoverage(): Float
     fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap?
     fun getLastFrameInfo(): FrameAlignmentInfo?
-    fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap?
+    fun getEquirectBitmap(eqW: Int = 0, eqH: Int = 0): Bitmap?
     fun refineSeams(light: Boolean = false): Boolean = true
     fun getLastRefineStats(): RefineStats? = null
     fun getSessionDistortionK1(): Float = 0f
@@ -139,6 +147,14 @@ object SphereNativeOperations : SphereStitchOperations {
         overlapGate: Float,
         nearnessMap: FloatArray?
     ): Int = SphereNative.addFrameFast(bitmap, quaternion, overlapGate, nearnessMap)
+
+    override fun addFrameFast(
+        bitmap: Bitmap,
+        quaternion: FloatArray,
+        overlapGate: Float,
+        nearnessMap: FloatArray?,
+        cameraEv: Float
+    ): Int = SphereNative.addFrameFast(bitmap, quaternion, overlapGate, nearnessMap, cameraEv = cameraEv)
 
     override fun refinePending(applyGlobalPose: Boolean): Boolean =
         SphereNative.refinePending(applyGlobalPose)

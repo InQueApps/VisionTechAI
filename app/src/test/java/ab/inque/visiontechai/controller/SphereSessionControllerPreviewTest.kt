@@ -17,6 +17,7 @@ import android.view.LayoutInflater
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -94,8 +95,7 @@ class SphereSessionControllerPreviewTest {
     @Test
     fun photoCapture_withLastRawFrame_updatesPreviewImageView() {
         val raw = Bitmap.createBitmap(16, 12, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.CYAN) }
-        session.onRawFrame(raw, 1L)
-        session.handleRecordButton(isPhotoMode = true) {}
+        snapPhoto(raw)
         awaitFrames(1)
         awaitPreviewPixel(Color.RED)
     }
@@ -103,14 +103,24 @@ class SphereSessionControllerPreviewTest {
     @Test
     fun secondFrame_changesPreviewPixel() {
         val raw = Bitmap.createBitmap(16, 12, Bitmap.Config.ARGB_8888)
-        session.onRawFrame(raw, 1L)
-        session.handleRecordButton(isPhotoMode = true) {}
+        snapPhoto(raw)
         awaitFrames(1)
         awaitPreviewPixel(Color.RED)
-        session.onRawFrame(raw, 1L)
-        session.handleRecordButton(isPhotoMode = true) {}
+        snapPhoto(raw)
         awaitFrames(2)
         awaitPreviewPixel(Color.GREEN)
+    }
+
+    private fun snapPhoto(raw: Bitmap) {
+        val idleDeadline = System.currentTimeMillis() + 3000
+        while (controller.isStitchBusy() && System.currentTimeMillis() < idleDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        session.handleRecordButton(isPhotoMode = true) {}
+        assertTrue(session.captureNextFrame)
+        session.captureNextFrame = false
+        controller.captureFrame(raw, 1L)
     }
 
     private fun awaitPreviewPixel(color: Int) {

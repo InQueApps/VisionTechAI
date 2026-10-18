@@ -9,7 +9,7 @@
 //   fov <h_deg> <v_deg>
 //   export <w> <h>            final export resolution
 //   pipeline production|direct
-//   frame <argb_path> <w> <h> <qx> <qy> <qz> <qw> <overlap_gate>
+//   frame <argb_path> <w> <h> <qx> <qy> <qz> <qw> <overlap_gate> [camera_ev]
 //
 // Frame files are raw little-endian int32 ARGB (Android Bitmap.getPixels layout).
 // Outputs in out_dir: equirect.argb, poses.txt (index refined fast imu trusted),
@@ -84,6 +84,7 @@ struct FrameJob {
     int w = 0, h = 0;
     float q[4] = {0, 0, 0, 1};
     float gate = 0.f;
+    float cameraEv = 0.f;
 };
 
 struct Job {
@@ -109,6 +110,7 @@ bool loadJob(const std::string& path, Job& job) {
         else if (key == "frame") {
             FrameJob f;
             ss >> f.path >> f.w >> f.h >> f.q[0] >> f.q[1] >> f.q[2] >> f.q[3] >> f.gate;
+            if (!(ss >> f.cameraEv)) f.cameraEv = 0.f;
             job.frames.push_back(f);
         }
     }
@@ -172,7 +174,7 @@ int main(int argc, char** argv) {
         auto t0 = Clock::now();
         jint status = Java_ab_inque_robotics_panorama_SphereNative_nativeAddFrameFast(
             env, self, reinterpret_cast<jintArray>(&px), f.w, f.h,
-            f.q[0], f.q[1], f.q[2], f.q[3], f.gate, nullptr, JNI_TRUE);
+            f.q[0], f.q[1], f.q[2], f.q[3], f.gate, nullptr, JNI_TRUE, f.cameraEv);
         frameMs.push_back(std::chrono::duration<double, std::milli>(Clock::now() - t0).count());
         frameStatus.push_back((int)status);
     }

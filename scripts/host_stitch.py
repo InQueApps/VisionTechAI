@@ -58,7 +58,7 @@ NATIVE_DIR = _REPO / "app" / "src" / "robotics" / "cpp"
 HARNESS_DIR = NATIVE_DIR / "test" / "host_stitch"
 BUILD_DIR = _REPO / "build" / "host_stitch"
 DEFAULT_SOURCE = _REPO / "scripts" / "images" / "input_images" / "img_eq4096.jpg"
-ACCURACY_TARGET = 0.98
+ACCURACY_TARGET = 0.99
 
 Image.MAX_IMAGE_PIXELS = 500_000_000
 
@@ -269,12 +269,34 @@ def imu_seeds(truth: list[np.ndarray], spec: str, seed: int) -> list[np.ndarray]
     return out
 
 
-def photometric(rgb: np.ndarray, params: dict[str, float], r: np.random.Generator) -> np.ndarray:
-    """Per-frame camera effects: exposure (EV range), white balance, DC offset,
-    vignetting, sensor noise."""
+def photometric(
+    rgb: np.ndarray,
+    params: dict[str, float],
+    r: np.random.Generator,
+    frame_index: int = 0,
+    frame_count: int = 1,
+) -> tuple[np.ndarray, float]:
+    """Per-frame camera effects. Returns (image, camera_ev) where camera_ev is
+    linear ISO×t relative to the first frame, or 0 if unknown."""
     img = rgb.astype(np.float32)
     h, w, _ = img.shape
-    if params.get("exposure"):
+    camera_ev = 0.0
+    if params.get("ae_linear"):
+        # First frame is the look. Other frames hunt ±N stops in linear light.
+        if frame_index == 0:
+            camera_ev = 1.0
+        else:
+            camera_ev = float(2.0 ** r.uniform(-params["ae_linear"], params["ae_linear"]))
+        u = np.clip(img / 255.0, 0.0, 1.0)
+        lin = np.where(u <= 0.04045, u / 12.92, ((u + 0.055) / 1.055) ** 2.4)
+        lin *= camera_ev
+        enc = np.where(
+            lin <= 0.0031308,
+            12.92 * lin,
+            1.055 * np.power(np.clip(lin, 0.0, None), 1.0 / 2.4) - 0.055,
+        )
+        img = np.clip(enc * 255.0, 0.0, 255.0)
+    elif params.get("exposure"):
         img *= 2.0 ** r.uniform(-params["exposure"], params["exposure"])
     if params.get("wb"):
         img *= (1.0 + r.uniform(-params["wb"], params["wb"], 3)).astype(np.float32)
@@ -286,7 +308,7 @@ def photometric(rgb: np.ndarray, params: dict[str, float], r: np.random.Generato
         img *= (1.0 - params["vignette"] * np.clip(rr / 2.0, 0, 1))[..., None]
     if params.get("noise"):
         img += r.normal(0, params["noise"], img.shape).astype(np.float32)
-    return np.clip(img, 0, 255).astype(np.uint8)
+    return np.clip(img, 0, 255).astype(np.uint8), camera_ev
 
 
 def corrupt_frame(rgb: np.ndarray, kind: str, r: np.random.Generator) -> np.ndarray:
@@ -477,11 +499,15 @@ def evaluate(
     aligned_valid = np.asarray(Image.fromarray(aligned_valid_full).resize((eval_w, eval_h))) > 127
 
     lum_ref = luminance(ref)
+    lum_al = luminance(aligned)
     wts_raw = cos_lat * valid_small
     wts_al = cos_lat * aligned_valid
     acc_raw = weighted_corr(luminance(st_small), lum_ref, wts_raw)
-    acc = weighted_corr(luminance(aligned), lum_ref, wts_al)
+    acc = weighted_corr(lum_al, lum_ref, wts_al)
     coverage = float((cos_lat * aligned_valid).sum() / cos_lat.sum())
+    valid_mask = aligned_valid > 0
+    med_st = float(np.median(lum_al[valid_mask])) if np.any(valid_mask) else 0.0
+    med_ref = float(np.median(lum_ref[valid_mask])) if np.any(valid_mask) else 0.0
     diff = aligned.astype(np.float64) - ref.astype(np.float64)
     mse = float((wts_al[..., None] * diff * diff).sum() / max(1e-9, 3.0 * wts_al.sum()))
     psnr = 99.0 if mse < 1e-6 else 10.0 * math.log10(255.0 ** 2 / mse)
@@ -499,6 +525,8 @@ def evaluate(
         "accuracy": round(acc, 4),
         "accuracy_no_gauge": round(acc_raw, 4),
         "coverage": round(coverage, 4),
+        "median_luma": round(med_st, 1),
+        "median_luma_ref": round(med_ref, 1),
         "psnr_db": round(psnr, 2),
         "pose_err_mean_deg": round(float(np.nanmean(pe)), 3),
         "pose_err_p90_deg": round(float(np.nanpercentile(pe, 90)), 3),
@@ -549,14 +577,23 @@ def run_scenario(sc: Scenario, exe: Path, out_root: Path, log: bool = False) -> 
         f"export {sc.export_w} {sc.export_h}",
         "pipeline production",
     ]
+    pass_ev = photo.get("pass_ev", 0.0) > 0.5
     for i, (v, img, q) in enumerate(zip(views, frames, seeds)):
         r = np.random.default_rng(sc.seed * 104729 + i)
-        img = photometric(img, photo, r) if photo else img
+        camera_ev = 0.0
+        if photo:
+            img, camera_ev = photometric(img, photo, r, frame_index=i, frame_count=len(views))
         img = corrupt_frame(img, v.corrupt, r)
         p = frame_dir / f"{i:03d}.argb"
         write_argb(p, img)
         gate = 0.0 if i == 0 else sc.gate
-        lines.append(f"frame {p} {img.shape[1]} {img.shape[0]} {q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {q[3]:.9f} {gate}")
+        line = (
+            f"frame {p} {img.shape[1]} {img.shape[0]} "
+            f"{q[0]:.9f} {q[1]:.9f} {q[2]:.9f} {q[3]:.9f} {gate}"
+        )
+        if pass_ev and camera_ev > 0:
+            line += f" {camera_ev:.9f}"
+        lines.append(line)
     (out_dir / "job.txt").write_text("\n".join(lines) + "\n")
 
     env = dict(os.environ)
@@ -585,7 +622,8 @@ def print_row(m: dict) -> None:
     ok = "PASS" if m["accuracy"] >= ACCURACY_TARGET and m["coverage"] >= ACCURACY_TARGET else "FAIL"
     print(
         f"{ok} {m['scenario']:<28} acc={m['accuracy']:.4f} (raw {m['accuracy_no_gauge']:.4f}) "
-        f"cov={m['coverage']:.3f} psnr={m['psnr_db']:5.2f} "
+        f"cov={m['coverage']:.3f} luma={m.get('median_luma', 0):.0f}/{m.get('median_luma_ref', 0):.0f} "
+        f"psnr={m['psnr_db']:5.2f} "
         f"pose mean/p90/max={m['pose_err_mean_deg']:.2f}/{m['pose_err_p90_deg']:.2f}/{m['pose_err_max_deg']:.2f}deg "
         f"stored={m['frames_stored']}/{m['frames_in']} trusted={m['frames_trusted']} "
         f"frame={m['frame_ms_mean']:.0f}ms(max {m['frame_ms_max']:.0f}) total={m['total_ms'] / 1000:.1f}s",
@@ -601,6 +639,10 @@ SUITE: list[dict] = [
     dict(name="s16_drift30", imu="drift:30"),
     dict(name="s16_jump60", imu="jump:60@7"),
     dict(name="s16_light", imu="random:4", photo="exposure=0.7,wb=0.12,dc=12,vignette=0.35,noise=3"),
+    dict(name="s16_ae_ev", imu="none", photo="ae_linear=1.5,pass_ev=1", jitter=False, size=1024,
+         export_w=4096, export_h=2048),
+    dict(name="s16_ae_noev", imu="none", photo="ae_linear=1.5", jitter=False, size=1024,
+         export_w=4096, export_h=2048),
     dict(name="s16_bad_frames", imu="random:4", corrupt="blur@3,garbage@9"),
     dict(name="video_drift", layout="video", imu="drift:20", photo="exposure=0.4,wb=0.06,vignette=0.25,noise=2",
          size=640, corrupt="blur@5,blur@14"),
@@ -626,7 +668,8 @@ def main() -> None:
     ps.add_argument("--only", default="", help="comma-separated scenario names")
     ps.add_argument("--seed", type=int, default=42)
     ps.add_argument("--log", action="store_true")
-    for sp in (pr, ps):
+    pae = sub.add_parser("test-ae", help="AE hunt: camera EV vs overlap-only equalization")
+    for sp in (pr, ps, pae):
         sp.add_argument("--out", type=Path, default=BUILD_DIR / "runs")
         sp.add_argument("--rebuild", action="store_true")
     args = p.parse_args()
@@ -643,6 +686,47 @@ def main() -> None:
         m = run_scenario(sc, exe, args.out, log=args.log)
         print_row(m)
         print("per-frame pose err (deg):", m["pose_err_deg"])
+        return
+    if args.cmd == "test-ae":
+        rows = []
+        for name in ("s16_ae_ev", "s16_ae_noev"):
+            cfg = next(c for c in SUITE if c["name"] == name)
+            sc = Scenario(seed=42, **cfg)
+            m = run_scenario(sc, exe, args.out, log=name == "s16_ae_ev")
+            print_row(m)
+            rows.append(m)
+        ev = next(m for m in rows if m["scenario"] == "s16_ae_ev")
+        noev = next(m for m in rows if m["scenario"] == "s16_ae_noev")
+        luma_ratio = ev["median_luma"] / max(1.0, ev["median_luma_ref"])
+        native_log = (args.out / "s16_ae_ev" / "native.log").read_text(encoding="utf-8", errors="replace")
+        ev_gains = [ln for ln in native_log.splitlines() if "Camera EV gain=" in ln]
+        print(f"\ncamera-EV gain logs: {len(ev_gains)}")
+        for ln in ev_gains[:4]:
+            print(" ", ln)
+        if ev_gains:
+            print(f"  … last: {ev_gains[-1]}")
+        print(
+            f"luma stitch/ref: {ev['median_luma']:.1f}/{ev['median_luma_ref']:.1f} "
+            f"(ratio {luma_ratio:.3f}); overlap-only acc={noev['accuracy']:.4f} "
+            f"luma={noev['median_luma']:.1f}"
+        )
+        failed = []
+        if ev["accuracy"] < 0.99 or ev["coverage"] < 0.98:
+            failed.append(f"camera-EV accuracy/coverage {ev['accuracy']:.4f}/{ev['coverage']:.3f}")
+        if luma_ratio > 1.15:
+            failed.append(f"stitched too bright vs source (ratio {luma_ratio:.3f})")
+        if luma_ratio < 0.85:
+            failed.append(f"stitched too dark vs source (ratio {luma_ratio:.3f})")
+        if len(ev_gains) < 8:
+            failed.append(f"expected camera EV gains on most frames, got {len(ev_gains)}")
+        if ev["accuracy"] + 0.005 < noev["accuracy"]:
+            failed.append(
+                f"camera-EV acc {ev['accuracy']:.4f} lost accuracy vs overlap-only {noev['accuracy']:.4f}"
+            )
+        if failed:
+            print("FAIL:", "; ".join(failed))
+            sys.exit(1)
+        print("PASS camera-EV AE equalization")
         return
     only = {s for s in args.only.split(",") if s}
     rows = []

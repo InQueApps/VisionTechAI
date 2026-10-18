@@ -20,7 +20,9 @@ data class PipelineResult(
     val imageWidth: Int = 0,
     val frameTimestampNanos: Long = 0,
     /** CameraX clockwise rotation applied to [rawBitmap] in [ImageUtils.yuvToBitmap]. */
-    val imageRotationDegrees: Int = 0
+    val imageRotationDegrees: Int = 0,
+    /** Camera AE: ISO × t × boost / f². 0 when unknown. */
+    val cameraEv: Float = 0f
 )
 
 /**
@@ -31,7 +33,9 @@ class VisionAnalysisPipeline(
     private val getState: () -> VisionState,
     private val processors: Map<VisionMode, FrameProcessor>,
     private val detectObjects: (Bitmap) -> List<DetectionResult>,
-    private val applyFlip: (Bitmap) -> Bitmap
+    private val applyFlip: (Bitmap) -> Bitmap,
+    private val shouldDecodeFrame: () -> Boolean = { true },
+    private val exposureEvForTimestamp: (Long) -> Float = { 0f }
 ) {
     private var frameCount = 0
     private var lastFpsTime = System.currentTimeMillis()
@@ -40,14 +44,20 @@ class VisionAnalysisPipeline(
 
     fun createAnalyzer(callback: (PipelineResult) -> Unit): ImageAnalysis.Analyzer {
         return ImageAnalysis.Analyzer { image ->
+            val state = getState()
+            if (state.mode == VisionMode.SPHERE && !shouldDecodeFrame()) {
+                image.close()
+                return@Analyzer
+            }
             val frameTs = image.imageInfo.timestamp
             val rotationDegrees = image.imageInfo.rotationDegrees
+            val cameraEv = exposureEvForTimestamp(frameTs)
             val bitmap = ImageUtils.yuvToBitmap(image)
             if (bitmap == null) {
                 image.close()
                 return@Analyzer
             }
-            callback(processFrame(bitmap, frameTs, rotationDegrees))
+            callback(processFrame(bitmap, frameTs, rotationDegrees, cameraEv))
             image.close()
         }
     }
@@ -56,7 +66,8 @@ class VisionAnalysisPipeline(
     internal fun processFrame(
         bitmap: Bitmap,
         frameTimestampNanos: Long,
-        imageRotationDegrees: Int = 0
+        imageRotationDegrees: Int = 0,
+        cameraEv: Float = 0f
     ): PipelineResult {
         val state = getState()
 
@@ -68,7 +79,9 @@ class VisionAnalysisPipeline(
             lastFpsTime = now
         }
 
-        val histograms = if (lastHistograms == null || frameCount % 2 == 0) {
+        val histograms = if (state.mode == VisionMode.SPHERE) {
+            null
+        } else if (lastHistograms == null || frameCount % 2 == 0) {
             ImageUtils.calculateHistograms(bitmap).also { lastHistograms = it }
         } else {
             lastHistograms
@@ -97,7 +110,8 @@ class VisionAnalysisPipeline(
             imageHeight = bitmap.height,
             imageWidth = bitmap.width,
             frameTimestampNanos = frameTimestampNanos,
-            imageRotationDegrees = imageRotationDegrees
+            imageRotationDegrees = imageRotationDegrees,
+            cameraEv = cameraEv
         )
     }
 }

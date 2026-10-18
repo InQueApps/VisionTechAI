@@ -43,6 +43,15 @@ class SphereExportSizeTest {
     }
 
     @Test
+    fun viewerSize_capsDisplayWithoutChangingExport() {
+        val export = SphereExportSize.fromFrame(1440, 1440, 62f, 62f, maxWidth = 8192)
+        val viewer = SphereExportSize.viewerSize(export.width, export.height)
+        assertTrue(export.width >= 7776)
+        assertEquals(SphereExportSize.VIEWER_MAX_WIDTH, viewer.width)
+        assertEquals(SphereExportSize.VIEWER_MAX_WIDTH / 2, viewer.height)
+    }
+
+    @Test
     fun outputIsAlwaysEvenTwoToOne() {
         val size = SphereExportSize.fromFrame(1440, 1440, 62f, 62f, maxWidth = 8192)
         assertEquals(0, size.width % 2)

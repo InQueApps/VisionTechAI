@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstring>
 #include <cstdint>
+#include <cstddef>
 #include <algorithm>
 #include <deque>
 #include <mutex>
@@ -218,6 +219,8 @@ static int sGridFilledCells = 0;                  // grid cells with ≥1 filled
 
 /** When true, eq buffer at eqW×eqH already matches stored poses (skip export resplat). */
 static bool sEquirectBufferFresh = false;
+/** True only after nearest-center / GA export compose — preview resplat must not skip SAVE. */
+static bool sEquirectExportFresh = false;
 
 static inline void resetCoverageCountersLocked() {
     sCoveredCount = 0;
@@ -227,10 +230,17 @@ static inline void resetCoverageCountersLocked() {
 
 static inline void markEquirectFreshLocked() {
     sEquirectBufferFresh = true;
+    sEquirectExportFresh = false;
+}
+
+static inline void markEquirectExportFreshLocked() {
+    sEquirectBufferFresh = true;
+    sEquirectExportFresh = true;
 }
 
 static inline void invalidateEquirectFreshLocked() {
     sEquirectBufferFresh = false;
+    sEquirectExportFresh = false;
 }
 
 static void rebuildEquirectTrigTablesLocked() {
@@ -441,8 +451,8 @@ static double adaptiveImuPriorLambda(double photometricSSD) {
     if (photometricSSD > 2500.0) return 45.0;
     return IMU_PRIOR_LAMBDA;
 }
-// Store at analysis resolution for refine rebuilds (no downscale below typical camera analysis).
-static constexpr int STORE_MAX_DIM = 2560;
+// Keep stored frames at capture resolution — do not downscale for export.
+static constexpr int STORE_MAX_DIM = 8192;
 // F2: cap longest frame side for live-path splat (full-res stored for refine/export).
 static constexpr int LIVE_SPLAT_DIM = 1024;
 // Diagnostic: rotation-only export until sharpness baseline is established.
@@ -1008,6 +1018,22 @@ static void splatFrameInverseSpherical(
         if (fw < 1e-6f) return;
 
         int idx = ey * eqW + ex;
+        float pr, pg, pb;
+        samplePixelBilinear(pixels, frameW, frameH, sampleFx, sampleFy, pr, pg, pb);
+        if (sHaveCameraEv) {
+            const float gn = (globalGainR + globalGainG + globalGainB) * (1.f / 3.f);
+            if (gn < 0.92f && (pr >= 250.f || pg >= 250.f || pb >= 250.f) && accumWVal(idx) > 0.f) {
+                return;
+            }
+            initSrgbLuts();
+            pr = linToSrgb8(srgb8ToLin((int)(pr + 0.5f)) * globalGainR * gR);
+            pg = linToSrgb8(srgb8ToLin((int)(pg + 0.5f)) * globalGainG * gG);
+            pb = linToSrgb8(srgb8ToLin((int)(pb + 0.5f)) * globalGainB * gB);
+        } else {
+            pr *= gR * globalGainR;
+            pg *= gG * globalGainG;
+            pb *= gB * globalGainB;
+        }
         if (nearestCenterSplatActive()) {
             const float viewDot = static_cast<float>(
                 wx * axisX + wy * axisY + wz * axisZ);
@@ -1024,12 +1050,6 @@ static void splatFrameInverseSpherical(
             accumR(idx) = accumG(idx) = accumB(idx) = 0.f;
             accumW(idx) = 0.f;
         }
-
-        float pr, pg, pb;
-        samplePixelBilinear(pixels, frameW, frameH, sampleFx, sampleFy, pr, pg, pb);
-        pr *= gR * globalGainR;
-        pg *= gG * globalGainG;
-        pb *= gB * globalGainB;
 
         splatPixel(ex, ey, pr, pg, pb, fw);
     };
@@ -1335,7 +1355,7 @@ struct OverlapSample {
     float newGrad;
 };
 
-/** Median luminance + per-channel p50 match in overlap (robust exposure normalization). */
+/** Match overlap luminance with one RGB gain so AE jumps don't leave brightness seams. */
 static void applyOverlapExposureNormalization(
     const std::vector<OverlapSample>& overlap,
     const Quat& qPose,
@@ -1343,9 +1363,9 @@ static void applyOverlapExposureNormalization(
 
     if (overlap.size() < 24) return;
 
-    std::vector<float> exR, exG, exB, newR, newG, newB, exL, newL;
-    exR.reserve(overlap.size());
-    newR.reserve(overlap.size());
+    std::vector<float> exL, newL;
+    exL.reserve(overlap.size());
+    newL.reserve(overlap.size());
 
     for (const auto& s : overlap) {
         double wx, wy, wz;
@@ -1361,44 +1381,16 @@ static void applyOverlapExposureNormalization(
         float er = accumR(idx) * inv;
         float eg = accumG(idx) * inv;
         float eb = accumB(idx) * inv;
-        exR.push_back(er);
-        exG.push_back(eg);
-        exB.push_back(eb);
-        newR.push_back(s.newR);
-        newG.push_back(s.newG);
-        newB.push_back(s.newB);
         exL.push_back(0.299f * er + 0.587f * eg + 0.114f * eb);
         newL.push_back(0.299f * s.newR + 0.587f * s.newG + 0.114f * s.newB);
     }
-    if (exR.size() < 20) return;
+    if (exL.size() < 20) return;
 
     float medExL = medianOf(exL);
     float medNewL = medianOf(newL);
     if (medNewL > 6.f && medExL > 6.f) {
-        float lumGain = std::max(0.55f, std::min(2.0f, medExL / medNewL));
-        gainR = gainG = gainB = std::max(0.5, std::min(2.0, (double)lumGain));
-    }
-
-    auto channelGain = [](const std::vector<float>& ex, const std::vector<float>& nw) -> float {
-        float medEx = medianOf(std::vector<float>(ex));
-        float medNew = medianOf(std::vector<float>(nw));
-        if (medNew < 4.f || medEx < 4.f) return 1.f;
-        return std::max(0.55f, std::min(2.0f, medEx / medNew));
-    };
-    // Per-channel tint correction on top of luminance match (avoid double-count on gray).
-    float chR = channelGain(exR, newR);
-    float chG = channelGain(exG, newG);
-    float chB = channelGain(exB, newB);
-    float lumRef = (medNewL > 6.f && medExL > 6.f)
-        ? std::max(0.55f, std::min(2.0f, medExL / medNewL)) : 1.f;
-    if (std::abs(chR - lumRef) > 0.12f) {
-        gainR = std::max(0.5, std::min(2.0, gainR * chR / lumRef));
-    }
-    if (std::abs(chG - lumRef) > 0.12f) {
-        gainG = std::max(0.5, std::min(2.0, gainG * chG / lumRef));
-    }
-    if (std::abs(chB - lumRef) > 0.12f) {
-        gainB = std::max(0.5, std::min(2.0, gainB * chB / lumRef));
+        const double lumGain = std::max(0.20, std::min(5.0, (double)(medExL / medNewL)));
+        gainR = gainG = gainB = lumGain;
     }
 }
 
@@ -2544,10 +2536,13 @@ static FrameOutcome processFrameLocked(
         overlap, totalSamples, sumExR, sumExG, sumExB, sumNewR, sumNewG, sumNewB);
 
     double gainR = 1.0, gainG = 1.0, gainB = 1.0;
-    if (overlap.size() > 30 && sumNewR > 1 && sumNewG > 1 && sumNewB > 1) {
-        gainR = std::max(0.5, std::min(2.0, sumExR / sumNewR));
-        gainG = std::max(0.5, std::min(2.0, sumExG / sumNewG));
-        gainB = std::max(0.5, std::min(2.0, sumExB / sumNewB));
+    {
+        const double lumEx = 0.299 * sumExR + 0.587 * sumExG + 0.114 * sumExB;
+        const double lumNew = 0.299 * sumNewR + 0.587 * sumNewG + 0.114 * sumNewB;
+        if (overlap.size() > 30 && lumNew > 1.0 && lumEx > 1.0) {
+            const double g = std::max(0.20, std::min(5.0, lumEx / lumNew));
+            gainR = gainG = gainB = g;
+        }
     }
 
     int64_t phase1Us = elapsedUs(tPhase1);
@@ -2684,7 +2679,7 @@ static FrameOutcome processFrameLocked(
 
     float tileGains[TILE_GAIN_N * TILE_GAIN_N * 3];
     for (int i = 0; i < TILE_GAIN_N * TILE_GAIN_N * 3; i++) tileGains[i] = 1.f;
-    if (!overlap.empty()) {
+    if (!overlap.empty() && !useStoredExposure) {
         double tExR[64] = {}, tExG[64] = {}, tExB[64] = {};
         double tNewR[64] = {}, tNewG[64] = {}, tNewB[64] = {};
         int tCount[64] = {};
@@ -2841,20 +2836,32 @@ static FrameOutcome processLivePreviewLocked(
     const int32_t* pixels, int frameW, int frameH,
     Quat q, bool allowReject, float overlapGate,
     FrameWarp* warpInOut = nullptr,
-    const float* depthMap = nullptr) {
+    const float* depthMap = nullptr,
+    float cameraEv = 0.f) {
+    float forcedR = 0.f, forcedG = 0.f, forcedB = 0.f;
+    if (cameraEv > 1e-12f) {
+        if (sRefCameraEv <= 0.f) sRefCameraEv = cameraEv;
+        sHaveCameraEv = true;
+        // Linear-light gain: YUV is sRGB-encoded, AE is ISO×t.
+        double g = (double)sRefCameraEv / (double)cameraEv;
+        g = std::max(0.125, std::min(8.0, g));
+        forcedR = forcedG = forcedB = (float)g;
+        LOGI("Camera EV gain=%.3f (ev=%.5g ref=%.5g)", forcedR, cameraEv, sRefCameraEv);
+    }
     return processFrameLocked(
         pixels, frameW, frameH, q, allowReject, overlapGate,
         warpInOut, /*recencyComposite=*/false, depthMap,
-        0.f, 0.f, 0.f, /*exportRebuild=*/false);
+        forcedR, forcedG, forcedB, /*exportRebuild=*/false);
 }
 
 static FrameOutcome processLiveFrameLocked(
     const int32_t* pixels, int frameW, int frameH,
     Quat q, bool allowReject, float overlapGate,
     FrameWarp* warpInOut = nullptr,
-    const float* depthMap = nullptr) {
+    const float* depthMap = nullptr,
+    float cameraEv = 0.f) {
     return processLivePreviewLocked(
-        pixels, frameW, frameH, q, allowReject, overlapGate, warpInOut, depthMap);
+        pixels, frameW, frameH, q, allowReject, overlapGate, warpInOut, depthMap, cameraEv);
 }
 
 // Store refine-resolution copy (≤ STORE_MAX_DIM) plus full-res export copy when downscaled.
@@ -4326,8 +4333,8 @@ static int rebuildEquirectExportNearestCenterLocked() {
 /** DONE export: resplat at full resolution without re-running photometric align. */
 static bool prepareExportEquirectLocked(int outW, int outH) {
     if (outW <= 0 || outH <= 0 || sFrames.empty()) return false;
-    if (sEquirectBufferFresh && outW == eqW && outH == eqH && !sFastFinishRefine) {
-        LOGI("Export prep: skip resplat (%dx%d fresh)", eqW, eqH);
+    if (sEquirectExportFresh && outW == eqW && outH == eqH && !sFastFinishRefine) {
+        LOGI("Export prep: skip resplat (%dx%d export-fresh)", eqW, eqH);
         return true;
     }
     if (gaValidForCurrentFramesLocked()) {
@@ -4339,7 +4346,7 @@ static bool prepareExportEquirectLocked(int outW, int outH) {
             rebuildEquirectTrigTablesLocked();
         }
         gaComposeEquirectLocked(eqW, eqH);
-        markEquirectFreshLocked();
+        markEquirectExportFreshLocked();
         return true;
     }
     auto t0 = SteadyClock::now();
@@ -4371,10 +4378,9 @@ static bool prepareExportEquirectLocked(int outW, int outH) {
             initIdentityWarp(f.warp);
         }
     }
-    const int aligned = rebuildEquirectFromStoredFramesLocked(
-        false, false, /*useFullResSource=*/true);
-    markEquirectFreshLocked();
-    LOGI("Export prep: %dx%d weighted full-res resplat %zu frames (%d aligned) in %lldus",
+    const int aligned = rebuildEquirectNearestCenterExportLocked(false);
+    markEquirectExportFreshLocked();
+    LOGI("Export prep: %dx%d nearest-center full-res resplat %zu frames (%d aligned) in %lldus",
          eqW, eqH, sFrames.size(), aligned, (long long)elapsedUs(t0));
     return true;
 }
@@ -4477,7 +4483,7 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeAddFrameFast(
     JNIEnv* env, jobject,
     jintArray jPixels, jint frameW, jint frameH,
     jfloat qx, jfloat qy, jfloat qz, jfloat qw, jfloat overlapGate,
-    jfloatArray jDepth, jboolean allowReject) {
+    jfloatArray jDepth, jboolean allowReject, jfloat cameraEv) {
 
     std::lock_guard<std::mutex> lock(sphereMutex);
     if (eqW == 0 || eqH == 0) return 0;
@@ -4498,7 +4504,7 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeAddFrameFast(
     Quat q{qx, qy, qz, qw};
     FrameOutcome o = processLiveFrameLocked(
         reinterpret_cast<const int32_t*>(pixels), frameW, frameH,
-        q, allowReject != JNI_FALSE, overlapGate, nullptr, depthPtr);
+        q, allowReject != JNI_FALSE, overlapGate, nullptr, depthPtr, cameraEv);
     jint result;
     if (o.rejectedOverlap) {
         result = 2;
@@ -4876,6 +4882,10 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeGetEquirect(
     jint* out = env->GetIntArrayElements(jOut, nullptr);
     if (!out) return JNI_FALSE;
 
+    if (outW > eqW || outH > eqH) {
+        env->ReleaseIntArrayElements(jOut, out, JNI_ABORT);
+        return JNI_FALSE;
+    }
     if (outW == eqW && outH == eqH) {
         int sz = eqW * eqH;
         for (int i = 0; i < sz; i++) {
@@ -4943,6 +4953,18 @@ Java_ab_inque_robotics_panorama_SphereNative_nativeGetEquirect(
 
     env->ReleaseIntArrayElements(jOut, out, 0);
     return JNI_TRUE;
+}
+
+JNIEXPORT jint JNICALL
+Java_ab_inque_robotics_panorama_SphereNative_nativeGetEquirectWidth(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    return eqW;
+}
+
+JNIEXPORT jint JNICALL
+Java_ab_inque_robotics_panorama_SphereNative_nativeGetEquirectHeight(JNIEnv*, jobject) {
+    std::lock_guard<std::mutex> lock(sphereMutex);
+    return eqH;
 }
 
 JNIEXPORT jboolean JNICALL

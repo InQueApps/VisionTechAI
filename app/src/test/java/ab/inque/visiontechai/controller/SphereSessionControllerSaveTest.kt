@@ -14,8 +14,10 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Looper
 import android.view.LayoutInflater
+import android.view.View
 import androidx.appcompat.app.AppCompatActivity
 import androidx.test.core.app.ApplicationProvider
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -107,8 +109,7 @@ class SphereSessionControllerSaveTest {
     @Test
     fun saveEquirectangular_beforeDone_isRejected() {
         val raw = Bitmap.createBitmap(16, 12, Bitmap.Config.ARGB_8888)
-        session.onRawFrame(raw, 1L)
-        session.handleRecordButton(isPhotoMode = true) {}
+        snapPhoto(raw)
         awaitFrames(1)
         session.saveEquirectangular()
         Shadows.shadowOf(Looper.getMainLooper()).idle()
@@ -125,11 +126,40 @@ class SphereSessionControllerSaveTest {
         assertTrue(session.controller!!.isFinalized() || ops.frames > 0)
     }
 
+    @Test
+    fun cancelCapture_fromFinalizedPreview_returnsToCapturing() {
+        captureFramesAndFinish(2)
+        session.cancelCapture()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(SphereCaptureController.State.CAPTURING, session.controller!!.state)
+        assertEquals(View.VISIBLE, binding.sphereCaptureOverlay.visibility)
+    }
+
+    @Test
+    fun exit_fromFinalizedPreview_dismissesViewer() {
+        captureFramesAndFinish(2)
+        session.exit()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertEquals(View.GONE, binding.sphereViewerOverlay.visibility)
+        assertEquals(View.GONE, binding.sphereCaptureOverlay.visibility)
+    }
+
+    private fun snapPhoto(raw: Bitmap, timestampNanos: Long = 1L) {
+        val idleDeadline = System.currentTimeMillis() + 3000
+        while (controller.isStitchBusy() && System.currentTimeMillis() < idleDeadline) {
+            Shadows.shadowOf(Looper.getMainLooper()).idle()
+            Thread.sleep(5)
+        }
+        session.handleRecordButton(isPhotoMode = true) {}
+        assertTrue(session.captureNextFrame)
+        session.captureNextFrame = false
+        controller.captureFrame(raw, timestampNanos)
+    }
+
     private fun captureFramesAndFinish(count: Int) {
         val raw = Bitmap.createBitmap(16, 12, Bitmap.Config.ARGB_8888)
         repeat(count) {
-            session.onRawFrame(raw, it.toLong())
-            session.handleRecordButton(isPhotoMode = true) {}
+            snapPhoto(raw, it.toLong())
             awaitFrames(it + 1)
         }
         session.finishCapture()

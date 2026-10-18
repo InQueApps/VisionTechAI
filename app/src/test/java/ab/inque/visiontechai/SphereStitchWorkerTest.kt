@@ -421,7 +421,15 @@ class SphereStitchWorkerTest {
             "prepareExport",
             "seamFull"
         )
-        assertEquals(expectedForeground, ops.steps.take(expectedForeground.size))
+        val tracked = setOf(
+            "graphReconcile",
+            "targetedPhotometric",
+            "conditionalParallax",
+            "prepareExport",
+            "seamFull",
+            "seamLight"
+        )
+        assertEquals(expectedForeground, ops.steps.filter { it in tracked })
         assertFalse(ops.steps.contains("global"))
         assertFalse(ops.steps.contains("rebuildFullAlign"))
         executor.shutdown()
@@ -442,6 +450,7 @@ class SphereStitchWorkerTest {
                 if (light) lightSeamCount++ else fullSeamCount++
                 return true
             }
+            override fun prepareExportEquirect(exportW: Int, exportH: Int): Boolean = true
         }
         val executor = Executors.newSingleThreadExecutor()
         val refineExecutor = Executors.newSingleThreadExecutor()

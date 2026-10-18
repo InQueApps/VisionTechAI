@@ -147,8 +147,8 @@ class SphereViewerView @JvmOverloads constructor(
     private fun refreshView() {
         if (width == 0 || height == 0 || !SphereViewerNative.isAvailable()) return
         val (lookAz, lookEl) = effectiveLook()
-        val outW = min(width, 960)
-        val outH = min(height, 720)
+        val outW = min(width, VIEW_MAX_W)
+        val outH = min(height, VIEW_MAX_H)
         val bmp = SphereViewerNative.getRectilinearBitmap(outW, outH, lookAz, lookEl, fieldOfView)
         if (bmp != null && !bmp.isRecycled) {
             viewBitmap?.recycle()
@@ -261,5 +261,7 @@ class SphereViewerView @JvmOverloads constructor(
         private const val MAX_ELEVATION = (Math.PI / 2 - 0.01).toFloat()
         private const val MIN_FOV = 30f
         private const val MAX_FOV = 120f
+        private const val VIEW_MAX_W = 1440
+        private const val VIEW_MAX_H = 1440
     }
 }

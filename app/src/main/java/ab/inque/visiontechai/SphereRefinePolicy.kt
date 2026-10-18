@@ -35,10 +35,10 @@ object SphereRefinePolicy {
     /** Active capture preview equirect height. */
     fun capturePreviewHeight(): Int = 512
 
-    /** DONE refined viewer preview (async after tap). */
-    fun donePreviewWidth(): Int = 2048
+    /** DONE viewer preview — keep capture buffer size; do not reformat before export. */
+    fun donePreviewWidth(): Int = 1024
 
-    fun donePreviewHeight(): Int = 1024
+    fun donePreviewHeight(): Int = 512
 
     /** Shorter debounce when [shouldRunPeriodicRefine] during live capture. */
     fun capturePeriodicDelayMs(): Long = 120L
