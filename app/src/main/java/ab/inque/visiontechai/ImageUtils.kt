@@ -2,11 +2,8 @@ package ab.inque.visiontechai
 
 import ab.inque.robotics.video.VideoNative
 import android.graphics.*
-import android.graphics.ImageFormat
 import android.util.Log
 import androidx.camera.core.ImageProxy
-import java.io.ByteArrayOutputStream
-import java.nio.ByteBuffer
 
 object ImageUtils {
     private const val TAG = "ImageUtils"
@@ -20,43 +17,23 @@ object ImageUtils {
     }
 
     /**
-     * Convert YUV ImageProxy to RGB Bitmap.
-     * Tries YuvImage/JPEG path first when buffer has array; falls back to manual YUV_420_888 conversion.
+     * Convert YUV ImageProxy to RGB Bitmap using each plane's row/pixel stride.
+     * The Y plane alone is not NV21, so YuvImage on planes[0] is never used.
      */
     fun yuvToBitmap(image: ImageProxy): Bitmap? {
-        try {
-            val width = image.width
-            val height = image.height
-            val rotation = image.imageInfo.rotationDegrees
-            val buffer = image.planes[0].buffer
-            if (buffer.hasArray()) {
-                val formats = listOf(ImageFormat.NV21, ImageFormat.YV12, ImageFormat.YUV_420_888)
-                for (format in formats) {
-                    try {
-                        val yuvImage = YuvImage(
-                            buffer.array(),
-                            format,
-                            width,
-                            height,
-                            null
-                        )
-                        val out = ByteArrayOutputStream()
-                        yuvImage.compressToJpeg(Rect(0, 0, width, height), 100, out)
-                        val imageBytes = out.toByteArray()
-                        val bitmap = BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-                        if (bitmap != null) {
-                            return if (rotation != 0) rotateToUpright(bitmap, rotation) else bitmap
-                        }
-                    } catch (e: Exception) {
-                        continue
-                    }
-                }
-            }
-            return tryManualYuvConversion(image)
+        return try {
+            tryManualYuvConversion(image)
         } catch (e: Exception) {
             Log.e(TAG, "YUV to bitmap failed: ${e.message}")
-            return tryManualYuvConversion(image)
+            null
         }
+    }
+
+    private fun rotateAndRecycle(bitmap: Bitmap, rotation: Int): Bitmap {
+        if (rotation == 0) return bitmap
+        val rotated = rotateToUpright(bitmap, rotation)
+        if (rotated !== bitmap && !bitmap.isRecycled) bitmap.recycle()
+        return rotated
     }
 
     /**
@@ -91,24 +68,15 @@ object ImageUtils {
             uBuffer.get(uArray)
             vBuffer.get(vArray)
 
-            // Clamp to plane dimensions so we never read past buffer (avoids black bar on right)
-            val yCols = yRowStride / yPixelStride
-            val safeWidth = minOf(width, yCols).coerceAtLeast(1)
-            val safeHeight = minOf(height, if (yRowStride > 0) yArray.size / yRowStride else height).coerceAtLeast(1)
-            val uvCols = if (uRowStride > 0) uRowStride / uPixelStride else (width + 1) / 2
-            val uvRows = if (uArray.isNotEmpty() && uRowStride > 0) uArray.size / uRowStride else (height + 1) / 2
-
             val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             val pixels = IntArray(width * height)
             var pixelIndex = 0
             for (y in 0 until height) {
-                val yRow = minOf(y, safeHeight - 1).coerceAtLeast(0)
-                val uvRow = (y / 2).coerceIn(0, uvRows - 1)
+                val uvRow = y / 2
                 for (x in 0 until width) {
-                    val xRead = minOf(x, safeWidth - 1).coerceAtLeast(0)
-                    val yIndex = yRow * yRowStride + xRead * yPixelStride
+                    val yIndex = y * yRowStride + x * yPixelStride
                     val yValue = if (yIndex in yArray.indices) yArray[yIndex].toInt() and 0xFF else 0
-                    val uvCol = minOf(x / 2, uvCols - 1).coerceAtLeast(0)
+                    val uvCol = x / 2
                     val uIndex = uvRow * uRowStride + uvCol * uPixelStride
                     val vIndex = uvRow * vRowStride + uvCol * vPixelStride
                     val uValue = if (uIndex in uArray.indices) uArray[uIndex].toInt() and 0xFF else 128
@@ -120,7 +88,7 @@ object ImageUtils {
                 }
             }
             bitmap.setPixels(pixels, 0, width, 0, 0, width, height)
-            return if (rotation != 0) rotateToUpright(bitmap, rotation) else bitmap
+            return rotateAndRecycle(bitmap, rotation)
         } catch (e: Exception) {
             Log.e(TAG, "Manual YUV conversion failed: ${e.message}")
             e.printStackTrace()
@@ -165,19 +133,30 @@ object ImageUtils {
         val height = bitmap.height
         val pixels = IntArray(width * height)
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
-        val (redHistogram, greenHistogram, blueHistogram) = calculateHistograms(bitmap)
+        val redHistogram = IntArray(256)
+        val greenHistogram = IntArray(256)
+        val blueHistogram = IntArray(256)
+        for (i in pixels.indices) {
+            redHistogram[Color.red(pixels[i])]++
+            greenHistogram[Color.green(pixels[i])]++
+            blueHistogram[Color.blue(pixels[i])]++
+        }
         val redCdf = calculateCDF(redHistogram)
         val greenCdf = calculateCDF(greenHistogram)
         val blueCdf = calculateCDF(blueHistogram)
+        val totalPixels = pixels.size.toFloat()
+        val redCdfMin = redCdf.firstOrNull { it > 0 } ?: 0f
+        val greenCdfMin = greenCdf.firstOrNull { it > 0 } ?: 0f
+        val blueCdfMin = blueCdf.firstOrNull { it > 0 } ?: 0f
         val equalizedPixels = IntArray(pixels.size)
         for (i in pixels.indices) {
             val r = Color.red(pixels[i])
             val g = Color.green(pixels[i])
             val b = Color.blue(pixels[i])
             equalizedPixels[i] = Color.rgb(
-                applyEqualizationWithIntensity(r, redCdf, redHistogram, intensity),
-                applyEqualizationWithIntensity(g, greenCdf, greenHistogram, intensity),
-                applyEqualizationWithIntensity(b, blueCdf, blueHistogram, intensity)
+                applyEqualizationWithIntensity(r, redCdf, totalPixels, redCdfMin, intensity),
+                applyEqualizationWithIntensity(g, greenCdf, totalPixels, greenCdfMin, intensity),
+                applyEqualizationWithIntensity(b, blueCdf, totalPixels, blueCdfMin, intensity)
             )
         }
         val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
@@ -188,12 +167,11 @@ object ImageUtils {
     private fun applyEqualizationWithIntensity(
         originalValue: Int,
         cdf: FloatArray,
-        histogram: IntArray,
+        totalPixels: Float,
+        cdfMin: Float,
         intensity: Float
     ): Int {
-        val totalPixels = histogram.sum()
-        if (totalPixels == 0) return originalValue
-        val cdfMin = cdf.firstOrNull { it > 0 } ?: 0f
+        if (totalPixels <= 0f) return originalValue
         val normalizedCdf = if (totalPixels - cdfMin > 0) {
             (cdf[originalValue] - cdfMin) / (totalPixels - cdfMin)
         } else 0f

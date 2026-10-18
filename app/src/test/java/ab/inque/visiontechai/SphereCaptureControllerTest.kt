@@ -133,10 +133,13 @@ class SphereCaptureControllerTest {
             eraseColor(Color.RED)
         }
         controller.captureFrame(bmp)
-        val expected = SphereExportSize.fromFrame(1080, 1080, 65f, 50f)
+        val expected = SphereExportSize.fromFrame(
+            1080, 1080, 65f, 50f,
+            maxWidth = SphereExportSize.maxWidthForDevice()
+        )
         assertEquals(expected.width, controller.exportWidth)
         assertEquals(expected.height, controller.exportHeight)
-        assertTrue(controller.exportWidth > SphereCaptureController.EQ_W)
+        assertTrue(controller.exportWidth >= SphereExportSize.MIN_WIDTH)
         bmp.recycle()
     }
 

@@ -929,7 +929,9 @@ static void splatFrameInverseSpherical(
     double featherX, double featherY,
     float globalGainR = 1.f, float globalGainG = 1.f, float globalGainB = 1.f,
     int eqStep = 1,
-    float weightScale = 1.f) {
+    float weightScale = 1.f,
+    int* outMinY = nullptr,
+    int* outMaxY = nullptr) {
 
     eqStep = std::max(1, eqStep);
 
@@ -954,6 +956,8 @@ static void splatFrameInverseSpherical(
     int y1 = clampI((int)std::ceil(maxYf) + margin, 0, eqH - 1);
     int x0 = clampI((int)std::floor(minXf) - margin, 0, eqW - 1);
     int x1 = clampI((int)std::ceil(maxXf) + margin, 0, eqW - 1);
+    if (outMinY) *outMinY = y0;
+    if (outMaxY) *outMaxY = y1;
     const bool wrapX = (maxXf - minXf) > eqW * 0.45;
     const bool seamCross = x0 > x1;
 
@@ -2754,7 +2758,8 @@ static FrameOutcome processFrameLocked(
             splatFrameInverseSpherical(
                 splatPixels, splatW, splatH, qCorrected, tanH, tanV, *warp,
                 tileGains, replaceOverlap, splatFeatherX, splatFeatherY,
-                gExpR, gExpG, gExpB, /*eqStep=*/1, splatWeightScale);
+                gExpR, gExpG, gExpB, /*eqStep=*/1, splatWeightScale,
+                &minSplatY, &maxSplatY);
         } else {
             // Fast capture + refine rebuild: inverse spherical (matches rectilinear export).
             const bool livePreviewPath = !exportRebuild && !usedFullRotAlign;
@@ -2764,9 +2769,8 @@ static FrameOutcome processFrameLocked(
             splatFrameInverseSpherical(
                 splatPixels, splatW, splatH, qCorrected, tanH, tanV, *warp,
                 tileGains, replaceOverlap, splatFeatherX, splatFeatherY,
-                gExpR, gExpG, gExpB, eqSplatStep, splatWeightScale);
-            minSplatY = 0;
-            maxSplatY = eqH - 1;
+                gExpR, gExpG, gExpB, eqSplatStep, splatWeightScale,
+                &minSplatY, &maxSplatY);
         }
 
         // ── Phase 4: weight capping in the splatted Y-band ──

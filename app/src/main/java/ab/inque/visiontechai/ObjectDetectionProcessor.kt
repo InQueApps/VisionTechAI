@@ -150,7 +150,7 @@ class ObjectDetectionProcessor(
                 cropInfo.cropRect.width(), 
                 cropInfo.cropRect.height()
             )
-
+            try {
             debugLog( "Cropped image size: ${croppedBitmap.width}x${croppedBitmap.height}")
 
             // Scale the cropped square to 640x640 for YOLO11n input
@@ -228,7 +228,8 @@ class ObjectDetectionProcessor(
                 outputBuffer.floatArray,
                 cropInfo,
                 classLabels,
-                threshold
+                threshold,
+                outputShape
             )
             
             val finalInferenceTime = SystemClock.uptimeMillis() - inferenceTime
@@ -240,6 +241,9 @@ class ObjectDetectionProcessor(
             }
             
             return detections
+            } finally {
+                if (!croppedBitmap.isRecycled) croppedBitmap.recycle()
+            }
             
         } catch (e: Exception) {
             Log.e(TAG, "YOLO11n detection failed: ${e.message}")

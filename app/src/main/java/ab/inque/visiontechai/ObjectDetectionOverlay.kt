@@ -91,6 +91,7 @@ class ObjectDetectionOverlay @JvmOverloads constructor(
     ) {
         results = detectionResults
         scaleFactor = computeScaleFactor(width, height, imageWidth, imageHeight)
+        postInvalidateOnAnimation()
     }
 
     companion object {

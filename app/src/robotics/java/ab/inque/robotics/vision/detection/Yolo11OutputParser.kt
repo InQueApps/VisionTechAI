@@ -32,57 +32,51 @@ object Yolo11OutputParser {
         outputArray: FloatArray,
         cropInfo: YoloCropInfo,
         classLabels: List<String>,
-        threshold: Float
+        threshold: Float,
+        outputShape: IntArray? = null
     ): List<DetectionResult> {
         if (outputArray.any { it.isNaN() }) {
             Log.w(TAG, "Model output contains NaN values")
             return emptyList()
         }
 
-        val outputSize = outputArray.size
-        return when (outputSize) {
-            1 * 84 * 8400 -> processStandardFormat(outputArray, cropInfo, classLabels, threshold)
-            1 * 8400 * 84 -> processTransposedFormat(outputArray, cropInfo, classLabels, threshold)
-            8400 * 84 -> processNoBatchFormat(outputArray, cropInfo, classLabels, threshold)
-            1 * 85 * 8400 -> processAlternativeFormat(outputArray, cropInfo, classLabels, threshold)
+        val layout = layoutFromShape(outputShape)
+        val detections = when {
+            layout != null && layout.channelMajor && layout.channels == 85 ->
+                collectChannelMajor(outputArray, cropInfo, classLabels, threshold, hasObjectness = true)
+            layout != null && layout.channelMajor ->
+                collectChannelMajor(outputArray, cropInfo, classLabels, threshold, hasObjectness = false)
+            layout != null && layout.channels == 85 ->
+                processAlternativeFormat(outputArray, cropInfo, classLabels, threshold)
+            layout != null ->
+                collectDetections(outputArray, cropInfo, classLabels, threshold, recordStride = layout.channels)
+            outputArray.size == 1 * 85 * NUM_DETECTIONS ->
+                processAlternativeFormat(outputArray, cropInfo, classLabels, threshold)
+            outputArray.size == 1 * 84 * NUM_DETECTIONS ->
+                // YOLO11n TFLite default is [1, 84, 8400] (channel-major). Size alone
+                // cannot distinguish [1, 8400, 84]; pass outputShape when that layout is used.
+                collectChannelMajor(outputArray, cropInfo, classLabels, threshold, hasObjectness = false)
             else -> {
-                Log.e(TAG, "Unknown YOLO11n output format. Size: $outputSize")
-                emptyList()
+                Log.e(TAG, "Unknown YOLO11n output format. Size: ${outputArray.size} shape=${outputShape?.contentToString()}")
+                return emptyList()
             }
         }
+        return applyNMS(detections)
     }
 
-    private fun processStandardFormat(
-        outputArray: FloatArray,
-        cropInfo: YoloCropInfo,
-        classLabels: List<String>,
-        threshold: Float
-    ): List<DetectionResult> {
-        return applyNMS(
-            collectDetections(outputArray, cropInfo, classLabels, threshold, recordStride = 4 + classLabels.size)
-        )
-    }
+    private data class TensorLayout(val channelMajor: Boolean, val channels: Int)
 
-    private fun processTransposedFormat(
-        outputArray: FloatArray,
-        cropInfo: YoloCropInfo,
-        classLabels: List<String>,
-        threshold: Float
-    ): List<DetectionResult> {
-        return applyNMS(
-            collectDetections(outputArray, cropInfo, classLabels, threshold, recordStride = 4 + classLabels.size)
-        )
-    }
-
-    private fun processNoBatchFormat(
-        outputArray: FloatArray,
-        cropInfo: YoloCropInfo,
-        classLabels: List<String>,
-        threshold: Float
-    ): List<DetectionResult> {
-        return applyNMS(
-            collectDetections(outputArray, cropInfo, classLabels, threshold, recordStride = 4 + classLabels.size)
-        )
+    private fun layoutFromShape(shape: IntArray?): TensorLayout? {
+        if (shape == null || shape.isEmpty()) return null
+        val dims = shape.filter { it > 1 }
+        if (dims.size != 2) return null
+        val a = dims[0]
+        val b = dims[1]
+        return when {
+            b == NUM_DETECTIONS && (a == 84 || a == 85) -> TensorLayout(channelMajor = true, channels = a)
+            a == NUM_DETECTIONS && (b == 84 || b == 85) -> TensorLayout(channelMajor = false, channels = b)
+            else -> null
+        }
     }
 
     private fun processAlternativeFormat(
@@ -119,7 +113,46 @@ object Yolo11OutputParser {
                 detections, x, y, w, h, finalConfidence, bestClassId, cropInfo, classLabels, threshold
             )
         }
-        return applyNMS(detections)
+        return detections
+    }
+
+    private fun collectChannelMajor(
+        outputArray: FloatArray,
+        cropInfo: YoloCropInfo,
+        classLabels: List<String>,
+        threshold: Float,
+        hasObjectness: Boolean
+    ): List<DetectionResult> {
+        val detections = mutableListOf<DetectionResult>()
+        val numClasses = classLabels.size
+        val numDets = NUM_DETECTIONS
+        val classOffset = BBOX_SIZE + if (hasObjectness) 1 else 0
+        if (outputArray.size < (classOffset + 1) * numDets) return detections
+        val classLimit = min(numClasses, outputArray.size / numDets - classOffset)
+        for (detectionIndex in 0 until numDets) {
+            val x = outputArray[0 * numDets + detectionIndex]
+            val y = outputArray[1 * numDets + detectionIndex]
+            val w = outputArray[2 * numDets + detectionIndex]
+            val h = outputArray[3 * numDets + detectionIndex]
+            var maxConfidence = 0f
+            var bestClassId = 0
+            for (classIndex in 0 until classLimit) {
+                val raw = outputArray[(classOffset + classIndex) * numDets + detectionIndex]
+                val confidence = if (hasObjectness) raw else 1.0f / (1.0f + exp(-raw))
+                if (confidence > maxConfidence) {
+                    maxConfidence = confidence
+                    bestClassId = classIndex
+                }
+            }
+            if (hasObjectness) {
+                val objectness = outputArray[BBOX_SIZE * numDets + detectionIndex]
+                maxConfidence *= objectness
+            }
+            addIfValid(
+                detections, x, y, w, h, maxConfidence, bestClassId, cropInfo, classLabels, threshold
+            )
+        }
+        return detections
     }
 
     private fun collectDetections(

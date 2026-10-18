@@ -48,7 +48,9 @@ class Yolo11OutputParserTest {
         output[3] = 0.3f
         output[4] = 3f // sigmoid(3) > threshold
 
-        val detections = Yolo11OutputParser.parse(output, cropInfo, classLabels, threshold)
+        val detections = Yolo11OutputParser.parse(
+            output, cropInfo, classLabels, threshold, outputShape = intArrayOf(8400, 84)
+        )
 
         assertEquals(1, detections.size)
         assertEquals("class_0", detections[0].label)
@@ -85,6 +87,26 @@ class Yolo11OutputParserTest {
     fun calculateIoU_identicalBoxes_returnsOne() {
         val box = RectF(0f, 0f, 50f, 50f)
         assertEquals(1f, Yolo11OutputParser.calculateIoU(box, box), 0.0001f)
+    }
+
+    @Test
+    fun parse_channelMajorFormat_readsFirstDetectionFromChannelPlanes() {
+        val cropInfo = Yolo11OutputParser.centerCropInfo(1920, 1080)
+        val output = FloatArray(1 * 84 * 8400)
+        output[0 * 8400] = 0.25f
+        output[1 * 8400] = 0.25f
+        output[2 * 8400] = 0.2f
+        output[3 * 8400] = 0.3f
+        output[4 * 8400] = 3f
+
+        val detections = Yolo11OutputParser.parse(
+            output, cropInfo, classLabels, threshold, outputShape = intArrayOf(1, 84, 8400)
+        )
+
+        assertEquals(1, detections.size)
+        assertEquals("class_0", detections[0].label)
+        assertEquals(690f, detections[0].boundingBox.left, 0.5f)
+        assertEquals(270f, detections[0].boundingBox.top, 0.5f)
     }
 
     @Test

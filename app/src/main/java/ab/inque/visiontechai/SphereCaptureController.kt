@@ -138,7 +138,13 @@ class SphereCaptureController(
     val exportHeight: Int get() = exportSize().height
 
     private fun exportSize(): SphereExportSize.Size =
-        SphereExportSize.fromFrame(stitchFrameW, stitchFrameH, stitchFovH, stitchFovV)
+        SphereExportSize.fromFrame(
+            stitchFrameW,
+            stitchFrameH,
+            stitchFovH,
+            stitchFovV,
+            maxWidth = SphereExportSize.maxWidthForDevice()
+        )
 
     private var sessionFovH = 65f
     private var sessionFovV = 50f

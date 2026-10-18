@@ -15,23 +15,24 @@
 #include <numeric>
 #include <cstdlib>
 #include <cstdint>
+#include <mutex>
 
 static float kSrgbToLin[256];
 static uint8_t kLinToSrgb[4096];
-static bool kSrgbLutReady = false;
+static std::once_flag kSrgbLutOnce;
 
 static void initSrgbLuts() {
-    if (kSrgbLutReady) return;
-    for (int i = 0; i < 256; i++) {
-        const double u = i / 255.0;
-        kSrgbToLin[i] = (float)(u <= 0.04045 ? u / 12.92 : std::pow((u + 0.055) / 1.055, 2.4));
-    }
-    for (int i = 0; i < 4096; i++) {
-        const double l = (i / 4095.0) * 8.0;
-        const double u = l <= 0.0031308 ? 12.92 * l : 1.055 * std::pow(std::max(0.0, l), 1.0 / 2.4) - 0.055;
-        kLinToSrgb[i] = (uint8_t)std::lround(std::max(0.0, std::min(1.0, u)) * 255.0);
-    }
-    kSrgbLutReady = true;
+    std::call_once(kSrgbLutOnce, [] {
+        for (int i = 0; i < 256; i++) {
+            const double u = i / 255.0;
+            kSrgbToLin[i] = (float)(u <= 0.04045 ? u / 12.92 : std::pow((u + 0.055) / 1.055, 2.4));
+        }
+        for (int i = 0; i < 4096; i++) {
+            const double l = (i / 4095.0) * 8.0;
+            const double u = l <= 0.0031308 ? 12.92 * l : 1.055 * std::pow(std::max(0.0, l), 1.0 / 2.4) - 0.055;
+            kLinToSrgb[i] = (uint8_t)std::lround(std::max(0.0, std::min(1.0, u)) * 255.0);
+        }
+    });
 }
 
 static inline float srgb8ToLin(int s) {
@@ -70,6 +71,7 @@ constexpr double EDGE_DROP_MEDIAN_DEG = 0.6;
 constexpr double BLUR_RATIO = 0.55;
 constexpr int PHOTO_LOWRES = 96;
 constexpr double DENSE_ACCEPT_NCC = 0.6;
+constexpr int SEAM_GN = 5;
 
 struct Keypoint {
     float x = 0.f, y = 0.f;   // gray-image coordinates (sub-pixel)
@@ -106,6 +108,7 @@ struct FrameState {
     float denseNcc = 0.f;
     float gain[3] = {1.f, 1.f, 1.f};
     float offset[3] = {0.f, 0.f, 0.f};
+    float seamG[SEAM_GN * SEAM_GN * 3];
 };
 
 }  // namespace ga
@@ -869,6 +872,7 @@ struct PhotoSample {
     int i, j;
     float ci[3], cj[3];
     float ri2, rj2;
+    float ui, vi, uj, vj;  // frame NDC [-1,1]
 };
 
 static inline bool sampleLow(const FrameData& fd, double lx, double ly, float* out, float* gradOut) {
@@ -978,7 +982,7 @@ static void fitPhotometric(const std::vector<PhotoSample>& samples, int n,
                     const double spf = (double)samples.size() / std::max(1, n);
                     for (int i = 0; i < n; i++) {
                         const double lockW = use[i] ? 0.0 : 1e6;
-                        const double towardLuma = 0.25 * spf;
+                        const double towardLuma = 0.08 * spf;
                         A[(size_t)i * n + i] += towardLuma + lockW;
                         b[i] += towardLuma * lumaLg[i];
                         for (int k = 0; k < n; k++) A[(size_t)i * n + k] += 1.0;
@@ -1016,6 +1020,83 @@ static void fitPhotometric(const std::vector<PhotoSample>& samples, int n,
             }
         }
     }
+}
+
+/** Smooth per-frame gain maps so overlapping neighbors agree at stitch sides. */
+static void fitSeamGains(const std::vector<PhotoSample>& samples, int n,
+                         const std::vector<int>& use, const double* vig,
+                         std::vector<FrameState>& st) {
+    const int dim = SEAM_GN * SEAM_GN;
+    for (int i = 0; i < n; i++) {
+        for (int k = 0; k < dim * 3; k++) st[i].seamG[k] = 1.f;
+    }
+    if (sHaveCameraEv || samples.size() < 40) return;
+    if (std::getenv("SPHERE_GA_NO_SEAM_GAINS") != nullptr) {
+        LOGI("Seam gain maps: n=%d samples=%zu range=1.000..1.000 (disabled)", n, (size_t)samples.size());
+        return;
+    }
+    auto Vfn = [&](double r2) { return std::exp(vig[0] * r2 + vig[1] * r2 * r2); };
+    auto addBilinear = [&](std::vector<double>& A, std::vector<double>& b,
+                           double u, double v, double y, double w) {
+        const double gx = std::max(0.0, std::min((double)(SEAM_GN - 1), (u * 0.5 + 0.5) * (SEAM_GN - 1)));
+        const double gy = std::max(0.0, std::min((double)(SEAM_GN - 1), (v * 0.5 + 0.5) * (SEAM_GN - 1)));
+        const int x0 = (int)gx, y0 = (int)gy;
+        const int x1 = std::min(SEAM_GN - 1, x0 + 1), y1 = std::min(SEAM_GN - 1, y0 + 1);
+        const double ax = gx - x0, ay = gy - y0;
+        const int idx[4] = {y0 * SEAM_GN + x0, y0 * SEAM_GN + x1, y1 * SEAM_GN + x0, y1 * SEAM_GN + x1};
+        const double wt[4] = {(1 - ax) * (1 - ay), ax * (1 - ay), (1 - ax) * ay, ax * ay};
+        for (int p = 0; p < 4; p++) {
+            b[idx[p]] += w * wt[p] * y;
+            for (int q = 0; q < 4; q++) A[(size_t)idx[p] * dim + idx[q]] += w * wt[p] * wt[q];
+        }
+    };
+    for (int f = 0; f < n; f++) {
+        if (!use[f]) continue;
+        for (int c = 0; c < 3; c++) {
+            std::vector<double> A((size_t)dim * dim, 0.0), b(dim, 0.0);
+            int ns = 0;
+            for (const PhotoSample& p : samples) {
+                int other = -1;
+                const float* cs = nullptr, *co = nullptr;
+                float us = 0, vs = 0, rs = 0, ro = 0;
+                if (p.i == f) {
+                    other = p.j; cs = p.ci; co = p.cj;
+                    us = p.ui; vs = p.vi; rs = p.ri2; ro = p.rj2;
+                } else if (p.j == f) {
+                    other = p.i; cs = p.cj; co = p.ci;
+                    us = p.uj; vs = p.vj; rs = p.rj2; ro = p.ri2;
+                } else continue;
+                if (!use[other]) continue;
+                const double Is = st[f].gain[c] * cs[c] / std::max(1e-4, Vfn(rs)) + st[f].offset[c];
+                const double Io = st[other].gain[c] * co[c] / std::max(1e-4, Vfn(ro)) + st[other].offset[c];
+                if (Is < 6.0 || Is > 250.0 || Io < 6.0 || Io > 250.0) continue;
+                const double y = 0.6 * (std::log(std::max(1.0, Io)) - std::log(std::max(1.0, Is)));
+                if (std::fabs(y) > 0.70) continue;
+                const double w = std::fabs(y) < 0.08 ? 1.0 : 0.08 / std::fabs(y);
+                addBilinear(A, b, us, vs, y, w);
+                ns++;
+            }
+            if (ns < 16) continue;
+            for (int k = 0; k < dim; k++) {
+                const double cx = (k % SEAM_GN) / (double)(SEAM_GN - 1) - 0.5;
+                const double cy = (k / SEAM_GN) / (double)(SEAM_GN - 1) - 0.5;
+                const double center = 1.0 - std::min(1.0, 4.0 * (cx * cx + cy * cy));
+                A[(size_t)k * dim + k] += 0.6 + 22.0 * center * center;
+            }
+            if (!choleskySolve(A, b, dim)) continue;
+            for (int k = 0; k < dim; k++) {
+                st[f].seamG[k * 3 + c] = (float)std::max(0.62, std::min(1.55, std::exp(b[k])));
+            }
+        }
+    }
+    double mn = 1, mx = 1;
+    for (int i = 0; i < n; i++) {
+        for (int k = 0; k < dim * 3; k++) {
+            mn = std::min(mn, (double)st[i].seamG[k]);
+            mx = std::max(mx, (double)st[i].seamG[k]);
+        }
+    }
+    LOGI("Seam gain maps: n=%d samples=%zu range=%.3f..%.3f", n, samples.size(), mn, mx);
 }
 
 }  // namespace ga
@@ -1630,7 +1711,7 @@ static bool gaGlobalAlignLocked() {
                 DenseResult best;
                 for (const Quat& h : hyps) {
                     DenseResult r = denseAlign(fd[i], pyr, h, tanH, tanV, /*finestLevel=*/2);
-                    if (r.ncc > best.ncc) { best = r; best.q = h; }
+                    if (r.ncc > best.ncc) best = r;
                 }
                 if (best.ncc < -0.5) { results[u] = best; return; }
                 DenseResult fine = denseAlign(fd[i], pyr, best.q, tanH, tanV, /*finestLevel=*/0);
@@ -1747,6 +1828,8 @@ static bool gaGlobalAlignLocked() {
                         const double ub = (bfx / (fb.w - 1) - 0.5) * 2.0, vb = (bfy / (fb.h - 1) - 0.5) * 2.0;
                         s.ri2 = (float)std::min(1.0, 0.5 * (ua * ua + va * va));
                         s.rj2 = (float)std::min(1.0, 0.5 * (ub * ub + vb * vb));
+                        s.ui = (float)ua; s.vi = (float)va;
+                        s.uj = (float)ub; s.vj = (float)vb;
                         s.i = ia;
                         s.j = ib;
                         samples.push_back(s);
@@ -1764,6 +1847,7 @@ static bool gaGlobalAlignLocked() {
             sGaFrames[i].offset[0] = sGaFrames[i].offset[1] = sGaFrames[i].offset[2] = 0.f;
         }
         fitPhotometric(samples, n, use, sGaVig, sGaFrames);
+        fitSeamGains(samples, n, use, sGaVig, sGaFrames);
         for (int i = 0; i < n; i++) {
             sFrames[i].expGainR = sGaFrames[i].gain[0];
             sFrames[i].expGainG = sGaFrames[i].gain[1];
@@ -1801,8 +1885,7 @@ static bool gaGlobalAlignLocked() {
     sphereProfileLogUs("global_align_total", elapsedUs(t0));
     return true;
 }
-
-/** Nearest-centre compositor with narrow seam feather and photometric correction. */
+/** Nearest-centre compositor with photometric correction and overlap seam gains. */
 static void gaComposeEquirectLocked(int outW, int outH) {
     using namespace ga;
     initSrgbLuts();
@@ -1820,6 +1903,7 @@ static void gaComposeEquirectLocked(int outW, int outH) {
         bool fill;
         bool skip;
         float gain[3], offset[3];
+        const float* seamG;
     };
     std::vector<FrameView> views(n);
     for (int i = 0; i < n; i++) {
@@ -1833,6 +1917,7 @@ static void gaComposeEquirectLocked(int outW, int outH) {
         v.fill = sGaFrames[i].fillOnly;
         v.skip = sGaFrames[i].discard;
         for (int c = 0; c < 3; c++) { v.gain[c] = sGaFrames[i].gain[c]; v.offset[c] = sGaFrames[i].offset[c]; }
+        v.seamG = sGaFrames[i].seamG;
     }
 
     eqR.assign((size_t)outW * outH, 0.f);
@@ -1874,9 +1959,9 @@ static void gaComposeEquirectLocked(int outW, int outH) {
                     double d[3];
                     equirectPixelToWorldRay(x + 0.5, y + 0.5, outW, outH, d[0], d[1], d[2]);
                     struct Hit { int i; double s, edge, fx, fy, r2; };
-                    Hit hits[8];
-                    int nh = 0;
-                    bool anyPrimary = false;
+                    Hit bestPri{}, bestAny{};
+                    double scorePri = 1e9, scoreAny = 1e9;
+                    bool havePri = false, haveAny = false;
                     for (int i : cand) {
                         const FrameView& v = views[i];
                         const double cx = v.M[0] * d[0] + v.M[3] * d[1] + v.M[6] * d[2];
@@ -1888,74 +1973,81 @@ static void gaComposeEquirectLocked(int outW, int outH) {
                         distortNorm(nx, ny);
                         const double u = nx / tanH, w = ny / tanV;
                         if (std::fabs(u) >= 1.0 || std::fabs(w) >= 1.0) continue;
-                        if (nh == 8) continue;
-                        Hit& h = hits[nh++];
-                        h.i = i;
-                        h.s = std::sqrt(u * u + w * w);
-                        h.edge = 1.0 - std::max(std::fabs(u), std::fabs(w));
-                        h.fx = (u * 0.5 + 0.5) * (v.w - 1);
-                        h.fy = (0.5 - w * 0.5) * (v.h - 1);
-                        h.r2 = std::min(1.0, 0.5 * (u * u + w * w));
-                        if (!v.fill) anyPrimary = true;
-                    }
-                    if (nh == 0) continue;
-                    int bestK = -1;
-                    double best = 1e9;
-                    for (int k = 0; k < nh; k++) {
-                        if (anyPrimary && views[hits[k].i].fill) continue;
-                        const Hit& candH = hits[k];
-                        const FrameView& candV = views[candH.i];
-                        const int cx = std::min(candV.w - 1, std::max(0, (int)std::lround(candH.fx)));
-                        const int cy = std::min(candV.h - 1, std::max(0, (int)std::lround(candH.fy)));
-                        const int32_t cp = candV.px[(size_t)cy * candV.w + cx];
+                        Hit candH;
+                        candH.i = i;
+                        candH.s = std::sqrt(u * u + w * w);
+                        candH.edge = 1.0 - std::max(std::fabs(u), std::fabs(w));
+                        candH.fx = (u * 0.5 + 0.5) * (v.w - 1);
+                        candH.fy = (0.5 - w * 0.5) * (v.h - 1);
+                        candH.r2 = std::min(1.0, 0.5 * (u * u + w * w));
+                        const int px = std::min(v.w - 1, std::max(0, (int)std::lround(candH.fx)));
+                        const int py = std::min(v.h - 1, std::max(0, (int)std::lround(candH.fy)));
+                        const int32_t cp = v.px[(size_t)py * v.w + px];
                         const int cr = (cp >> 16) & 0xff, cg = (cp >> 8) & 0xff, cb = cp & 0xff;
                         double score = candH.s;
                         if (cr >= 248 || cg >= 248 || cb >= 248) score += 2.0;
                         if (cr <= 6 && cg <= 6 && cb <= 6) score += 2.0;
                         if (sHaveCameraEv) {
-                            const double gn = (candV.gain[0] + candV.gain[1] + candV.gain[2]) / 3.0;
+                            const double gn = (v.gain[0] + v.gain[1] + v.gain[2]) / 3.0;
                             score += 0.55 * std::fabs(std::log(std::max(0.05, gn)));
                         }
-                        if (score < best) { best = score; bestK = k; }
+                        if (score < scoreAny) { scoreAny = score; bestAny = candH; haveAny = true; }
+                        if (!v.fill && score < scorePri) { scorePri = score; bestPri = candH; havePri = true; }
                     }
-                    if (bestK < 0) continue;
-                    const Hit& h = hits[bestK];
-                    const FrameView& v = views[h.i];
-                    const double invV = sHaveCameraEv ? 1.0
-                        : std::exp(-(vig0 * h.r2 + vig1 * h.r2 * h.r2));
-                    const size_t idx = (size_t)y * outW + x;
-                    const double fx = std::max(0.0, std::min((double)(v.w - 1), h.fx));
-                    const double fy = std::max(0.0, std::min((double)(v.h - 1), h.fy));
-                    const int x0 = (int)fx, y0 = (int)fy;
-                    const int x1 = std::min(v.w - 1, x0 + 1), y1p = std::min(v.h - 1, y0 + 1);
-                    const double ax = fx - x0, ay = fy - y0;
-                    const int32_t p00 = v.px[(size_t)y0 * v.w + x0];
-                    const int32_t p10 = v.px[(size_t)y0 * v.w + x1];
-                    const int32_t p01 = v.px[(size_t)y1p * v.w + x0];
-                    const int32_t p11 = v.px[(size_t)y1p * v.w + x1];
-                    auto chan = [](int32_t p, int sh) { return (p >> sh) & 0xff; };
-                    for (int c = 0; c < 3; c++) {
-                        const int sh = 16 - 8 * c;
-                        double out;
-                        if (sHaveCameraEv) {
-                            const double lin =
-                                (1.0 - ax) * (1.0 - ay) * srgb8ToLin(chan(p00, sh)) +
-                                ax * (1.0 - ay) * srgb8ToLin(chan(p10, sh)) +
-                                (1.0 - ax) * ay * srgb8ToLin(chan(p01, sh)) +
-                                ax * ay * srgb8ToLin(chan(p11, sh));
-                            out = linToSrgb8(lin * v.gain[c] * invV);
-                        } else {
-                            const double s =
-                                (1.0 - ax) * (1.0 - ay) * (double)chan(p00, sh) +
-                                ax * (1.0 - ay) * (double)chan(p10, sh) +
-                                (1.0 - ax) * ay * (double)chan(p01, sh) +
-                                ax * ay * (double)chan(p11, sh);
-                            out = v.gain[c] * s * invV + v.offset[c];
+                    if (!haveAny) continue;
+                    const Hit& chosen = havePri ? bestPri : bestAny;
+                    auto evalHit = [&](const Hit& hh, double* rgb) {
+                        const FrameView& vv = views[hh.i];
+                        const double invVv = sHaveCameraEv ? 1.0
+                            : std::exp(-(vig0 * hh.r2 + vig1 * hh.r2 * hh.r2));
+                        const double fxx = std::max(0.0, std::min((double)(vv.w - 1), hh.fx));
+                        const double fyy = std::max(0.0, std::min((double)(vv.h - 1), hh.fy));
+                        const int xa = (int)fxx, ya = (int)fyy;
+                        const int xb = std::min(vv.w - 1, xa + 1), yb = std::min(vv.h - 1, ya + 1);
+                        const double axx = fxx - xa, ayy = fyy - ya;
+                        const int32_t q00 = vv.px[(size_t)ya * vv.w + xa];
+                        const int32_t q10 = vv.px[(size_t)ya * vv.w + xb];
+                        const int32_t q01 = vv.px[(size_t)yb * vv.w + xa];
+                        const int32_t q11 = vv.px[(size_t)yb * vv.w + xb];
+                        auto chn = [](int32_t p, int sh) { return (p >> sh) & 0xff; };
+                        const double gx = std::max(0.0, std::min((double)(SEAM_GN - 1),
+                            fxx / std::max(1, vv.w - 1) * (SEAM_GN - 1)));
+                        const double gy = std::max(0.0, std::min((double)(SEAM_GN - 1),
+                            fyy / std::max(1, vv.h - 1) * (SEAM_GN - 1)));
+                        const int xg0 = (int)gx, yg0 = (int)gy;
+                        const int xg1 = std::min(SEAM_GN - 1, xg0 + 1), yg1 = std::min(SEAM_GN - 1, yg0 + 1);
+                        const double agx = gx - xg0, agy = gy - yg0;
+                        for (int c = 0; c < 3; c++) {
+                            const int sh = 16 - 8 * c;
+                            const float* sg = vv.seamG;
+                            const double sm =
+                                (1 - agx) * (1 - agy) * sg[(yg0 * SEAM_GN + xg0) * 3 + c] +
+                                agx * (1 - agy) * sg[(yg0 * SEAM_GN + xg1) * 3 + c] +
+                                (1 - agx) * agy * sg[(yg1 * SEAM_GN + xg0) * 3 + c] +
+                                agx * agy * sg[(yg1 * SEAM_GN + xg1) * 3 + c];
+                            if (sHaveCameraEv) {
+                                const double lin =
+                                    (1.0 - axx) * (1.0 - ayy) * srgb8ToLin(chn(q00, sh)) +
+                                    axx * (1.0 - ayy) * srgb8ToLin(chn(q10, sh)) +
+                                    (1.0 - axx) * ayy * srgb8ToLin(chn(q01, sh)) +
+                                    axx * ayy * srgb8ToLin(chn(q11, sh));
+                                rgb[c] = linToSrgb8(lin * vv.gain[c] * invVv * sm);
+                            } else {
+                                const double s =
+                                    (1.0 - axx) * (1.0 - ayy) * (double)chn(q00, sh) +
+                                    axx * (1.0 - ayy) * (double)chn(q10, sh) +
+                                    (1.0 - axx) * ayy * (double)chn(q01, sh) +
+                                    axx * ayy * (double)chn(q11, sh);
+                                rgb[c] = (vv.gain[c] * s * invVv + vv.offset[c]) * sm;
+                            }
                         }
-                        if (c == 0) eqR[idx] = (float)std::max(1.0, std::min(255.0, out));
-                        else if (c == 1) eqG[idx] = (float)std::max(0.0, std::min(255.0, out));
-                        else eqB[idx] = (float)std::max(0.0, std::min(255.0, out));
-                    }
+                    };
+                    double col[3];
+                    evalHit(chosen, col);
+                    const size_t idx = (size_t)y * outW + x;
+                    eqR[idx] = (float)std::max(0.0, std::min(255.0, col[0]));
+                    eqG[idx] = (float)std::max(0.0, std::min(255.0, col[1]));
+                    eqB[idx] = (float)std::max(0.0, std::min(255.0, col[2]));
                     eqWeight[idx] = 1.f;
                 }
             }

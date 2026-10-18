@@ -34,6 +34,9 @@ class ImageSegmentationProcessor(private val context: Context) {
             }
             return null
         }
+        var sourceCopy: Bitmap? = null
+        var small: Bitmap? = null
+        var smallOverlay: Bitmap? = null
         return try {
             val w = bitmap.width
             val h = bitmap.height
@@ -44,14 +47,16 @@ class ImageSegmentationProcessor(private val context: Context) {
             val numClusters = params.segmentationNumClusters.coerceIn(3, 10)
             val iterations = params.segmentationIterations.coerceIn(3, 15)
             val source = if (bitmap.config != Bitmap.Config.ARGB_8888) {
-                bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: bitmap
+                (bitmap.copy(Bitmap.Config.ARGB_8888, false) ?: bitmap).also {
+                    if (it !== bitmap) sourceCopy = it
+                }
             } else {
                 bitmap
             }
             val scale = if (w > h) SEGMENT_MAX_DIM.toFloat() / w else SEGMENT_MAX_DIM.toFloat() / h
             val sw = (w * scale).toInt().coerceAtLeast(1)
             val sh = (h * scale).toInt().coerceAtLeast(1)
-            val small = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+            small = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(small)
             val matrix = Matrix().apply { setScale(scale, scale) }
             canvas.drawBitmap(source, matrix, Paint(Paint.FILTER_BITMAP_FLAG))
@@ -65,7 +70,7 @@ class ImageSegmentationProcessor(private val context: Context) {
                 }
                 return null
             }
-            val smallOverlay = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
+            smallOverlay = Bitmap.createBitmap(sw, sh, Bitmap.Config.ARGB_8888)
             smallOverlay.setPixels(pixelsOut, 0, sw, 0, 0, sw, sh)
             val fullOverlay = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             val fullCanvas = Canvas(fullOverlay)
@@ -78,6 +83,10 @@ class ImageSegmentationProcessor(private val context: Context) {
         } catch (e: Exception) {
             Log.e(TAG, "Segmentation failed: ${e.message}", e)
             null
+        } finally {
+            small?.takeUnless { it.isRecycled }?.recycle()
+            smallOverlay?.takeUnless { it.isRecycled }?.recycle()
+            sourceCopy?.takeUnless { it.isRecycled }?.recycle()
         }
     }
 

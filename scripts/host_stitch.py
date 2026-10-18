@@ -17,6 +17,7 @@ Examples:
   python3 scripts/host_stitch.py run --imu random:8
   python3 scripts/host_stitch.py run --imu drift:20 --photo exposure=0.7,wb=0.12,vignette=0.35
   python3 scripts/host_stitch.py suite
+  python3 scripts/host_stitch.py test-seams
 """
 
 from __future__ import annotations
@@ -302,6 +303,18 @@ def photometric(
         img *= (1.0 + r.uniform(-params["wb"], params["wb"], 3)).astype(np.float32)
     if params.get("dc"):
         img += r.uniform(-params["dc"], params["dc"], 3).astype(np.float32)
+    if params.get("alt_radial"):
+        # Opposite radial gains on even/odd frames. One global exposure cannot
+        # cancel this, so stitch-side color maps have to do the work.
+        sign = 1.0 if (frame_index % 2 == 0) else -1.0
+        k = float(params["alt_radial"])
+        yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+        u = (xx / max(1.0, w - 1.0) - 0.5) * 2.0
+        v = (yy / max(1.0, h - 1.0) - 0.5) * 2.0
+        r2 = np.clip(0.5 * (u * u + v * v), 0.0, 1.0)
+        img *= (1.0 + sign * k * r2)[..., None]
+        tint = np.array([1.0, 0.25, -0.55], dtype=np.float32)
+        img *= 1.0 + (sign * 0.55 * k * r2)[..., None] * tint
     if params.get("vignette"):
         yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
         rr = ((xx - w / 2) / (w / 2)) ** 2 + ((yy - h / 2) / (h / 2)) ** 2
@@ -463,6 +476,134 @@ def luminance(rgb: np.ndarray) -> np.ndarray:
     return 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
 
 
+def voronoi_owner(w: int, h: int, quats: list[np.ndarray], fov_deg: float) -> np.ndarray:
+    """Nearest-center frame index per equirect pixel (matches GA compose scoring)."""
+    tan_half = math.tan(math.radians(fov_deg) * 0.5)
+    dirs, _ = equirect_dirs(w, h)
+    best = np.full((h, w), np.inf, dtype=np.float64)
+    owner = np.full((h, w), -1, dtype=np.int32)
+    for i, q in enumerate(quats):
+        cam = dirs @ q_to_matrix(q)
+        z = cam[..., 2]
+        u = (cam[..., 0] / np.maximum(-z, 1e-8)) / tan_half
+        v = (cam[..., 1] / np.maximum(-z, 1e-8)) / tan_half
+        s = np.sqrt(u * u + v * v)
+        take = (z < 0.0) & (np.abs(u) < 1.0) & (np.abs(v) < 1.0) & (s < best)
+        owner = np.where(take, i, owner)
+        best = np.where(take, s, best)
+    return owner
+
+
+def seam_edge_values(rgb: np.ndarray, owner: np.ndarray, weights: np.ndarray):
+    """Per Voronoi-edge |Δluma| and mean |Δrgb|, with solid-angle weights."""
+    rgb = rgb.astype(np.float64)
+    lum = luminance(rgb)
+    lum_d: list[np.ndarray] = []
+    rgb_d: list[np.ndarray] = []
+    wts: list[np.ndarray] = []
+
+    def collect(oa, ob, ia, ib, la, lb, wa):
+        seam = (oa >= 0) & (ob >= 0) & (oa != ob)
+        if not np.any(seam):
+            return
+        lum_d.append(np.abs(la[seam] - lb[seam]))
+        rgb_d.append(np.mean(np.abs(ia[seam] - ib[seam]), axis=-1))
+        wts.append(wa[seam].astype(np.float64))
+
+    collect(owner, np.roll(owner, -1, axis=1), rgb, np.roll(rgb, -1, axis=1),
+            lum, np.roll(lum, -1, axis=1), weights)
+    collect(owner[:-1], owner[1:], rgb[:-1], rgb[1:], lum[:-1], lum[1:], weights[:-1])
+    if not lum_d:
+        z = np.zeros(1)
+        return z, z, np.ones(1)
+    return np.concatenate(lum_d), np.concatenate(rgb_d), np.concatenate(wts)
+
+
+def weighted_percentile(values: np.ndarray, wts: np.ndarray, p: float) -> float:
+    order = np.argsort(values)
+    values, wts = values[order], wts[order]
+    cdf = np.cumsum(wts)
+    if cdf[-1] <= 0:
+        return 0.0
+    cdf = cdf / cdf[-1]
+    return float(values[min(len(values) - 1, int(np.searchsorted(cdf, p)))])
+
+
+def seam_stats(stitched: np.ndarray, ref: np.ndarray, owner: np.ndarray, weights: np.ndarray) -> dict:
+    sl, sc, sw = seam_edge_values(stitched, owner, weights)
+    rl, rc, rw = seam_edge_values(ref, owner, weights)
+    excess_l = np.maximum(0.0, sl - rl)
+    excess_c = np.maximum(0.0, sc - rc)
+    return {
+        "seam_luma_p50": round(weighted_percentile(sl, sw, 0.5), 2),
+        "seam_luma_p90": round(weighted_percentile(sl, sw, 0.9), 2),
+        "seam_rgb_p50": round(weighted_percentile(sc, sw, 0.5), 2),
+        "seam_excess_luma_p50": round(weighted_percentile(excess_l, sw, 0.5), 2),
+        "seam_excess_luma_p90": round(weighted_percentile(excess_l, sw, 0.9), 2),
+        "seam_excess_rgb_p50": round(weighted_percentile(excess_c, sw, 0.5), 2),
+        "seam_edges": int(sl.size),
+    }
+
+
+def naive_voronoi_composite(
+    frames: list[np.ndarray], quats: list[np.ndarray], fov_deg: float, out_w: int, out_h: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Nearest-center splat of the capture frames with no photometric matching."""
+    tan_half = math.tan(math.radians(fov_deg) * 0.5)
+    dirs, _ = equirect_dirs(out_w, out_h)
+    best = np.full((out_h, out_w), np.inf, dtype=np.float64)
+    owner = np.full((out_h, out_w), -1, dtype=np.int32)
+    u_keep = np.zeros((out_h, out_w), dtype=np.float64)
+    v_keep = np.zeros((out_h, out_w), dtype=np.float64)
+    for i, q in enumerate(quats):
+        cam = dirs @ q_to_matrix(q)
+        z = cam[..., 2]
+        u = (cam[..., 0] / np.maximum(-z, 1e-8)) / tan_half
+        v = (cam[..., 1] / np.maximum(-z, 1e-8)) / tan_half
+        s = np.sqrt(u * u + v * v)
+        take = (z < 0.0) & (np.abs(u) < 1.0) & (np.abs(v) < 1.0) & (s < best)
+        owner = np.where(take, i, owner)
+        u_keep = np.where(take, u, u_keep)
+        v_keep = np.where(take, v, v_keep)
+        best = np.where(take, s, best)
+    out = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    for i, fr in enumerate(frames):
+        mask = owner == i
+        if not np.any(mask):
+            continue
+        fh, fw = fr.shape[:2]
+        fx = np.clip((u_keep[mask] * 0.5 + 0.5) * (fw - 1), 0, fw - 1.001)
+        fy = np.clip((0.5 - v_keep[mask] * 0.5) * (fh - 1), 0, fh - 1.001)
+        x0 = np.floor(fx).astype(np.int64)
+        y0 = np.floor(fy).astype(np.int64)
+        ax = (fx - x0)[:, None]
+        ay = (fy - y0)[:, None]
+        x1 = np.minimum(x0 + 1, fw - 1)
+        y1 = np.minimum(y0 + 1, fh - 1)
+        src = fr.astype(np.float32)
+        val = ((1 - ax) * (1 - ay) * src[y0, x0] + ax * (1 - ay) * src[y0, x1] +
+               (1 - ax) * ay * src[y1, x0] + ax * ay * src[y1, x1])
+        out[mask] = np.clip(val + 0.5, 0, 255).astype(np.uint8)
+    return out, owner
+
+
+def seam_metric_self_check() -> None:
+    """The metric must report a large jump on a two-tone Voronoi and ~0 on uniform GT."""
+    w, h = 64, 32
+    owner = np.zeros((h, w), dtype=np.int32)
+    owner[:, w // 2 :] = 1
+    ref = np.full((h, w, 3), 120, dtype=np.uint8)
+    stepped = ref.copy()
+    stepped[:, w // 2 :] = (200, 40, 40)
+    _, cos_lat = equirect_dirs(w, h)
+    st = seam_stats(stepped, ref, owner, cos_lat)
+    if st["seam_excess_luma_p50"] < 20 or st["seam_excess_rgb_p50"] < 50:
+        raise SystemExit(f"seam metric self-check failed on a hard step: {st}")
+    flat = seam_stats(ref, ref, owner, cos_lat)
+    if flat["seam_excess_luma_p50"] > 1.0 or flat["seam_luma_p50"] > 1.0:
+        raise SystemExit(f"seam metric self-check failed on a uniform field: {flat}")
+
+
 def evaluate(
     out_dir: Path,
     sc: Scenario,
@@ -549,7 +690,9 @@ def evaluate(
 # ── run ──────────────────────────────────────────────────────────────────
 
 
-def run_scenario(sc: Scenario, exe: Path, out_root: Path, log: bool = False) -> dict:
+def run_scenario(
+    sc: Scenario, exe: Path, out_root: Path, log: bool = False, extra_env: dict | None = None
+) -> dict:
     rng = np.random.default_rng(sc.seed)
     if sc.layout == "sphere16":
         views = layout_sphere16(rng, sc.jitter)
@@ -599,6 +742,8 @@ def run_scenario(sc: Scenario, exe: Path, out_root: Path, log: bool = False) -> 
     env = dict(os.environ)
     if log:
         env["SPHERE_HOST_LOG"] = "1"
+    if extra_env:
+        env.update(extra_env)
     t0 = time.time()
     with open(out_dir / "native.log", "w", encoding="utf-8", errors="replace") as lf:
         proc = subprocess.run([str(exe), str(out_dir / "job.txt"), str(out_dir)], stderr=lf, env=env)
@@ -669,7 +814,11 @@ def main() -> None:
     ps.add_argument("--seed", type=int, default=42)
     ps.add_argument("--log", action="store_true")
     pae = sub.add_parser("test-ae", help="AE hunt: camera EV vs overlap-only equalization")
-    for sp in (pr, ps, pae):
+    psm = sub.add_parser(
+        "test-seams",
+        help="Neighbor color maps must hide Voronoi stitch sides that global gain cannot",
+    )
+    for sp in (pr, ps, pae, psm):
         sp.add_argument("--out", type=Path, default=BUILD_DIR / "runs")
         sp.add_argument("--rebuild", action="store_true")
     args = p.parse_args()
@@ -727,6 +876,121 @@ def main() -> None:
             print("FAIL:", "; ".join(failed))
             sys.exit(1)
         print("PASS camera-EV AE equalization")
+        return
+    if args.cmd == "test-seams":
+        seam_metric_self_check()
+        cfg = dict(name="s16_seams", imu="none", photo="alt_radial=0.42", jitter=False,
+                   size=1024, export_w=2048, export_h=1024)
+        sc_on = Scenario(seed=42, **cfg)
+        sc_off = Scenario(seed=42, **{**cfg, "name": "s16_seams_nomap"})
+        on = run_scenario(sc_on, exe, args.out, log=True)
+        off = run_scenario(sc_off, exe, args.out, log=True, extra_env={"SPHERE_GA_NO_SEAM_GAINS": "1"})
+        print(
+            f"maps   acc={on['accuracy']:.4f} psnr={on['psnr_db']:.2f}  "
+            f"no-map acc={off['accuracy']:.4f} psnr={off['psnr_db']:.2f}",
+            flush=True,
+        )
+
+        rng = np.random.default_rng(sc_on.seed)
+        views = layout_sphere16(rng, sc_on.jitter)
+        src = load_source(sc_on.source)
+        frames = render_views(sc_on, views, src)
+        photo = parse_kv(sc_on.photo)
+        perturbed = []
+        for i, img in enumerate(frames):
+            r = np.random.default_rng(sc_on.seed * 104729 + i)
+            img, _ = photometric(img, photo, r, frame_index=i, frame_count=len(views))
+            perturbed.append(img)
+        truth = [truth_quat(v.az, v.el, v.roll) for v in views]
+
+        eval_w, eval_h = 1024, 512
+        naive, owner = naive_voronoi_composite(perturbed, truth, sc_on.fov, eval_w, eval_h)
+        ref = np.asarray(Image.fromarray(src).resize((eval_w, eval_h), Image.Resampling.LANCZOS))
+        _, cos_lat = equirect_dirs(eval_w, eval_h)
+
+        def load_aligned(name: str) -> np.ndarray:
+            rgb, valid = read_argb(args.out / name / "equirect.argb", sc_on.export_w, sc_on.export_h)
+            poses = np.loadtxt(args.out / name / "poses.txt", ndmin=2)
+            refined = [row[1:5] for row in poses]
+            stored = [i for i, s in enumerate(json.loads((args.out / name / "timing.json").read_text())["frame_status"]) if s == 1]
+            trusted = [i for i in range(min(len(refined), len(stored))) if int(poses[i][13])] or list(range(len(refined)))
+            pairs = [(truth[stored[i]], refined[i]) for i in trusted]
+            rel = [q_mul(qt, q_conj(qr)) for qt, qr in pairs]
+            gauge = q_mean(rel) if rel else np.array([0.0, 0.0, 0.0, 1.0])
+            aligned, _ = rotate_equirect_bilinear(rgb, valid, q_to_matrix(q_conj(gauge)))
+            return np.asarray(Image.fromarray(aligned).resize((eval_w, eval_h), Image.Resampling.LANCZOS))
+
+        naive_s = seam_stats(naive, ref, owner, cos_lat)
+        on_s = seam_stats(load_aligned("s16_seams"), ref, owner, cos_lat)
+        off_s = seam_stats(load_aligned("s16_seams_nomap"), ref, owner, cos_lat)
+        Image.fromarray(np.concatenate([ref, naive, load_aligned("s16_seams_nomap"), load_aligned("s16_seams")], axis=0)).resize(
+            (eval_w // 2, eval_h * 2)
+        ).save(args.out / "s16_seams" / "seam_compare.jpg", quality=88)
+
+        native_log = (args.out / "s16_seams" / "native.log").read_text(encoding="utf-8", errors="replace")
+        gain_ln = next((ln for ln in native_log.splitlines() if "Seam gain maps:" in ln), "")
+        nomap_log = (args.out / "s16_seams_nomap" / "native.log").read_text(encoding="utf-8", errors="replace")
+        nomap_gain_ln = next((ln for ln in nomap_log.splitlines() if "Seam gain maps:" in ln), "")
+
+        def rng_span(line: str) -> float:
+            if "range=" not in line:
+                return 0.0
+            a, _, b = line.split("range=", 1)[1].partition("..")
+            try:
+                return abs(float(b.split()[0]) - float(a))
+            except ValueError:
+                return 0.0
+
+        print(
+            f"\nnaive   excess luma p50/p90={naive_s['seam_excess_luma_p50']:.2f}/{naive_s['seam_excess_luma_p90']:.2f} "
+            f"rgb p50={naive_s['seam_excess_rgb_p50']:.2f} edges={naive_s['seam_edges']}"
+        )
+        print(
+            f"no-map  excess luma p50/p90={off_s['seam_excess_luma_p50']:.2f}/{off_s['seam_excess_luma_p90']:.2f} "
+            f"rgb p50={off_s['seam_excess_rgb_p50']:.2f}  {nomap_gain_ln}"
+        )
+        print(
+            f"maps    excess luma p50/p90={on_s['seam_excess_luma_p50']:.2f}/{on_s['seam_excess_luma_p90']:.2f} "
+            f"rgb p50={on_s['seam_excess_rgb_p50']:.2f}  {gain_ln}"
+        )
+
+        failed = []
+        if naive_s["seam_excess_luma_p50"] < 8.0:
+            failed.append(
+                f"fixture too weak (naive excess {naive_s['seam_excess_luma_p50']:.2f}); "
+                "the test is not stressing stitch-side color"
+            )
+        if off_s["seam_excess_luma_p50"] < 2.5:
+            failed.append(
+                f"global-only still hides seams (excess {off_s['seam_excess_luma_p50']:.2f}); "
+                "fixture is not isolating the gain maps"
+            )
+        if on["coverage"] < 0.98:
+            failed.append(f"matched stitch coverage {on['coverage']:.3f}")
+        if on["accuracy"] + 0.005 < off["accuracy"]:
+            failed.append(
+                f"maps acc {on['accuracy']:.4f} lost accuracy vs no-map {off['accuracy']:.4f}"
+            )
+        if on_s["seam_excess_luma_p50"] > 0.45 * max(0.01, off_s["seam_excess_luma_p50"]):
+            failed.append(
+                f"maps luma excess {on_s['seam_excess_luma_p50']:.2f} not < 45% of no-map "
+                f"{off_s['seam_excess_luma_p50']:.2f}"
+            )
+        if on_s["seam_excess_rgb_p50"] > 0.50 * max(0.01, off_s["seam_excess_rgb_p50"]):
+            failed.append(
+                f"maps rgb excess {on_s['seam_excess_rgb_p50']:.2f} not < 50% of no-map "
+                f"{off_s['seam_excess_rgb_p50']:.2f}"
+            )
+        if on_s["seam_excess_luma_p50"] > 2.0:
+            failed.append(f"maps luma excess still visible at p50={on_s['seam_excess_luma_p50']:.2f}")
+        if rng_span(gain_ln) < 0.08:
+            failed.append(f"seam maps did not move ({gain_ln or 'missing log'})")
+        if "disabled" not in nomap_gain_ln and rng_span(nomap_gain_ln) > 0.02:
+            failed.append(f"NO_SEAM_GAINS did not keep identity maps ({nomap_gain_ln or 'missing log'})")
+        if failed:
+            print("FAIL:", "; ".join(failed))
+            sys.exit(1)
+        print("PASS neighbor stitch-side color matching")
         return
     only = {s for s in args.only.split(",") if s}
     rows = []

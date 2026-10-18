@@ -47,4 +47,12 @@ class SphereExportQualityGateTest {
             result.passed
         )
     }
+
+    @Test
+    fun differentExportSize_scalesToPreviewWithoutThrowing() {
+        val preview = texturedBitmap(256, 128)
+        val export = texturedBitmap(512, 256)
+        val result = SphereExportQualityGate.evaluate(preview, export)
+        assertTrue(result.summary.isNotEmpty())
+    }
 }

@@ -19,25 +19,42 @@ object SphereExportQualityGate {
     )
 
     fun evaluate(previewEquirect: Bitmap, exportEquirect: Bitmap): Result {
-        val fields = SphereStitchQualityEvaluator.evaluateFinish(
-            fastEquirect = previewEquirect,
-            finishEquirect = exportEquirect,
-            ssdBefore = 0f,
-            ssdAfter = 0f
-        )
-        val passed = fields.passesFinishGhostGate && fields.passesBandCorrelationGate
-        val summary = buildString {
-            append("ghost Δ=${"%.3f".format(fields.finishGhostDelta)}")
-            append(" (≤${SphereRefinePolicy.maxFinishExportGhostDelta()})")
-            append(", band corr=${"%.3f".format(fields.finishOverlapBandCorrelation)}")
-            append(" (≥${SphereRefinePolicy.minFinishOverlapBandCorrelation()})")
+        val compared = if (
+            exportEquirect.width != previewEquirect.width ||
+            exportEquirect.height != previewEquirect.height
+        ) {
+            Bitmap.createScaledBitmap(
+                exportEquirect,
+                previewEquirect.width,
+                previewEquirect.height,
+                true
+            )
+        } else {
+            exportEquirect
         }
-        Log.i(TAG, "Save quality gate passed=$passed $summary")
-        return Result(
-            passed = passed,
-            ghostDelta = fields.finishGhostDelta,
-            overlapBandCorrelation = fields.finishOverlapBandCorrelation,
-            summary = summary
-        )
+        try {
+            val fields = SphereStitchQualityEvaluator.evaluateFinish(
+                fastEquirect = previewEquirect,
+                finishEquirect = compared,
+                ssdBefore = 0f,
+                ssdAfter = 0f
+            )
+            val passed = fields.passesFinishGhostGate && fields.passesBandCorrelationGate
+            val summary = buildString {
+                append("ghost Δ=${"%.3f".format(fields.finishGhostDelta)}")
+                append(" (≤${SphereRefinePolicy.maxFinishExportGhostDelta()})")
+                append(", band corr=${"%.3f".format(fields.finishOverlapBandCorrelation)}")
+                append(" (≥${SphereRefinePolicy.minFinishOverlapBandCorrelation()})")
+            }
+            Log.i(TAG, "Save quality gate passed=$passed $summary")
+            return Result(
+                passed = passed,
+                ghostDelta = fields.finishGhostDelta,
+                overlapBandCorrelation = fields.finishOverlapBandCorrelation,
+                summary = summary
+            )
+        } finally {
+            if (compared !== exportEquirect && !compared.isRecycled) compared.recycle()
+        }
     }
 }
