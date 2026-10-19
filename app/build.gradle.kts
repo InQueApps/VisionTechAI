@@ -13,7 +13,7 @@ android {
         applicationId = "ab.inque.prismai"
         minSdk = 27
         targetSdk = 36
-        versionCode = 12
+        versionCode = 13
         versionName = "0.4.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
