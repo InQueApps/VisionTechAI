@@ -51,5 +51,4 @@ jobs:
             cd $GITHUB_WORKSPACE
             chmod +x gradlew
             adb shell pm trim-caches 2G || true
-            ./gradlew connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.RoboticsCppUnitTest,ab.inque.visiontechai.SphereRealWorldE2ETest#goldenIndoorSession_metricsAndHash
+            ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.RoboticsCppUnitTest,ab.inque.visiontechai.SphereRealWorldE2ETest#goldenIndoorSession_metricsAndHash
