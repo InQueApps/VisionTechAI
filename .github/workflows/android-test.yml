@@ -22,5 +22,5 @@ jobs:
           java-version: 17
 
       - name: Run core unit tests
-        shell: bash
-        run: ./gradlew testDebugUnitTest --no-daemon -PciCoreTests=true
+        shell: cmd
+        run: gradlew.bat testDebugUnitTest --no-daemon -PciCoreTests=true
