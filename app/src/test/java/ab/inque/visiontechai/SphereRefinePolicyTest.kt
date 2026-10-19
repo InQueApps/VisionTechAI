@@ -108,8 +108,8 @@ class SphereRefinePolicyTest {
     }
 
     @Test
-    fun liveSplatDim_is320() {
-        assertEquals(320, SphereRefinePolicy.liveSplatDim())
+    fun liveSplatDim_is1024() {
+        assertEquals(1024, SphereRefinePolicy.liveSplatDim())
     }
 
     @Test

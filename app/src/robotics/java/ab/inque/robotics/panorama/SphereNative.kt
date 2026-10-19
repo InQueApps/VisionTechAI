@@ -369,7 +369,7 @@ object SphereNative {
     }
 
     /** F2: longest frame side for live-path splat downscale (full-res stored for refine). */
-    fun liveSplatDim(): Int = if (loaded) nativeGetLiveSplatDim() else 320
+    fun liveSplatDim(): Int = if (loaded) nativeGetLiveSplatDim() else 1024
 
     /** Isolated BRIEF detect + mutual match + RANSAC benchmark (logs SphereProfile). */
     fun profileFeatureMatcher(bitmapA: Bitmap, bitmapB: Bitmap) {

@@ -277,7 +277,7 @@ object SphereRefinePolicy {
     fun runBackgroundGlobalPose(): Boolean = false
 
     /** F2: cap longest frame side for live-path splat (export refine uses stored frames). */
-    fun liveSplatDim(): Int = 320
+    fun liveSplatDim(): Int = 1024
 
     /** Min interval between live preview downscales during continuous capture (photo = every frame). */
     fun previewThrottleMs(): Long = 100L
