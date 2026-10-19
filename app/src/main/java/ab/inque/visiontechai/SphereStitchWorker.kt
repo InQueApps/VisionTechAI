@@ -467,8 +467,7 @@ class SphereStitchWorker(
                 queuedPhotoMode = false
                 queuedCameraEv = 0f
             }
-            inFlight.set(false)
-            dispatchStitchIdleCallbacks()
+            markStitchIdleAndDispatchCallbacks()
             return
         }
         val nextBitmap: Bitmap?
@@ -488,15 +487,18 @@ class SphereStitchWorker(
         if (nextBitmap != null && nextQuat != null) {
             runStitch(nextBitmap, nextQuat, nextPhotoMode, cameraEv = nextCameraEv)
         } else {
-            inFlight.set(false)
-            dispatchStitchIdleCallbacks()
+            markStitchIdleAndDispatchCallbacks()
             maybeRunPeriodicCaptureRefine()
         }
     }
 
-    private fun dispatchStitchIdleCallbacks() {
+    /**
+     * Clear [inFlight] and drain idle callbacks under the same lock as
+     * [runWhenStitchIdle] so DONE/SAVE cannot lose the wakeup.
+     */
+    private fun markStitchIdleAndDispatchCallbacks() {
         val callbacks = synchronized(pendingIdleCallbacks) {
-            if (pendingIdleCallbacks.isEmpty()) return
+            inFlight.set(false)
             pendingIdleCallbacks.toList().also { pendingIdleCallbacks.clear() }
         }
         callbacks.forEach { it() }
@@ -507,13 +509,17 @@ class SphereStitchWorker(
      * one-slot queue is empty.
      */
     fun runWhenStitchIdle(block: () -> Unit) {
-        val idleNow = !inFlight.get() && synchronized(this) { queuedBitmap == null }
-        if (idleNow) {
-            safeExecute(executor, block)
-            return
+        val runNow = synchronized(pendingIdleCallbacks) {
+            val idleNow = !inFlight.get() && synchronized(this) { queuedBitmap == null }
+            if (idleNow) {
+                true
+            } else {
+                pendingIdleCallbacks.add(block)
+                false
+            }
         }
-        synchronized(pendingIdleCallbacks) {
-            pendingIdleCallbacks.add { safeExecute(executor, block) }
+        if (runNow) {
+            safeExecute(executor, block)
         }
     }
 

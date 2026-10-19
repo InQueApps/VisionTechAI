@@ -46,6 +46,7 @@ class SphereSessionControllerSaveTest {
         override fun getSolidAngleCoverage(): Float = frames * 0.15f
         override fun getHoleMaskBitmap(outW: Int, outH: Int): Bitmap? = null
         override fun getLastFrameInfo() = null
+        override fun hasRefineWorkPending(applyGlobalPose: Boolean) = false
         override fun getEquirectBitmap(eqW: Int, eqH: Int): Bitmap =
             Bitmap.createBitmap(
                 eqW.coerceAtMost(SphereCaptureController.EQ_W),
@@ -163,6 +164,7 @@ class SphereSessionControllerSaveTest {
             awaitFrames(it + 1)
         }
         session.finishCapture()
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
         val deadline = System.currentTimeMillis() + 30_000
         while (
             session.controller?.isFinalized() != true &&
@@ -171,7 +173,11 @@ class SphereSessionControllerSaveTest {
             Shadows.shadowOf(Looper.getMainLooper()).idle()
             Thread.sleep(20)
         }
-        assertTrue(session.controller?.isFinalized() == true)
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(
+            "DONE should finalize the session (state=${session.controller?.state})",
+            session.controller?.isFinalized() == true
+        )
     }
 
     private fun awaitFrames(count: Int) {

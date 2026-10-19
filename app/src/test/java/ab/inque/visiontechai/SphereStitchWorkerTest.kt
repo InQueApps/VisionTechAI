@@ -683,4 +683,21 @@ class SphereStitchWorkerTest {
         executor.shutdown()
         worker.shutdown()
     }
+
+    @Test
+    fun runWhenStitchIdle_runsAfterInFlightFrame() {
+        val ops = FakeOps()
+        val executor = Executors.newSingleThreadExecutor()
+        val worker = SphereStitchWorker(operations = ops, executor = executor)
+        val idleLatch = java.util.concurrent.CountDownLatch(1)
+        worker.submit(
+            Bitmap.createBitmap(8, 8, Bitmap.Config.ARGB_8888).apply { eraseColor(Color.RED) },
+            floatArrayOf(0f, 0f, 0f, 1f)
+        )
+        worker.runWhenStitchIdle { idleLatch.countDown() }
+        Shadows.shadowOf(Looper.getMainLooper()).idle()
+        assertTrue("DONE path must run after the in-flight stitch", idleLatch.await(3, TimeUnit.SECONDS))
+        executor.shutdown()
+        worker.shutdown()
+    }
 }
