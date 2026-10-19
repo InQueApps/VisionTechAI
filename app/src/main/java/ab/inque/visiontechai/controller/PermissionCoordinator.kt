@@ -13,7 +13,7 @@ import androidx.core.content.ContextCompat
 import ab.inque.visiontechai.R
 
 /**
- * Handles camera/media permission requests and rationale dialogs.
+ * Handles camera and microphone permission requests and rationale dialogs.
  */
 class PermissionCoordinator(
     private val activity: AppCompatActivity,
@@ -78,10 +78,9 @@ class PermissionCoordinator(
         AlertDialog.Builder(activity, R.style.DarkDialogTheme)
             .setTitle("Permissions Required")
             .setMessage(
-                "This app needs camera and media permissions to function properly:\n\n" +
+                "This app needs camera and microphone permissions:\n\n" +
                     "• Camera: To capture photos and videos\n" +
-                    "• Audio: To record video with sound\n" +
-                    "• Media: To save your photos and videos\n\n" +
+                    "• Audio: To record video with sound\n\n" +
                     "Please grant these permissions to use the app."
             )
             .setPositiveButton("Grant Permissions") { _, _ -> requestPermissions() }
@@ -103,8 +102,7 @@ class PermissionCoordinator(
             .setMessage(
                 "This app needs the following permissions to work:\n\n" +
                     "• Camera: To take photos and record videos\n" +
-                    "• Audio: To record sound in videos\n" +
-                    "• Media: To save your photos and videos\n\n" +
+                    "• Audio: To record sound in videos\n\n" +
                     "These permissions are essential for the app to function."
             )
             .setPositiveButton("Grant Permissions") { _, _ -> requestPermissions() }
@@ -123,12 +121,10 @@ class PermissionCoordinator(
     companion object {
         private const val TAG = "PermissionCoordinator"
 
-        val REQUIRED_PERMISSIONS: Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        val REQUIRED_PERMISSIONS: Array<String> = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             arrayOf(
                 Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.READ_MEDIA_IMAGES,
-                Manifest.permission.READ_MEDIA_VIDEO
+                Manifest.permission.RECORD_AUDIO
             )
         } else {
             arrayOf(

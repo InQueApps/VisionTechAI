@@ -19,8 +19,8 @@ class PermissionDenialMessageTest {
     }
 
     @Test
-    fun forDenied_media() {
-        val msg = PermissionDenialMessage.forDenied(setOf("android.permission.READ_MEDIA_IMAGES"))
-        assertTrue(msg.contains("Media"))
+    fun forDenied_legacyWriteStorage() {
+        val msg = PermissionDenialMessage.forDenied(setOf(Manifest.permission.WRITE_EXTERNAL_STORAGE))
+        assertTrue(msg.contains("Storage"))
     }
 }

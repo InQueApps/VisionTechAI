@@ -22,9 +22,6 @@ object E2ETestRules {
         if (Build.VERSION.SDK_INT >= 33) {
             perms.add(Manifest.permission.POST_NOTIFICATIONS)
         }
-        if (Build.VERSION.SDK_INT in 23..32) {
-            perms.add(Manifest.permission.READ_EXTERNAL_STORAGE)
-        }
         return GrantPermissionRule.grant(*perms.toTypedArray())
     }
 
