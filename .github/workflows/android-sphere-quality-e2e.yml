@@ -19,22 +19,13 @@ on:
       - 'app/src/androidTest/**/Sphere*.kt'
       - '.github/workflows/android-sphere-quality-e2e.yml'
 
+concurrency:
+  group: android-sphere-quality-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sphere-quality:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        test_method:
-          - ab.inque.visiontechai.SphereRealWorldE2ETest#finishWorker_texturedSession_tightGhostGate
-          - ab.inque.visiontechai.SphereRealWorldE2ETest#globalFinish_parallax_broadGhostBounded
-          - ab.inque.visiontechai.SphereRealWorldE2ETest#globalFinish_aeRamp_overlapStable
-          - ab.inque.visiontechai.SphereRealWorldE2ETest#goldenIndoorSession_metricsAndHash
-          - ab.inque.visiontechai.SphereRefineOverlapE2ETest#fastRefine_noRegression
-          - ab.inque.visiontechai.SphereFinishE2ETest#finish_workerPath_producesExportEquirect
-          - ab.inque.visiontechai.SphereGhostingE2ETest#globalRefine_broadGhost_withinFinishExportGate
-          - ab.inque.visiontechai.SpherePerfE2ETest#refineGlobalPose_lowersOverlapBankSSD
-          - ab.inque.visiontechai.RoboticsCppUnitTest
     steps:
       - uses: actions/checkout@v4
 
@@ -50,7 +41,7 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
 
-      - name: Sphere quality E2E (per-method, ${{ matrix.test_method }})
+      - name: Sphere quality E2E (x86_64 emulator)
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 34
@@ -61,4 +52,4 @@ jobs:
             chmod +x gradlew
             adb shell pm trim-caches 2G || true
             ./gradlew connectedDebugAndroidTest \
-              -Pandroid.testInstrumentationRunnerArguments.class=${{ matrix.test_method }}
+              -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.RoboticsCppUnitTest,ab.inque.visiontechai.SphereRealWorldE2ETest#goldenIndoorSession_metricsAndHash

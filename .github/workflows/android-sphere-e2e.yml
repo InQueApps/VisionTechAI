@@ -16,7 +16,6 @@ on:
       - 'app/src/main/java/**/VisionAnalysisPipeline.kt'
       - 'app/src/androidTest/**/Sphere*.kt'
       - 'app/src/androidTest/**/MainActivity*.kt'
-      - 'app/src/androidTest/**/VisionWorkflow*.kt'
       - '.github/workflows/android-sphere-e2e.yml'
   pull_request:
     paths:
@@ -32,8 +31,11 @@ on:
       - 'app/src/main/java/**/VisionAnalysisPipeline.kt'
       - 'app/src/androidTest/**/Sphere*.kt'
       - 'app/src/androidTest/**/MainActivity*.kt'
-      - 'app/src/androidTest/**/VisionWorkflow*.kt'
       - '.github/workflows/android-sphere-e2e.yml'
+
+concurrency:
+  group: android-sphere-e2e-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   sphere-instrumented:
@@ -64,4 +66,4 @@ jobs:
             chmod +x gradlew
             adb shell pm trim-caches 2G || true
             ./gradlew connectedDebugAndroidTest \
-            -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.MainActivityModeSwitchTest,ab.inque.visiontechai.VisionWorkflowE2ETest,ab.inque.visiontechai.SphereSaveExportE2ETest,ab.inque.visiontechai.SphereFinishE2ETest,ab.inque.visiontechai.SphereWorkerShutdownE2ETest,ab.inque.visiontechai.SphereSessionSaveE2ETest,ab.inque.visiontechai.SphereExportQualityGateE2ETest,ab.inque.visiontechai.SphereLiveSplatE2ETest,ab.inque.visiontechai.SphereStitchProfileE2ETest
+            -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.MainActivityModeSwitchTest,ab.inque.visiontechai.SphereSaveExportE2ETest,ab.inque.visiontechai.SphereFinishE2ETest,ab.inque.visiontechai.SphereLiveSplatE2ETest

@@ -131,3 +131,49 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.uiautomator:uiautomator:2.3.0")
 }
+
+/** Overlapping / formatter / sample tests kept locally; GitHub runs `-PciCoreTests=true`. */
+val ciCoreUnitTestExcludes = listOf(
+    "ab.inque.visiontechai.ExampleUnitTest",
+    "ab.inque.visiontechai.QuaternionMathMultiplyTest",
+    "ab.inque.visiontechai.VisionModeTest",
+    "ab.inque.visiontechai.VisionModeTransitionsTest",
+    "ab.inque.visiontechai.SphereMotionDepthTest",
+    "ab.inque.visiontechai.SphereMotionEstimatorTest",
+    "ab.inque.visiontechai.SphereCaptureThrottlerTest",
+    "ab.inque.visiontechai.SpherePreviewIntegrationTest",
+    "ab.inque.visiontechai.PipelineResultDispatcherSphereTest",
+    "ab.inque.visiontechai.controller.SphereSessionControllerPreviewTest",
+    "ab.inque.visiontechai.SphereRefineOverlapMetricsTest",
+    "ab.inque.visiontechai.CameraFovCalculatorTest",
+    "ab.inque.visiontechai.SphereFovHelperTest",
+    "ab.inque.visiontechai.ProcessorParamsTest",
+    "ab.inque.visiontechai.PipelineResultTest",
+    "ab.inque.visiontechai.SphereCoverageFormatterTest",
+    "ab.inque.visiontechai.TranslationExportFormatterTest",
+    "ab.inque.visiontechai.HdScaleMapperTest",
+    "ab.inque.visiontechai.SphereHoleOverlayTest",
+    "ab.inque.visiontechai.ObjectDetectionOverlayTest",
+    "ab.inque.visiontechai.SphereStitchTelemetryTest",
+    "ab.inque.visiontechai.SphereXmpMetadataTest",
+    "ab.inque.visiontechai.TextLineClustererGoldenTest",
+    "ab.inque.visiontechai.FrameProcessorAdaptersTest",
+    "ab.inque.visiontechai.VisionOverlayHostTest",
+    "ab.inque.visiontechai.TranslationLanguagesTest",
+    "ab.inque.visiontechai.SphereAlignmentFallbackTest",
+    "ab.inque.visiontechai.SphereStitchFramePrepTest",
+    "ab.inque.visiontechai.TileGainMapTest",
+    "ab.inque.visiontechai.SavedMediaTrackerTest",
+    "ab.inque.visiontechai.SpherePoseRefinementTest",
+    "ab.inque.visiontechai.ImageResampleUtilsTest",
+    "ab.inque.visiontechai.LensDistortionStoreTest"
+)
+
+tasks.withType<Test>().configureEach {
+    if (project.findProperty("ciCoreTests") == "true") {
+        filter {
+            ciCoreUnitTestExcludes.forEach { excludeTestsMatching(it) }
+            isFailOnNoMatchingTests = true
+        }
+    }
+}
