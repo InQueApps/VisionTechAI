@@ -39,7 +39,7 @@ concurrency:
 
 jobs:
   sphere-instrumented:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Windows, X64]
     steps:
       - uses: actions/checkout@v4
 
@@ -50,6 +50,7 @@ jobs:
           java-version: 17
 
       - name: Enable KVM
+        if: runner.os == 'Linux'
         run: |
           echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
           sudo udevadm control --reload-rules
@@ -61,8 +62,8 @@ jobs:
           api-level: 34
           arch: x86_64
           profile: pixel_6
+          force-avd-creation: false
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim
           script: |
-            cd $GITHUB_WORKSPACE
-            chmod +x gradlew
-            adb shell pm trim-caches 2G || true
+            cd "$GITHUB_WORKSPACE"
             ./gradlew connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=ab.inque.visiontechai.SphereStitchE2ETest,ab.inque.visiontechai.SphereGoldenImageTest,ab.inque.visiontechai.MainActivityModeSwitchTest,ab.inque.visiontechai.SphereSaveExportE2ETest,ab.inque.visiontechai.SphereFinishE2ETest,ab.inque.visiontechai.SphereLiveSplatE2ETest
