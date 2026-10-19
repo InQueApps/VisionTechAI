@@ -421,17 +421,30 @@
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:visibility="gone"
-        android:background="#CC000000"
+        android:background="@android:color/transparent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/controlsContainer"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
         <ImageView
-            android:id="@+id/spherePreviewImage"
+            android:id="@+id/sphereCameraFeed"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
+            android:layout_gravity="center"
+            android:visibility="gone"
+            android:scaleType="fitXY"
+            android:contentDescription="Unused analysis camera overlay" />
+
+        <ImageView
+            android:id="@+id/spherePreviewImage"
+            android:layout_width="160dp"
+            android:layout_height="80dp"
+            android:layout_gravity="top|end"
+            android:layout_margin="12dp"
             android:scaleType="fitCenter"
+            android:background="#80000000"
+            android:alpha="0.95"
             android:contentDescription="Sphere equirectangular preview" />
 
         <LinearLayout
@@ -444,12 +457,41 @@
             android:background="#80000000">
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereDebugButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="REC"
+                android:visibility="gone"
+                app:strokeColor="#FF5252" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereCancelButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="CANCEL"
+                app:strokeColor="@android:color/white" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereDoneButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:layout_marginEnd="8dp"
                 android:text="DONE"
                 android:textSize="12sp" />
+
+            <!-- SAVE only after DONE (viewer overlay); mid-capture save hurts quality. -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereCaptureSaveButton"
+                style="@style/PrismActionButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="SAVE"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/sphereCoverageText"
@@ -477,19 +519,50 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <ab.inque.visiontechai.SphereViewerView
-            android:id="@+id/sphereViewerView"
-            android:layout_width="match_parent"
-            android:layout_height="match_parent" />
-
         <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_gravity="bottom"
-            android:orientation="horizontal"
-            android:gravity="center_vertical"
-            android:padding="12dp"
-            android:background="#80000000">
+            android:layout_height="match_parent"
+            android:orientation="vertical">
+
+            <FrameLayout
+                android:layout_width="match_parent"
+                android:layout_height="0dp"
+                android:layout_weight="1">
+
+                <ab.inque.visiontechai.SphereViewerView
+                    android:id="@+id/sphereViewerView"
+                    android:layout_width="match_parent"
+                    android:layout_height="match_parent" />
+
+                <ProgressBar
+                    android:id="@+id/sphereFinalizeProgress"
+                    style="@android:style/Widget.ProgressBar.Horizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="6dp"
+                    android:layout_gravity="bottom"
+                    android:max="100"
+                    android:progress="0"
+                    android:visibility="gone"
+                    android:progressTint="@color/accent"
+                    android:progressBackgroundTint="#66FFFFFF" />
+            </FrameLayout>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:padding="12dp"
+                android:background="#80000000">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereImuButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="IMU"
+                app:strokeColor="@android:color/white" />
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereSaveButton"
@@ -500,12 +573,23 @@
                 android:text="SAVE" />
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/sphereAddMoreButton"
+                style="@style/PrismModeButton"
+                android:layout_width="wrap_content"
+                android:layout_height="36dp"
+                android:layout_marginEnd="8dp"
+                android:text="ADD MORE"
+                app:strokeColor="@android:color/white" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/sphereCloseButton"
                 style="@style/PrismModeButton"
                 android:layout_width="wrap_content"
                 android:layout_height="36dp"
                 android:text="CLOSE"
                 app:strokeColor="@android:color/white" />
+
+            </LinearLayout>
 
         </LinearLayout>
 

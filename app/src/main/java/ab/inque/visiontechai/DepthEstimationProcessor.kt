@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.depth.DepthNative
+
+
 import android.content.Context
 import android.graphics.*
 import android.util.Log
@@ -352,5 +355,60 @@ class DepthEstimationProcessor(private val context: Context) {
         val result = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         result.setPixels(pixels, 0, w, 0, 0, w, h)
         return result
+    }
+
+    /**
+     * Blocking nearness map [0,1] for sphere motion refine (G5). Call from stitch worker only.
+     */
+    fun extractNearnessMapBlocking(bitmap: Bitmap): FloatArray? {
+        if (!isInitialized || interpreter == null) return null
+        val copy = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, false) ?: return null
+        return try {
+            val grey = runDepthInference(copy)
+            copy.recycle()
+            grey?.let { greyscaleToNearness(it) }
+        } catch (e: Exception) {
+            copy.recycle()
+            null
+        }
+    }
+
+    /**
+     * Async MiDaS nearness for sphere stitch — never blocks the stitch executor.
+     * [bitmap] is recycled after inference completes.
+     */
+    fun scheduleNearnessMap(bitmap: Bitmap, onComplete: (FloatArray) -> Unit) {
+        if (!isInitialized || interpreter == null) {
+            bitmap.recycle()
+            return
+        }
+        if (!inferenceRunning.compareAndSet(false, true)) {
+            bitmap.recycle()
+            return
+        }
+        depthExecutor.execute {
+            try {
+                val grey = runDepthInference(bitmap)
+                grey?.let {
+                    onComplete(greyscaleToNearness(it))
+                    it.recycle()
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "scheduleNearnessMap failed: ${e.message}")
+            } finally {
+                bitmap.recycle()
+                inferenceRunning.set(false)
+            }
+        }
+    }
+
+    private fun greyscaleToNearness(depthGrey: Bitmap): FloatArray {
+        val w = depthGrey.width
+        val h = depthGrey.height
+        val n = w * h
+        val pixels = IntArray(n)
+        depthGrey.getPixels(pixels, 0, w, 0, 0, w, h)
+        val raw = FloatArray(n) { i -> (pixels[i] and 0xFF) / 255f }
+        return SphereMotionDepth.normalizeMetricNearness(raw)
     }
 }

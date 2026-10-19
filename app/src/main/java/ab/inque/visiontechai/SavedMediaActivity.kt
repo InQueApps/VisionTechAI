@@ -1,8 +1,9 @@
 package ab.inque.visiontechai
 
-import android.Manifest
+import ab.inque.robotics.panorama.SphereViewerNative
+
+
 import android.content.ContentUris
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
@@ -35,12 +36,10 @@ import android.media.MediaPlayer
 import androidx.appcompat.app.AppCompatActivity
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatDialog
-import androidx.core.content.ContextCompat
 import androidx.recyclerview.widget.GridLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import ab.inque.visiontechai.databinding.ActivitySavedMediaBinding
 import ab.inque.visiontechai.databinding.ItemSavedMediaBinding
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.viewpager2.widget.ViewPager2
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -65,16 +64,6 @@ class SavedMediaActivity : AppCompatActivity() {
         val isDocument get() = mediaType == MediaType.DOCUMENT
     }
 
-    private val requestPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { permissions ->
-        if (permissions.values.any { it }) {
-            refreshMediaList()
-        } else {
-            showEmptyOrDenied(denied = true)
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivitySavedMediaBinding.inflate(layoutInflater)
@@ -88,30 +77,11 @@ class SavedMediaActivity : AppCompatActivity() {
         refreshMediaList()
     }
 
-    private fun hasReadMediaPermission(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_IMAGES) == PackageManager.PERMISSION_GRANTED &&
-                ContextCompat.checkSelfPermission(this, Manifest.permission.READ_MEDIA_VIDEO) == PackageManager.PERMISSION_GRANTED
-        } else {
-            ContextCompat.checkSelfPermission(this, Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
-        }
-    }
-
-    private fun requestReadMediaPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestPermissionLauncher.launch(
-                arrayOf(Manifest.permission.READ_MEDIA_IMAGES, Manifest.permission.READ_MEDIA_VIDEO)
-            )
-        } else {
-            requestPermissionLauncher.launch(arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE))
-        }
-    }
-
     private fun refreshMediaList() {
         val items = loadSavedMedia()
         currentItems = items
         if (items.isEmpty()) {
-            showEmptyOrDenied(denied = false)
+            showEmptyGallery()
         } else {
             binding.emptyText.visibility = View.GONE
             binding.recyclerView.visibility = View.VISIBLE
@@ -131,14 +101,10 @@ class SavedMediaActivity : AppCompatActivity() {
         }
     }
 
-    private fun showEmptyOrDenied(denied: Boolean) {
+    private fun showEmptyGallery() {
         binding.recyclerView.visibility = View.GONE
         binding.emptyText.visibility = View.VISIBLE
-        binding.emptyText.text = if (denied) {
-            "Permission needed to show saved photos and videos.\nGrant storage access in app settings."
-        } else {
-            "No photos or videos yet.\nCapture from the camera view."
-        }
+        binding.emptyText.text = "No photos or videos yet.\nCapture from the camera view."
     }
 
     private fun loadSavedMedia(): List<MediaItem> {
@@ -192,47 +158,51 @@ class SavedMediaActivity : AppCompatActivity() {
 
     private fun loadFromMediaStoreByNamePrefix(): List<MediaItem> {
         val list = mutableListOf<MediaItem>()
-        val imageProjection = arrayOf(
-            MediaStore.Images.Media._ID,
-            MediaStore.Images.Media.DATE_ADDED
-        )
-        contentResolver.query(
-            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            imageProjection,
-            "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?",
-            arrayOf("${Constants.MEDIA_FILENAME_PREFIX}%"),
-            "${MediaStore.Images.Media.DATE_ADDED} DESC"
-        )?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
-            while (cursor.moveToNext()) {
-                val id = cursor.getLong(idCol)
-                val date = cursor.getLong(dateCol)
-                val uri = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
-                list.add(MediaItem(id, uri, MediaType.IMAGE, date))
+        try {
+            val imageProjection = arrayOf(
+                MediaStore.Images.Media._ID,
+                MediaStore.Images.Media.DATE_ADDED
+            )
+            contentResolver.query(
+                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                imageProjection,
+                "${MediaStore.Images.Media.DISPLAY_NAME} LIKE ?",
+                arrayOf("${Constants.MEDIA_FILENAME_PREFIX}%"),
+                "${MediaStore.Images.Media.DATE_ADDED} DESC"
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_ADDED)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val date = cursor.getLong(dateCol)
+                    val uri = Uri.withAppendedPath(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id.toString())
+                    list.add(MediaItem(id, uri, MediaType.IMAGE, date))
+                }
             }
-        }
+        } catch (_: Exception) { }
 
-        val videoProjection = arrayOf(
-            MediaStore.Video.Media._ID,
-            MediaStore.Video.Media.DATE_ADDED
-        )
-        contentResolver.query(
-            MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            videoProjection,
-            "${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?",
-            arrayOf("${Constants.MEDIA_FILENAME_PREFIX}%"),
-            "${MediaStore.Video.Media.DATE_ADDED} DESC"
-        )?.use { cursor ->
-            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
-            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
-            while (cursor.moveToNext()) {
-                val id = cursor.getLong(idCol)
-                val date = cursor.getLong(dateCol)
-                val uri = Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id.toString())
-                list.add(MediaItem(id, uri, MediaType.VIDEO, date))
+        try {
+            val videoProjection = arrayOf(
+                MediaStore.Video.Media._ID,
+                MediaStore.Video.Media.DATE_ADDED
+            )
+            contentResolver.query(
+                MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
+                videoProjection,
+                "${MediaStore.Video.Media.DISPLAY_NAME} LIKE ?",
+                arrayOf("${Constants.MEDIA_FILENAME_PREFIX}%"),
+                "${MediaStore.Video.Media.DATE_ADDED} DESC"
+            )?.use { cursor ->
+                val idCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media._ID)
+                val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Video.Media.DATE_ADDED)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idCol)
+                    val date = cursor.getLong(dateCol)
+                    val uri = Uri.withAppendedPath(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id.toString())
+                    list.add(MediaItem(id, uri, MediaType.VIDEO, date))
+                }
             }
-        }
+        } catch (_: Exception) { }
 
         // Documents: text files from MediaStore.Files
         try {
@@ -660,8 +630,8 @@ class SavedMediaActivity : AppCompatActivity() {
                 }
             } catch (_: Exception) { null }
 
-            if (bitmap != null && SphereNative.isAvailable()) {
-                SphereNative.loadEquirect(bitmap)
+            if (bitmap != null && SphereViewerNative.isAvailable()) {
+                SphereViewerNative.loadEquirect(bitmap)
                 bitmap.recycle()
                 runOnUiThread { sphereViewer.setLookDirection(0f, 0f, 90f) }
             } else {

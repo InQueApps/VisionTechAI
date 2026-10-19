@@ -1,5 +1,9 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.accumulate.FrameAccumulatorNative
+import ab.inque.robotics.vision.night.NightVisionNative
+
+
 import android.content.Context
 import android.graphics.*
 import android.util.Log

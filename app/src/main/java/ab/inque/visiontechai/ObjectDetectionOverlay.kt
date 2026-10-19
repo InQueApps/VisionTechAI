@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.detection.DetectionResult
+
+
 import android.content.Context
 import android.graphics.*
 import android.util.AttributeSet
@@ -87,12 +90,19 @@ class ObjectDetectionOverlay @JvmOverloads constructor(
         imageWidth: Int
     ) {
         results = detectionResults
-
-        // Scale up the bounding box to match with the size that the captured images will be displayed
-        scaleFactor = max(width * 1f / imageWidth, height * 1f / imageHeight)
+        scaleFactor = computeScaleFactor(width, height, imageWidth, imageHeight)
+        postInvalidateOnAnimation()
     }
 
     companion object {
         private const val BOUNDING_RECT_TEXT_PADDING = 8
+
+        /** Maps detection image coords to view coords (center-crop style max scale). */
+        fun computeScaleFactor(
+            viewWidth: Int,
+            viewHeight: Int,
+            imageWidth: Int,
+            imageHeight: Int
+        ): Float = max(viewWidth * 1f / imageWidth, viewHeight * 1f / imageHeight)
     }
 } 

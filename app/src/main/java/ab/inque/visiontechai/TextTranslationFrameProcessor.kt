@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.text.TextLineClustererNative
+
+
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -191,7 +194,7 @@ class TextTranslationFrameProcessor(private val context: Context) : FrameProcess
         val groupIds = IntArray(count)
 
         try {
-            TextTranslatorNative.clusterWordsIntoLines(left, top, right, bottom, count, groupIds)
+            TextLineClustererNative.clusterWordsIntoLines(left, top, right, bottom, count, groupIds)
         } catch (e: UnsatisfiedLinkError) {
             clusterWordsKotlinFallback(words, groupIds)
         }

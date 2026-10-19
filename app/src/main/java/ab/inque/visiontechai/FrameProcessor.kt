@@ -5,6 +5,11 @@ import android.graphics.Bitmap
 /**
  * Common interface for vision effect processors. Each effect (night vision, edge, etc.)
  * implements this so the pipeline can run the active processor with a single call.
+ *
+ * **Threading:** Called on the CameraX image-analysis executor (see [VisionAnalysisPipeline]).
+ * Implementations must not touch Views or call [android.app.Activity.runOnUiThread].
+ * Processors should finish quickly on that thread; heavy ML may use internal async caches
+ * (e.g. depth, HD) and return the latest available result synchronously.
  */
 fun interface FrameProcessor {
     /**

@@ -20,10 +20,12 @@
 -keep class ab.inque.visiontechai.TextTranslatorNative { *; }
 -keep class ab.inque.visiontechai.VideoNative { *; }
 
-# TensorFlow Lite
+# TensorFlow Lite / LiteRT (org.tensorflow.lite API + com.google.ai.edge.litert)
 -keep class org.tensorflow.lite.** { *; }
 -keep interface org.tensorflow.lite.** { *; }
 -keepclassmembers class org.tensorflow.lite.** { *; }
+-keep class com.google.ai.edge.litert.** { *; }
+-dontwarn com.google.ai.edge.litert.**
 
 # ML Kit
 -keep class com.google.mlkit.** { *; }
@@ -33,6 +35,11 @@
 # Google Play Services (used by ML Kit)
 -keep class com.google.android.gms.** { *; }
 -dontwarn com.google.android.gms.**
+
+# Play Billing Library — keep so Play Console can detect version 8.x in the AAB
+-keep class com.android.billingclient.** { *; }
+-keep class com.google.android.gms.internal.play_billing.** { *; }
+-dontwarn com.android.billingclient.**
 
 # Firebase
 -keep class com.google.firebase.** { *; }

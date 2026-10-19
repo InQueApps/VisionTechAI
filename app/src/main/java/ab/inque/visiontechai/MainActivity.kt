@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.accumulate.FrameAccumulatorNative
+
+
 import android.Manifest
 import android.content.ContentValues
 import android.content.Intent
@@ -43,8 +46,14 @@ import androidx.camera.video.VideoCapture
 import androidx.camera.video.MediaStoreOutputOptions
 import androidx.camera.video.VideoRecordEvent
 import androidx.core.content.ContextCompat
+import ab.inque.visiontechai.controller.CameraController
+import ab.inque.visiontechai.controller.PermissionCoordinator
+import ab.inque.visiontechai.controller.PipelineResultDispatcher
+import ab.inque.visiontechai.controller.SphereSessionController
+import ab.inque.visiontechai.controller.SphereUiCoordinator
+import ab.inque.visiontechai.controller.VisionModeController
 import ab.inque.visiontechai.databinding.ActivityMainBinding
-import ab.inque.visiontechai.ui.HistogramView
+import ab.inque.visiontechai.ui.VisionOverlayHost
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.ByteBuffer
@@ -59,9 +68,6 @@ import androidx.appcompat.app.AlertDialog
 
 class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
-    private var imageCapture: ImageCapture? = null
-    private var videoCapture: VideoCapture<Recorder>? = null
-    private var cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
     private var isRecording = false
     private var isPhotoMode = true
     private var activeRecording: Recording? = null
@@ -75,55 +81,22 @@ class MainActivity : AppCompatActivity() {
     private lateinit var imageSegmentationProcessor: ImageSegmentationProcessor
     private lateinit var depthEstimationProcessor: DepthEstimationProcessor
     private lateinit var hdImageProcessor: HDImageProcessor
-    private lateinit var objectDetectionOverlay: ObjectDetectionOverlay
     private lateinit var cameraExecutor: ExecutorService
-    private var previewWidth = 0
-    private var previewHeight = 0
-    private lateinit var nightVisionImageView: ImageView
-    private lateinit var edgeDetectionImageView: ImageView
-    private lateinit var opticalFlowImageView: ImageView
-    private lateinit var colorAdjustmentImageView: ImageView
-    private lateinit var textTranslationImageView: ImageView
-    private lateinit var segmentationImageView: ImageView
-    private lateinit var depthFieldImageView: ImageView
-    private lateinit var hdImageView: ImageView
-    private lateinit var histogramView: HistogramView
-    private lateinit var fpsView: TextView
-    private var segmentationNullLogCounter = 0
+    private lateinit var overlayHost: VisionOverlayHost
     private lateinit var orientationTracker: OrientationTracker
-    private var sphereController: SphereCaptureController? = null
+    private lateinit var permissionCoordinator: PermissionCoordinator
+    private lateinit var cameraController: CameraController
+    private lateinit var visionModeController: VisionModeController
+    private lateinit var pipelineDispatcher: PipelineResultDispatcher
+    private lateinit var sphereSession: SphereSessionController
+    private lateinit var sphereUiCoordinator: SphereUiCoordinator
     private var cameraFovH = 65f
     private var cameraFovV = 50f
-    @Volatile private var sphereCaptureNextFrame = false
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { permissions ->
-        val allGranted = permissions.entries.all { it.value }
-        if (allGranted) {
-            Log.d(TAG, "All permissions granted, starting camera")
-            startCamera()
-        } else {
-            // Check which permissions were denied
-            val deniedPermissions = permissions.entries.filter { !it.value }.map { it.key }
-            Log.w(TAG, "Permissions denied: $deniedPermissions")
-            
-            // Show specific message based on denied permissions
-            val message = when {
-                deniedPermissions.contains(Manifest.permission.CAMERA) -> 
-                    "Camera permission is required for this app to function."
-                deniedPermissions.contains(Manifest.permission.RECORD_AUDIO) -> 
-                    "Audio recording permission is required for video recording."
-                deniedPermissions.any { it.contains("MEDIA") } -> 
-                    "Media access permission is required to save photos and videos."
-                else -> "Required permissions were not granted. App cannot function properly."
-            }
-            
-            Toast.makeText(this, message, Toast.LENGTH_LONG).show()
-            
-            // Always show explanation dialog and try again
-            showPermissionExplanationDialog()
-        }
+        permissionCoordinator.onPermissionResult(permissions)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -131,197 +104,16 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Create night vision overlay ImageView
-        nightVisionImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id // Don't cover the controls
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create edge detection overlay ImageView
-        edgeDetectionImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id // Don't cover the controls
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create Optical Flow overlay ImageView
-        opticalFlowImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id // Don't cover the controls
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create color adjustment overlay ImageView
-        colorAdjustmentImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id // Don't cover the controls
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create text translation overlay ImageView
-        textTranslationImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id // Don't cover the controls
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create segmentation overlay ImageView
-        segmentationImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id // Don't cover the controls
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create depth field overlay ImageView
-        depthFieldImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create HD overlay ImageView (scale only, separate mode)
-        hdImageView = ImageView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id
-            }
-            scaleType = ImageView.ScaleType.CENTER_CROP
-            visibility = View.GONE
-        }
-
-        // Create histogram view
-        histogramView = HistogramView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(200, 150).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                setMargins(16, 16, 0, 0) // Position in top left corner
-            }
-            visibility = View.VISIBLE // Always visible
-        }
-
-        // Create FPS view
-        fpsView = TextView(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                setMargins(0, 16, 16, 0) // Position in top right corner
-            }
-            setTextColor(Color.WHITE)
-            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14f)
-            setBackgroundResource(R.drawable.button_info_background)
-            setPadding(16, 8, 16, 8)
-            text = "FPS: 0"
-            visibility = View.VISIBLE // Always visible
-        }
-
-        // Add the views to the layout in proper z-order
         val parentLayout = binding.viewFinder.parent as androidx.constraintlayout.widget.ConstraintLayout
-
-        // Add overlay ImageViews to the layout
-        parentLayout.addView(nightVisionImageView)
-        parentLayout.addView(edgeDetectionImageView)
-        parentLayout.addView(opticalFlowImageView)
-        parentLayout.addView(colorAdjustmentImageView)
-        parentLayout.addView(textTranslationImageView)
-        parentLayout.addView(segmentationImageView)
-        parentLayout.addView(depthFieldImageView)
-        parentLayout.addView(hdImageView)
-        parentLayout.addView(histogramView)
-        parentLayout.addView(fpsView)
-
-        // Create object detection overlay before adding it to the layout
-        objectDetectionOverlay = ObjectDetectionOverlay(this).apply {
-            layoutParams = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT
-            ).apply {
-                topToTop = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
-                bottomToTop = binding.controlsContainer.id
-            }
-            visibility = View.GONE
-        }
-        
-        // Add object detection overlay
-        parentLayout.addView(objectDetectionOverlay)
-
-        // Ensure controls container stays on top (use Constants for elevation)
+        overlayHost = VisionOverlayHost(parentLayout, binding.controlsContainer.id)
         binding.controlsContainer.elevation = Constants.ELEVATION_CONTROLS
-        histogramView.elevation = Constants.ELEVATION_HUD
-        fpsView.elevation = Constants.ELEVATION_HUD
-        objectDetectionOverlay.elevation = Constants.ELEVATION_OVERLAY
-        edgeDetectionImageView.elevation = Constants.ELEVATION_EFFECT_OVERLAY
-        hdImageView.elevation = Constants.ELEVATION_EFFECT_OVERLAY
-        nightVisionImageView.elevation = Constants.ELEVATION_NIGHT_VISION
 
-        // Check permissions immediately when app starts
-        checkAndRequestPermissions()
+        permissionCoordinator = PermissionCoordinator(
+            activity = this,
+            onAllGranted = { startCamera() },
+            onMinimumGranted = { startCamera() },
+            requestLauncher = requestPermissionLauncher
+        )
 
         binding.photoButton.setOnClickListener {
             setMode(true)
@@ -397,22 +189,6 @@ class MainActivity : AppCompatActivity() {
                 Toast.makeText(this, "Text Translation Enabled", Toast.LENGTH_SHORT).show()
             }
         }
-        binding.sphereButton.setOnClickListener {
-            if (visionState.mode == VisionMode.SPHERE) {
-                exitSphereMode()
-            } else {
-                enterSphereMode()
-            }
-        }
-        binding.sphereDoneButton.setOnClickListener {
-            sphereController?.finishCapture()
-        }
-        binding.sphereSaveButton.setOnClickListener {
-            saveSphereImage()
-        }
-        binding.sphereCloseButton.setOnClickListener {
-            exitSphereMode()
-        }
         binding.sliderArrow.setOnClickListener {
             toggleSlider()
         }
@@ -426,11 +202,11 @@ class MainActivity : AppCompatActivity() {
             toggleInfoPanel()
         }
         binding.contactUsButton.setOnClickListener {
-            openContactEmail()
+            ContactEmailLauncher.open(this)
         }
         binding.recordButton.setOnClickListener {
             if (visionState.mode == VisionMode.SPHERE) {
-                handleSphereRecordButton()
+                sphereSession.handleRecordButton(isPhotoMode) { binding.recordButton.setImageResource(it) }
                 return@setOnClickListener
             }
             if (isPhotoMode) {
@@ -910,15 +686,107 @@ class MainActivity : AppCompatActivity() {
 
         orientationTracker = OrientationTracker(this)
 
+        visionModeController = VisionModeController(
+            binding = binding,
+            visionState = visionState,
+            overlayHost = overlayHost,
+            frameProcessors = frameProcessors,
+            opticalFlowProcessor = opticalFlowProcessor,
+            imageSegmentationProcessor = imageSegmentationProcessor,
+            onSphereCleanup = { sphereSession.onSphereCleanupFromModeSwitch() }
+        )
+
+        sphereSession = SphereSessionController(
+            activity = this,
+            binding = binding,
+            orientationTracker = orientationTracker,
+            setVisionMode = { visionModeController.setVisionMode(it) },
+            getCameraFovH = { cameraFovH },
+            getCameraFovV = { cameraFovV },
+            getAnalysisWidth = { visionState.lastAnalysisWidth },
+            getAnalysisHeight = { visionState.lastAnalysisHeight },
+            getDisplayRotationDegrees = {
+                when (windowManager.defaultDisplay.rotation) {
+                    android.view.Surface.ROTATION_90 -> 90
+                    android.view.Surface.ROTATION_180 -> 180
+                    android.view.Surface.ROTATION_270 -> 270
+                    else -> 0
+                }
+            },
+            getUseFrontCamera = { useFrontCamera },
+            depthProcessor = depthEstimationProcessor
+        )
+
+        sphereUiCoordinator = SphereUiCoordinator(binding, visionState, sphereSession)
+        sphereUiCoordinator.bind()
+
+        sphereSession.checkInterruptedExport()
+
+        pipelineDispatcher = PipelineResultDispatcher(
+            visionState = visionState,
+            overlayHost = overlayHost,
+            binding = binding,
+            sphereControllerProvider = { sphereSession.controller },
+            sphereCaptureNextFrame = { sphereSession.captureNextFrame },
+            clearSphereCaptureNextFrame = { sphereSession.captureNextFrame = false },
+            onSphereRawFrame = { bitmap, ts, rot -> sphereSession.onRawFrame(bitmap, ts, rot) },
+            isRecordingProvider = { isRecording },
+            processedVideoRecorderProvider = { processedVideoRecorder }
+        )
+
         visionPipeline = VisionAnalysisPipeline(
             getState = { visionState },
             processors = frameProcessors,
-            objectDetectionProcessor = objectDetectionProcessor,
-            applyFlip = { b -> if (cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA) ImageUtils.flipBitmapHorizontally(b) else b }
+            detectObjects = objectDetectionProcessor::detectObjects,
+            applyFlip = { b -> if (useFrontCamera) ImageUtils.flipBitmapHorizontally(b) else b },
+            shouldDecodeFrame = {
+                if (visionState.mode != VisionMode.SPHERE) {
+                    true
+                } else if (sphereSession.captureNextFrame) {
+                    true
+                } else {
+                    val ctrl = sphereSession.controller
+                    ctrl?.isContinuousCapturing == true && !ctrl.isStitchBusy()
+                }
+            },
+            exposureEvForTimestamp = { ts ->
+                if (::cameraController.isInitialized) cameraController.exposureEvFor(ts) else 0f
+            }
         )
 
-        // Ensure info button is always on top
+        cameraController = CameraController(
+            activity = this,
+            previewView = binding.viewFinder,
+            cameraExecutor = cameraExecutor,
+            createAnalyzer = {
+                visionPipeline.createAnalyzer { result ->
+                    runOnUiThread { pipelineDispatcher.dispatch(result) }
+                }
+            },
+            onFovDetected = { h, v ->
+                cameraFovH = h
+                cameraFovV = v
+            }
+        )
+        sphereSession.onSphereAnalysisPriority = { enabled ->
+            cameraController.setSphereAnalysisPriority(enabled)
+        }
+
+        permissionCoordinator.checkAndRequest()
         binding.infoButton.bringToFront()
+    }
+
+    private var useFrontCamera = false
+
+    private fun setVisionMode(mode: VisionMode) = visionModeController.setVisionMode(mode)
+
+    private fun toggleSlider() = visionModeController.toggleSlider()
+
+    private fun toggleCategoryOverlay(category: VisionMode.Category) =
+        visionModeController.toggleCategoryOverlay(category)
+
+    private fun setMainButtonActive(underline: View, active: Boolean) {
+        underline.setBackgroundColor(if (active) Color.WHITE else Color.TRANSPARENT)
     }
 
     private fun buildFrameProcessors(): Map<VisionMode, FrameProcessor> = mapOf(
@@ -932,232 +800,11 @@ class MainActivity : AppCompatActivity() {
         VisionMode.TEXT_TRANSLATION to TextTranslationFrameProcessor(this)
     )
 
-    private fun toggleSlider() {
-        visionState.isSliderExpanded = !visionState.isSliderExpanded
-        if (visionState.isSliderExpanded) {
-            binding.sliderArrow.setImageResource(R.drawable.ic_arrow_up)
-            showActiveSlider()
-        } else {
-            binding.sliderArrow.setImageResource(R.drawable.ic_arrow_down)
-            binding.nightVisionSliderContainer.visibility = View.GONE
-            binding.edgeDetectionSliderContainer.visibility = View.GONE
-            binding.colorSliderContainer.visibility = View.GONE
-            binding.hdSliderContainer.visibility = View.GONE
-            binding.segmentationSliderContainer.visibility = View.GONE
-            binding.depthFieldSliderContainer.visibility = View.GONE
-            binding.translationOptionsContainer.visibility = View.GONE
-            binding.langSettingsPanel.visibility = View.GONE
-        }
-    }
-
-    private fun setVisionMode(mode: VisionMode) {
-        val prev = visionState.mode
-        if (prev == VisionMode.SPHERE && mode != VisionMode.SPHERE) {
-            sphereController?.resetSession()
-            sphereController = null
-            orientationTracker.stop()
-            binding.sphereCaptureOverlay.visibility = View.GONE
-            binding.sphereViewerOverlay.visibility = View.GONE
-            binding.sphereViewerView.cleanup()
-        }
-        if (prev == VisionMode.NIGHT_VISION && mode != VisionMode.NIGHT_VISION) {
-            FrameAccumulatorNative.clear()
-        }
-        if (prev == VisionMode.HD && mode != VisionMode.HD) {
-            FrameAccumulatorNative.clear()
-            (frameProcessors[VisionMode.HD] as? HDFrameProcessor)?.clearCache()
-        }
-        visionState.mode = mode
-        updateVisionModeUI()
-    }
-
-    private fun setMainButtonActive(underline: View, active: Boolean) {
-        underline.setBackgroundColor(if (active) android.graphics.Color.WHITE else android.graphics.Color.TRANSPARENT)
-    }
-
-    private fun setSubButtonActive(btn: com.google.android.material.button.MaterialButton, active: Boolean) {
-        btn.setTextColor(getColor(if (active) android.R.color.white else R.color.text_secondary))
-    }
-
-    private fun updateVisionModeUI() {
-        val m = visionState.mode
-        // Reset all main button underlines
-        setMainButtonActive(binding.nvUnderline, false)
-        setMainButtonActive(binding.imgUnderline, false)
-        setMainButtonActive(binding.robUnderline, false)
-        setMainButtonActive(binding.txtUnderline, false)
-        setMainButtonActive(binding.sphereUnderline, false)
-        // Reset all sub-mode buttons to inactive
-        setSubButtonActive(binding.imgEDButton, false)
-        setSubButtonActive(binding.imgCOLButton, false)
-        setSubButtonActive(binding.imgHDButton, false)
-        setSubButtonActive(binding.robOFButton, false)
-        setSubButtonActive(binding.robSEGButton, false)
-        setSubButtonActive(binding.robDFButton, false)
-        // Hide all sliders and overlays
-        binding.nightVisionSliderContainer.visibility = View.GONE
-        binding.edgeDetectionSliderContainer.visibility = View.GONE
-        binding.colorSliderContainer.visibility = View.GONE
-        binding.hdSliderContainer.visibility = View.GONE
-        binding.segmentationSliderContainer.visibility = View.GONE
-        binding.depthFieldSliderContainer.visibility = View.GONE
-        binding.opticalFlowSliderContainer.visibility = View.GONE
-        binding.translationOptionsContainer.visibility = View.GONE
-        binding.langSettingsPanel.visibility = View.GONE
-        binding.infoButton.visibility = View.VISIBLE
-        objectDetectionOverlay.visibility = View.GONE
-        nightVisionImageView.visibility = View.GONE
-        edgeDetectionImageView.visibility = View.GONE
-        opticalFlowImageView.visibility = View.GONE
-        colorAdjustmentImageView.visibility = View.GONE
-        textTranslationImageView.visibility = View.GONE
-        segmentationImageView.visibility = View.GONE
-        depthFieldImageView.visibility = View.GONE
-        hdImageView.visibility = View.GONE
-        binding.imgOverlayRow.visibility = View.GONE
-        binding.robOverlayRow.visibility = View.GONE
-        // If this mode has sliders, auto-expand the slider panel so they are visible
-        if (m.hasSlider) {
-            visionState.isSliderExpanded = true
-            binding.sliderArrow.setImageResource(R.drawable.ic_arrow_up)
-        }
-        // Highlight active category and show active overlay/slider
-        when (m) {
-            VisionMode.NONE -> { }
-            VisionMode.NIGHT_VISION -> {
-                setMainButtonActive(binding.nvUnderline, true)
-                nightVisionImageView.visibility = View.VISIBLE
-                binding.nightVisionSlider.progress = (visionState.params.nightVisionIntensity * 100).toInt().coerceIn(0, 100)
-                binding.nightVisionIntensityValueText.text = "${(visionState.params.nightVisionIntensity * 100).toInt()}%"
-                val expFrames = visionState.params.nightVisionExposureFrames
-                binding.nightVisionExposureSlider.progress = (expFrames - 1).coerceIn(0, 9)
-                binding.nightVisionExposureValueText.text = "$expFrames"
-                showActiveSlider()
-            }
-            VisionMode.EDGE_DETECTION -> {
-                setMainButtonActive(binding.imgUnderline, true)
-                setSubButtonActive(binding.imgEDButton, true)
-                edgeDetectionImageView.visibility = View.VISIBLE
-                showActiveSlider()
-            }
-            VisionMode.COLOR_ADJUSTMENT -> {
-                setMainButtonActive(binding.imgUnderline, true)
-                setSubButtonActive(binding.imgCOLButton, true)
-                colorAdjustmentImageView.visibility = View.VISIBLE
-                showActiveSlider()
-            }
-            VisionMode.HD -> {
-                setMainButtonActive(binding.imgUnderline, true)
-                setSubButtonActive(binding.imgHDButton, true)
-                hdImageView.visibility = View.VISIBLE
-                binding.hdSlider.progress = visionState.params.hdScaleSliderValue
-                val p = visionState.params.hdScaleSliderValue
-                binding.hdScaleValueText.text = when {
-                    p < 50 -> String.format("%.2fx", 1f - (50 - p) * 0.0198f)
-                    p > 50 -> String.format("%.1fx", 1f + (p - 50) * 0.06f)
-                    else -> "1.0x"
-                }
-                binding.hdExposureSlider.progress = visionState.params.hdExposureFrames - 1
-                binding.hdExposureValueText.text = "${visionState.params.hdExposureFrames}"
-                showActiveSlider()
-            }
-            VisionMode.OPTICAL_FLOW -> {
-                setMainButtonActive(binding.robUnderline, true)
-                setSubButtonActive(binding.robOFButton, true)
-                opticalFlowImageView.visibility = View.VISIBLE
-                opticalFlowProcessor.clear()
-                binding.opticalFlowPixelationSlider.progress = (visionState.params.opticalFlowPixelation - 2).coerceIn(0, 14)
-                binding.opticalFlowPixelationValueText.text = "${visionState.params.opticalFlowPixelation}"
-                binding.opticalFlowIntensitySlider.progress = (visionState.params.opticalFlowIntensity * 100).toInt().coerceIn(0, 100)
-                binding.opticalFlowIntensityValueText.text = "${(visionState.params.opticalFlowIntensity * 100).toInt()}%"
-                binding.opticalFlowSensitivitySlider.progress = (visionState.params.opticalFlowSensitivity * 100).toInt().coerceIn(0, 100)
-                binding.opticalFlowSensitivityValueText.text = "${(visionState.params.opticalFlowSensitivity * 100).toInt()}%"
-                showActiveSlider()
-            }
-            VisionMode.SEGMENTATION -> {
-                setMainButtonActive(binding.robUnderline, true)
-                setSubButtonActive(binding.robSEGButton, true)
-                segmentationImageView.visibility = View.VISIBLE
-                binding.segmentationClustersSlider.progress = (visionState.params.segmentationNumClusters - 3).coerceIn(0, 7)
-                binding.segmentationClustersValueText.text = "${visionState.params.segmentationNumClusters}"
-                binding.segmentationIterationsSlider.progress = (visionState.params.segmentationIterations - 3).coerceIn(0, 12)
-                binding.segmentationIterationsValueText.text = "${visionState.params.segmentationIterations}"
-                showActiveSlider()
-            }
-            VisionMode.DEPTH_FIELD -> {
-                setMainButtonActive(binding.robUnderline, true)
-                setSubButtonActive(binding.robDFButton, true)
-                depthFieldImageView.visibility = View.VISIBLE
-                binding.depthFieldFocusSlider.progress = (visionState.params.depthFieldFocus * 100).toInt().coerceIn(0, 100)
-                binding.depthFieldFocusValueText.text = "${(visionState.params.depthFieldFocus * 100).toInt()}%"
-                showActiveSlider()
-            }
-            VisionMode.OBJECT_DETECTION -> {
-                setMainButtonActive(binding.robUnderline, true)
-                objectDetectionOverlay.visibility = View.VISIBLE
-            }
-            VisionMode.TEXT_TRANSLATION -> {
-                setMainButtonActive(binding.txtUnderline, true)
-                textTranslationImageView.visibility = View.VISIBLE
-                showActiveSlider()
-            }
-            VisionMode.SPHERE -> {
-                setMainButtonActive(binding.sphereUnderline, true)
-            }
-        }
-        bringHudToFront()
-    }
-
-    private fun showActiveSlider() {
-        if (!visionState.isSliderExpanded) return
-        when (visionState.mode) {
-            VisionMode.NIGHT_VISION -> binding.nightVisionSliderContainer.visibility = View.VISIBLE
-            VisionMode.EDGE_DETECTION -> binding.edgeDetectionSliderContainer.visibility = View.VISIBLE
-            VisionMode.COLOR_ADJUSTMENT -> binding.colorSliderContainer.visibility = View.VISIBLE
-            VisionMode.HD -> binding.hdSliderContainer.visibility = View.VISIBLE
-            VisionMode.OPTICAL_FLOW -> binding.opticalFlowSliderContainer.visibility = View.VISIBLE
-            VisionMode.SEGMENTATION -> binding.segmentationSliderContainer.visibility = View.VISIBLE
-            VisionMode.DEPTH_FIELD -> binding.depthFieldSliderContainer.visibility = View.VISIBLE
-            VisionMode.TEXT_TRANSLATION -> binding.translationOptionsContainer.visibility = View.VISIBLE
-            else -> { }
-        }
-    }
-
-    private fun bringHudToFront() {
-        binding.controlsContainer.bringToFront()
-        histogramView.bringToFront()
-        fpsView.bringToFront()
-    }
-
-    private fun toggleCategoryOverlay(category: VisionMode.Category) {
-        val row = when (category) {
-            VisionMode.Category.NV -> return
-            VisionMode.Category.IMG -> binding.imgOverlayRow
-            VisionMode.Category.ROB -> binding.robOverlayRow
-            VisionMode.Category.TXT -> return
-            VisionMode.Category.SPHERE -> return
-            VisionMode.Category.NONE -> return
-        }
-        val visible = row.visibility == View.VISIBLE
-        binding.imgOverlayRow.visibility = View.GONE
-        binding.robOverlayRow.visibility = View.GONE
-        setMainButtonActive(binding.imgUnderline, false)
-        setMainButtonActive(binding.robUnderline, false)
-        if (visible) return
-        else {
-            row.visibility = View.VISIBLE
-            Handler(Looper.getMainLooper()).postDelayed({
-                if (row.visibility == View.VISIBLE) {
-                    row.visibility = View.GONE
-                    setMainButtonActive(binding.imgUnderline, false)
-                    setMainButtonActive(binding.robUnderline, false)
-                }
-            }, Constants.OVERLAY_AUTO_HIDE_MS)
-        }
-    }
-
     private fun setMode(photo: Boolean) {
         isPhotoMode = photo
+        if (visionState.mode == VisionMode.SPHERE) {
+            sphereSession.onSphereCaptureModeChanged(photo)
+        }
         val greenBg = ColorStateList.valueOf(ContextCompat.getColor(this, R.color.glassy))
         val redBg = ColorStateList.valueOf(Color.RED)
         val whiteIcon = ColorStateList.valueOf(Color.WHITE)
@@ -1188,54 +835,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun captureCurrentScreenContent(): Bitmap? {
-        try {
-            val processedBitmap = when (visionState.mode) {
-                VisionMode.EDGE_DETECTION -> {
-                    val drawable = edgeDetectionImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.OPTICAL_FLOW -> {
-                    val drawable = opticalFlowImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.NIGHT_VISION -> {
-                    val drawable = nightVisionImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.COLOR_ADJUSTMENT -> {
-                    val drawable = colorAdjustmentImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.SEGMENTATION -> {
-                    val drawable = segmentationImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.DEPTH_FIELD -> {
-                    val drawable = depthFieldImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.TEXT_TRANSLATION -> {
-                    val drawable = textTranslationImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.HD -> {
-                    val drawable = hdImageView.drawable
-                    if (drawable is BitmapDrawable) drawable.bitmap.copy(drawable.bitmap.config ?: Bitmap.Config.ARGB_8888, true) else null
-                }
-                VisionMode.SPHERE -> null // Sphere mode handles its own save flow
-                else -> {
-                    // No filters active: PreviewView draws camera to a Surface, not to Canvas, so draw(canvas) would be black.
-                    // Caller will use ImageCapture (takeProcessedPhoto) for a real photo instead.
-                    null
-                }
+        return try {
+            if (MediaCapturePolicy.shouldCaptureOverlayBitmap(visionState.mode)) {
+                overlayHost.captureFilterBitmap()
+            } else {
+                null
             }
-            
-            return processedBitmap
-            
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to capture screen content: ${e.message}")
-            e.printStackTrace()
-            return null
+            Log.e(TAG, "Failed to capture screen content: ${e.message}", e)
+            null
         }
     }
 
@@ -1253,18 +861,7 @@ class MainActivity : AppCompatActivity() {
 
         val fromLang = visionState.params.translationSourceLanguageCode ?: "?"
         val toLang = visionState.params.translationTargetLanguageCode ?: "?"
-
-        val sb = StringBuilder()
-        sb.appendLine("PRISM AI Translation — $fromLang → $toLang")
-        sb.appendLine("Date: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(System.currentTimeMillis())}")
-        sb.appendLine("=" .repeat(50))
-        sb.appendLine()
-        for ((i, pair) in translations.withIndex()) {
-            sb.appendLine("[${i + 1}]")
-            sb.appendLine("  Original:    ${pair.first}")
-            sb.appendLine("  Translated:  ${pair.second}")
-            sb.appendLine()
-        }
+        val body = TranslationExportFormatter.formatTxt(translations, fromLang, toLang)
 
         try {
             val name = Constants.MEDIA_FILENAME_PREFIX + "TRANS_" +
@@ -1279,7 +876,7 @@ class MainActivity : AppCompatActivity() {
                 val uri = contentResolver.insert(MediaStore.Files.getContentUri("external"), contentValues)
                 uri?.let { savedUri ->
                     contentResolver.openOutputStream(savedUri)?.use { stream ->
-                        stream.write(sb.toString().toByteArray(Charsets.UTF_8))
+                        stream.write(body.toByteArray(Charsets.UTF_8))
                     }
                     SavedMediaTracker.addDocument(this, savedUri)
                     Toast.makeText(this, "Translation saved: $name", Toast.LENGTH_SHORT).show()
@@ -1291,7 +888,7 @@ class MainActivity : AppCompatActivity() {
                     android.os.Environment.DIRECTORY_DOCUMENTS), "PrismAI")
                 dir.mkdirs()
                 val file = java.io.File(dir, name)
-                file.writeText(sb.toString(), Charsets.UTF_8)
+                file.writeText(body, Charsets.UTF_8)
                 val uri = Uri.fromFile(file)
                 SavedMediaTracker.addDocument(this, uri)
                 sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri))
@@ -1579,15 +1176,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun takeOriginalPhoto() {
-        val imageCapture = imageCapture ?: return
-        
-        // Always save processed image since we removed HD functionality
+        val capture = cameraController.imageCapture ?: return
         Log.d(TAG, "Saving processed camera image")
         takeProcessedPhoto()
     }
-    
+
     private fun takeRawPhoto() {
-        val imageCapture = imageCapture ?: return
+        val capture = cameraController.imageCapture ?: return
         val name = Constants.MEDIA_FILENAME_PREFIX + SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".jpg"
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -1601,7 +1196,7 @@ class MainActivity : AppCompatActivity() {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             contentValues
         ).build()
-        imageCapture.takePicture(
+        capture.takePicture(
             outputOptions,
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
@@ -1622,7 +1217,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun takeProcessedPhoto() {
-        val imageCapture = imageCapture ?: return
+        val capture = cameraController.imageCapture ?: return
         val name = Constants.MEDIA_FILENAME_PREFIX + SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis()) + ".jpg"
         val contentValues = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, name)
@@ -1636,7 +1231,7 @@ class MainActivity : AppCompatActivity() {
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
             contentValues
         ).build()
-        imageCapture.takePicture(
+        capture.takePicture(
             outputOptions,
             ContextCompat.getMainExecutor(this),
             object : ImageCapture.OnImageSavedCallback {
@@ -1665,7 +1260,7 @@ class MainActivity : AppCompatActivity() {
                 put(MediaStore.Video.Media.RELATIVE_PATH, Constants.GALLERY_VIDEO_RELATIVE_PATH)
             }
         }
-        val recordWithFilter = visionState.mode != VisionMode.NONE && visionState.mode != VisionMode.OBJECT_DETECTION
+        val recordWithFilter = MediaCapturePolicy.shouldRecordProcessedVideo(visionState.mode)
         if (recordWithFilter) {
             // Record processed frames to temp file, then copy to MediaStore. Set isRecording only when encoder is ready.
             val moviesDir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
@@ -1698,7 +1293,7 @@ class MainActivity : AppCompatActivity() {
             )
         } else {
             // No filter: use camera VideoCapture (raw stream, with audio)
-            val videoCapture = videoCapture ?: return
+            val videoCapture = cameraController.videoCapture ?: return
             val mediaStoreOutputOptions = MediaStoreOutputOptions.Builder(
                 contentResolver,
                 MediaStore.Video.Media.EXTERNAL_CONTENT_URI
@@ -1783,13 +1378,11 @@ class MainActivity : AppCompatActivity() {
     private fun showInfoPanel() {
         binding.infoPanel.visibility = View.VISIBLE
         binding.infoPanel.bringToFront()
-        histogramView.visibility = View.VISIBLE
-        fpsView.visibility = View.VISIBLE
+        overlayHost.histogramView.visibility = View.VISIBLE
+        overlayHost.fpsView.visibility = View.VISIBLE
         binding.controlsContainer.visibility = View.VISIBLE
         binding.infoButton.bringToFront()
-        histogramView.bringToFront()
-        fpsView.bringToFront()
-        binding.controlsContainer.bringToFront()
+        overlayHost.bringHudToFront(binding.controlsContainer)
         binding.infoButton.text = "✕"
     }
 
@@ -1811,401 +1404,37 @@ class MainActivity : AppCompatActivity() {
         binding.infoButton.text = "ℹ"
     }
 
-    private fun openContactEmail() {
-        // To: inqueapps@gmail.com; Subject only. From is the user's email (not set).
-        val uri = Uri.parse("mailto:inqueapps@gmail.com").buildUpon()
-            .appendQueryParameter("subject", "PRISM AI feedback")
-            .build()
-        val intent = Intent(Intent.ACTION_SENDTO).apply { data = uri }
-        try {
-            startActivity(Intent.createChooser(intent, getString(R.string.contact_us_chooser)))
-        } catch (e: Exception) {
-            Toast.makeText(this, "No email app available", Toast.LENGTH_SHORT).show()
-        }
-    }
-
     private fun switchCamera() {
         if (isRecording) stopRecording()
-        cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
-            CameraSelector.DEFAULT_FRONT_CAMERA
-        } else {
-            CameraSelector.DEFAULT_BACK_CAMERA
-        }
-        startCamera()
+        cameraController.switchCamera()
+        useFrontCamera = cameraController.cameraSelector == CameraSelector.DEFAULT_FRONT_CAMERA
     }
 
     private fun startCamera() {
-        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-        cameraProviderFuture.addListener({
-            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
-            
-            // Get preview dimensions
-            previewWidth = binding.viewFinder.width
-            previewHeight = binding.viewFinder.height
-            
-            val preview = Preview.Builder().build().also {
-                it.setSurfaceProvider(binding.viewFinder.surfaceProvider)
-            }
-            imageCapture = ImageCapture.Builder().build()
-            val recorder = Recorder.Builder()
-                .setQualitySelector(QualitySelector.from(Quality.HIGHEST))
-                .build()
-            videoCapture = VideoCapture.withOutput(recorder)
-            
-            // No setTargetResolution: use same FOV as preview so effects match normal view (not zoomed)
-            val imageAnalyzer = ImageAnalysis.Builder()
-                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                .build().also {
-                    it.setAnalyzer(cameraExecutor, visionPipeline.createAnalyzer { result ->
-                        runOnUiThread {
-                            result.fps?.let { fps -> fpsView.text = "FPS: %.1f".format(fps) }
-                            result.histograms?.let { (r, g, b) -> histogramView.updateHistograms(r, g, b) }
-                            result.detections?.let { dets ->
-                                objectDetectionOverlay.setResults(dets, result.imageHeight, result.imageWidth)
-                            }
-                            if (visionState.mode == VisionMode.SEGMENTATION && result.processedBitmap == null) {
-                                if (segmentationNullLogCounter++ % 45 == 0) {
-                                    Log.w(TAG, "Segmentation: no bitmap from pipeline (native may have failed or lib not loaded)")
-                                }
-                            }
-                            if (visionState.mode == VisionMode.SPHERE && sphereController?.state == SphereCaptureController.State.CAPTURING) {
-                                result.rawBitmap?.let { raw ->
-                                    val ts = result.frameTimestampNanos
-                                    if (sphereCaptureNextFrame) {
-                                        sphereCaptureNextFrame = false
-                                        sphereController?.captureFrame(raw, ts)
-                                    }
-                                    sphereController?.feedContinuousFrame(raw, ts)
-                                    val coverage = SphereNative.getCoverage()
-                                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
-                                    sphereController?.getPreviewBitmap()?.let { preview ->
-                                        binding.spherePreviewImage.setImageBitmap(preview)
-                                    }
-                                }
-                            }
-                            result.processedBitmap?.let { bmp ->
-                                when (visionState.mode) {
-                                    VisionMode.NIGHT_VISION -> nightVisionImageView.setImageBitmap(bmp)
-                                    VisionMode.EDGE_DETECTION -> edgeDetectionImageView.setImageBitmap(bmp)
-                                    VisionMode.OPTICAL_FLOW -> opticalFlowImageView.setImageBitmap(bmp)
-                                    VisionMode.COLOR_ADJUSTMENT -> colorAdjustmentImageView.setImageBitmap(bmp)
-                                    VisionMode.HD -> hdImageView.setImageBitmap(bmp)
-                                    VisionMode.TEXT_TRANSLATION -> textTranslationImageView.setImageBitmap(bmp)
-                                    VisionMode.SEGMENTATION -> {
-                                        segmentationImageView.setImageBitmap(bmp)
-                                        segmentationImageView.bringToFront()
-                                    }
-                                    VisionMode.DEPTH_FIELD -> {
-                                        depthFieldImageView.setImageBitmap(bmp)
-                                        depthFieldImageView.bringToFront()
-                                    }
-                                    else -> { }
-                                }
-                                if (isRecording) processedVideoRecorder?.addFrame(bmp)
-                            }
-                        }
-                    })
-                }
-            try {
-                cameraProvider.unbindAll()
-                val camera = cameraProvider.bindToLifecycle(
-                    this, cameraSelector, preview, imageCapture, videoCapture, imageAnalyzer
-                )
-                // Detect camera FOV for sphere projection via Camera2 API
-                try {
-                    val cameraManager = getSystemService(android.content.Context.CAMERA_SERVICE) as android.hardware.camera2.CameraManager
-                    val cameraId = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) "0" else "1"
-                    val chars = cameraManager.getCameraCharacteristics(cameraId)
-                    val focalLengths = chars.get(android.hardware.camera2.CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    val sensorSize = chars.get(android.hardware.camera2.CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE)
-                    if (focalLengths != null && focalLengths.isNotEmpty() && sensorSize != null) {
-                        cameraFovH = (2.0 * Math.toDegrees(kotlin.math.atan((sensorSize.width / (2.0 * focalLengths[0])).toDouble()))).toFloat()
-                        cameraFovV = (2.0 * Math.toDegrees(kotlin.math.atan((sensorSize.height / (2.0 * focalLengths[0])).toDouble()))).toFloat()
-                        Log.i(TAG, "Camera FOV: ${cameraFovH}° x ${cameraFovV}°")
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Could not detect camera FOV, using defaults: ${e.message}")
-                }
-            } catch (exc: Exception) {
-                Log.e(TAG, "Use case binding failed", exc)
-            }
-        }, ContextCompat.getMainExecutor(this))
-    }
-
-    private fun requestPermissions() {
-        Log.d(TAG, "Requesting permissions: ${REQUIRED_PERMISSIONS.joinToString()}")
-        requestPermissionLauncher.launch(REQUIRED_PERMISSIONS)
-    }
-
-    private fun allPermissionsGranted() = REQUIRED_PERMISSIONS.all {
-        ContextCompat.checkSelfPermission(baseContext, it) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun hasMinimumRequiredPermissions(): Boolean {
-        // At minimum, we need camera permission
-        return ContextCompat.checkSelfPermission(baseContext, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
-    }
-
-    private fun showPermissionExplanationDialog() {
-        androidx.appcompat.app.AlertDialog.Builder(this, R.style.DarkDialogTheme)
-            .setTitle("Permissions Required")
-            .setMessage("This app needs camera and media permissions to function properly:\n\n" +
-                    "• Camera: To capture photos and videos\n" +
-                    "• Audio: To record video with sound\n" +
-                    "• Media: To save your photos and videos\n\n" +
-                    "Please grant these permissions to use the app.")
-            .setPositiveButton("Grant Permissions") { _, _ ->
-                // Always try to request permissions again
-                requestPermissions()
-            }
-            .setNeutralButton("Open Settings") { _, _ ->
-                // Open app settings
-                val intent = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
-                    data = android.net.Uri.fromParts("package", packageName, null)
-                }
-                startActivity(intent)
-            }
-            .setNegativeButton("Exit") { _, _ ->
-                finish()
-            }
-            .setCancelable(false)
-            .show()
-    }
-
-    private fun showPermissionRationaleDialog(permissions: Array<String>) {
-        androidx.appcompat.app.AlertDialog.Builder(this, R.style.DarkDialogTheme)
-            .setTitle("Permissions Needed")
-            .setMessage("This app needs the following permissions to work:\n\n" +
-                    "• Camera: To take photos and record videos\n" +
-                    "• Audio: To record sound in videos\n" +
-                    "• Media: To save your photos and videos\n\n" +
-                    "These permissions are essential for the app to function.")
-            .setPositiveButton("Grant Permissions") { _, _ ->
-                requestPermissions()
-            }
-            .setNegativeButton("Cancel") { _, _ ->
-                Toast.makeText(this, "App cannot function without required permissions", Toast.LENGTH_LONG).show()
-                finish()
-            }
-            .setCancelable(false)
-            .show()
-    }
-
-    private fun checkAndRequestPermissions() {
-        Log.d(TAG, "Checking permissions...")
-        
-        if (allPermissionsGranted()) {
-            Log.d(TAG, "All permissions already granted, starting camera")
-            startCamera()
-        } else if (hasMinimumRequiredPermissions()) {
-            // At least camera permission is granted, start with limited functionality
-            Log.d(TAG, "Minimum permissions granted, starting camera with limited functionality")
-            startCamera()
-            
-            // Show a toast about limited functionality
-            Toast.makeText(this, "Some features may be limited due to missing permissions", Toast.LENGTH_LONG).show()
-        } else {
-            Log.d(TAG, "No permissions granted, requesting permissions")
-            
-            // Always request permissions, regardless of previous denials
-            val permissionsToRequest = REQUIRED_PERMISSIONS.filter {
-                ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
-            }
-            
-            if (permissionsToRequest.isNotEmpty()) {
-                Log.d(TAG, "Requesting permissions: ${permissionsToRequest.joinToString()}")
-                
-                // Always show rationale first to explain why permissions are needed
-                showPermissionRationaleDialog(permissionsToRequest.toTypedArray())
-            } else {
-                Log.w(TAG, "No permissions to request but not all granted")
-                showPermissionExplanationDialog()
-            }
-        }
+        if (!::cameraController.isInitialized) return
+        cameraController.startCamera()
     }
 
     override fun onResume() {
         super.onResume()
-        // Always check permissions when resuming, even if previously denied
-        if (allPermissionsGranted() && imageCapture == null) {
-            Log.d(TAG, "Permissions granted on resume, starting camera")
+        if (!::cameraController.isInitialized) return
+        if (permissionCoordinator.allGranted() && !cameraController.isCameraBound) {
             startCamera()
-        } else if (hasMinimumRequiredPermissions() && imageCapture == null) {
-            // At least camera permission is granted, start with limited functionality
-            Log.d(TAG, "Minimum permissions granted on resume, starting camera with limited functionality")
+        } else if (permissionCoordinator.hasMinimum() && !cameraController.isCameraBound) {
             startCamera()
-        } else if (imageCapture == null) {
-            // No permissions granted, try requesting them again
-            Log.d(TAG, "No permissions granted on resume, checking permissions again")
-            checkAndRequestPermissions()
+        } else if (!cameraController.isCameraBound) {
+            permissionCoordinator.checkAndRequest()
         }
-    }
-
-    private fun enterSphereMode() {
-        setVisionMode(VisionMode.SPHERE)
-        orientationTracker.start()
-        sphereController = SphereCaptureController(
-            orientationTracker,
-            onCoverageUpdate = { coverage ->
-                runOnUiThread {
-                    binding.sphereCoverageText.text = "Coverage: ${(coverage * 100).toInt()}%"
-                }
-            },
-            onPreviewReady = { equirect ->
-                runOnUiThread {
-                    binding.sphereCaptureOverlay.visibility = View.GONE
-                    binding.sphereViewerOverlay.visibility = View.VISIBLE
-                    binding.sphereViewerView.setLookDirection(0f, 0f, 90f)
-                }
-            },
-            onFrameWarning = { warning ->
-                runOnUiThread {
-                    when (warning) {
-                        SphereCaptureController.FrameWarning.NO_OVERLAP ->
-                            Toast.makeText(this, "No overlap — move back toward previous frames", Toast.LENGTH_SHORT).show()
-                        SphereCaptureController.FrameWarning.EXCESSIVE_SHIFT ->
-                            Toast.makeText(this, "Slow down — too much movement between frames", Toast.LENGTH_SHORT).show()
-                        SphereCaptureController.FrameWarning.ALIGNMENT_FAILED ->
-                            Toast.makeText(this, "Frame skipped — could not align with panorama", Toast.LENGTH_SHORT).show()
-                    }
-                }
-            }
-        )
-        // cameraFovH/V are computed from the sensor's physical width/height (landscape).
-        // When the phone is in portrait, the frame bitmap is rotated 90° so its horizontal
-        // axis corresponds to the sensor's HEIGHT dimension and vice versa — swap FOV values.
-        val isPortrait = resources.configuration.orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT
-        val effectiveFovH = if (isPortrait) cameraFovV else cameraFovH
-        val effectiveFovV = if (isPortrait) cameraFovH else cameraFovV
-        Log.i(TAG, "Sphere session: portrait=$isPortrait, effectiveFOV=${effectiveFovH}° x ${effectiveFovV}°")
-        sphereController?.startSession(effectiveFovH, effectiveFovV)
-        binding.sphereCaptureOverlay.visibility = View.VISIBLE
-        binding.sphereViewerOverlay.visibility = View.GONE
-        binding.sphereCoverageText.text = "Coverage: 0%"
-        Toast.makeText(this, "Sphere mode — scan your surroundings", Toast.LENGTH_SHORT).show()
-    }
-
-    private fun exitSphereMode() {
-        sphereController?.resetSession()
-        sphereController = null
-        orientationTracker.stop()
-        binding.sphereCaptureOverlay.visibility = View.GONE
-        binding.sphereViewerOverlay.visibility = View.GONE
-        binding.sphereViewerView.cleanup()
-        setVisionMode(VisionMode.NONE)
-    }
-
-    private fun handleSphereRecordButton() {
-        val ctrl = sphereController ?: return
-        if (ctrl.state != SphereCaptureController.State.CAPTURING) return
-
-        if (isPhotoMode) {
-            sphereCaptureNextFrame = true
-            Toast.makeText(this, "Frame added to sphere", Toast.LENGTH_SHORT).show()
-        } else {
-            if (ctrl.isContinuousCapturing) {
-                ctrl.stopContinuousCapture()
-                binding.recordButton.setImageResource(R.drawable.ic_record)
-                Toast.makeText(this, "Continuous capture stopped", Toast.LENGTH_SHORT).show()
-            } else {
-                ctrl.startContinuousCapture()
-                binding.recordButton.setImageResource(R.drawable.ic_record)
-                Toast.makeText(this, "Continuous capture started — pan slowly", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    private fun saveSphereImage() {
-        val equirect = sphereController?.getFullEquirect()
-        if (equirect == null) {
-            Toast.makeText(this, "No sphere data to save", Toast.LENGTH_SHORT).show()
-            return
-        }
-        saveSphereEquirectangular(equirect)
-    }
-
-    private fun saveSphereEquirectangular(bitmap: Bitmap) {
-        try {
-            val timestamp = SimpleDateFormat(FILENAME_FORMAT, Locale.US).format(System.currentTimeMillis())
-            val name = "PrismAI_SPHERE_$timestamp.jpg"
-            val contentValues = ContentValues().apply {
-                put(MediaStore.MediaColumns.DISPLAY_NAME, name)
-                put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
-                if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) {
-                    put(MediaStore.Images.Media.RELATIVE_PATH, Constants.GALLERY_IMAGE_RELATIVE_PATH)
-                }
-            }
-
-            val jpegBytes = ByteArrayOutputStream()
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, jpegBytes)
-            val imageData = jpegBytes.toByteArray()
-
-            // Inject XMP 360 metadata for Google Photos and other 360 viewers
-            val xmpData = buildXmpMetadata(bitmap.width, bitmap.height)
-            val finalData = injectXmpIntoJpeg(imageData, xmpData)
-
-            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
-            uri?.let { savedUri ->
-                contentResolver.openOutputStream(savedUri)?.use { stream ->
-                    stream.write(finalData)
-                }
-                SavedMediaTracker.addImage(this, savedUri)
-                sendBroadcast(android.content.Intent(android.content.Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, savedUri))
-                Toast.makeText(this, "360° photo saved", Toast.LENGTH_SHORT).show()
-                Log.d(TAG, "Sphere photo saved: $savedUri")
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to save sphere: ${e.message}")
-            Toast.makeText(this, "Failed to save sphere photo", Toast.LENGTH_SHORT).show()
-        }
-    }
-
-    private fun buildXmpMetadata(width: Int, height: Int): ByteArray {
-        val xmp = """<?xpacket begin="﻿" id="W5M0MpCehiHzreSzNTczkc9d"?>
-<x:xmpmeta xmlns:x="adobe:ns:meta/">
- <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
-  <rdf:Description rdf:about=""
-    xmlns:GPano="http://ns.google.com/photos/1.0/panorama/"
-    GPano:UsePanoramaViewer="True"
-    GPano:ProjectionType="equirectangular"
-    GPano:FullPanoWidthPixels="$width"
-    GPano:FullPanoHeightPixels="$height"
-    GPano:CroppedAreaLeftPixels="0"
-    GPano:CroppedAreaTopPixels="0"
-    GPano:CroppedAreaImageWidthPixels="$width"
-    GPano:CroppedAreaImageHeightPixels="$height"/>
- </rdf:RDF>
-</x:xmpmeta>
-<?xpacket end="w"?>"""
-        return xmp.toByteArray(Charsets.UTF_8)
-    }
-
-    private fun injectXmpIntoJpeg(jpegData: ByteArray, xmpData: ByteArray): ByteArray {
-        // XMP is stored in an APP1 segment: FF E1 [length] "http://ns.adobe.com/xap/1.0/\0" + xmp
-        val namespace = "http://ns.adobe.com/xap/1.0/\u0000".toByteArray(Charsets.US_ASCII)
-        val payloadLen = namespace.size + xmpData.size
-        val segmentLen = payloadLen + 2 // +2 for the length field itself
-
-        val result = ByteArrayOutputStream(jpegData.size + segmentLen + 4)
-        // Write SOI marker (first 2 bytes of JPEG: FF D8)
-        result.write(jpegData, 0, 2)
-        // Write APP1 marker
-        result.write(0xFF)
-        result.write(0xE1)
-        result.write((segmentLen shr 8) and 0xFF)
-        result.write(segmentLen and 0xFF)
-        result.write(namespace)
-        result.write(xmpData)
-        // Write rest of JPEG
-        result.write(jpegData, 2, jpegData.size - 2)
-        return result.toByteArray()
     }
 
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
-        orientationTracker.stop()
-        sphereController?.release()
+        if (::sphereSession.isInitialized) {
+            sphereSession.cleanupOnDestroy()
+        } else if (::orientationTracker.isInitialized) {
+            orientationTracker.stop()
+        }
     }
 
     companion object {
@@ -2213,20 +1442,5 @@ class MainActivity : AppCompatActivity() {
         private const val FILENAME_FORMAT = "yyyy-MM-dd-HH-mm-ss-SSS"
         private const val PROCESSED_VIDEO_WIDTH = 1280
         private const val PROCESSED_VIDEO_HEIGHT = 720
-        private const val USE_SIMPLE_YUV_CONVERSION = true // Set to false to use complex conversion
-        private val REQUIRED_PERMISSIONS = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            arrayOf(
-                Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.READ_MEDIA_IMAGES,
-                Manifest.permission.READ_MEDIA_VIDEO
-            )
-        } else {
-            arrayOf(
-                Manifest.permission.CAMERA,
-                Manifest.permission.RECORD_AUDIO,
-                Manifest.permission.WRITE_EXTERNAL_STORAGE
-            )
-        }
     }
 }

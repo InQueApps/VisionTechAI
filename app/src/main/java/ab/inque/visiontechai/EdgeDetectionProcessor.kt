@@ -1,5 +1,8 @@
 package ab.inque.visiontechai
 
+import ab.inque.robotics.vision.edge.EdgeDetectionNative
+
+
 import android.graphics.*
 import android.util.Log
 import kotlin.math.*
