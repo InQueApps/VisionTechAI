@@ -6,15 +6,15 @@ plugins {
 
 android {
     namespace = "ab.inque.visiontechai"
-    compileSdk = 35
+    compileSdk = 36
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
         applicationId = "ab.inque.prismai"
         minSdk = 27
-        targetSdk = 35
-        versionCode = 10
-        versionName = "0.4.6"
+        targetSdk = 36
+        versionCode = 12
+        versionName = "0.4.8"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         signingConfig = signingConfigs.getByName("debug")
@@ -28,7 +28,7 @@ android {
             }
         }
         ndk {
-            // Play Console (API 35): ship ARM only. Debug adds x86_64 for emulator testing.
+            // Play Console (API 36): ship ARM only. Debug adds x86_64 for emulator testing.
             abiFilters += listOf("armeabi-v7a", "arm64-v8a")
         }
     }
@@ -118,6 +118,9 @@ dependencies {
     implementation("com.google.mlkit:text-recognition:16.0.1")
     implementation("com.google.mlkit:translate:17.0.3")
     implementation("com.google.android.gms:play-services-tasks:18.2.0")
+
+    // Play requires Billing Library 8.0.0+ on the uploaded AAB.
+    implementation("com.android.billingclient:billing-ktx:8.3.0")
     
     testImplementation(libs.junit)
     testImplementation("org.robolectric:robolectric:4.14.1")

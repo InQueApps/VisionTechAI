@@ -36,6 +36,11 @@
 -keep class com.google.android.gms.** { *; }
 -dontwarn com.google.android.gms.**
 
+# Play Billing Library — keep so Play Console can detect version 8.x in the AAB
+-keep class com.android.billingclient.** { *; }
+-keep class com.google.android.gms.internal.play_billing.** { *; }
+-dontwarn com.android.billingclient.**
+
 # Firebase
 -keep class com.google.firebase.** { *; }
 -dontwarn com.google.firebase.**
