@@ -76,7 +76,10 @@ class SphereSessionSaveE2ETest {
         }
         assertTrue("FINALIZED after DONE", ctrl.isFinalized())
 
-        activityScenario.onActivity { session.saveEquirectangular() }
+        activityScenario.onActivity { activity ->
+            val session = sphereSession(activity) ?: error("sphereSession null")
+            session.saveEquirectangular()
+        }
         activityScenario.onActivity {
             val equirect = ctrl.getFullEquirect()
             assertNotNull(equirect)
