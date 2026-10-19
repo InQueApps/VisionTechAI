@@ -463,6 +463,8 @@ class SphereCaptureController(
             return
         }
 
+        lastCoverage = result.coverage
+        lastSolidAngleCoverage = result.solidAngleCoverage
         if (result.accepted) {
             frameCount++
             onFrameAccepted?.invoke()
@@ -471,19 +473,18 @@ class SphereCaptureController(
                 "Frame accepted (#$frameCount): coverage=${result.coverage} solid=${result.solidAngleCoverage} " +
                     "preview=${result.previewBitmap?.width}x${result.previewBitmap?.height}"
             )
+            val preview = result.previewBitmap?.let { retainBitmap(it) } ?: lastPreviewBitmap
+            if (result.previewBitmap != null && preview !== lastPreviewBitmap) {
+                lastPreviewBitmap?.recycle()
+                lastPreviewBitmap = preview
+            }
+            onCoverageUpdate(result.coverage, result.solidAngleCoverage, preview)
+            if (preview == null) {
+                Log.e(TAG, "Frame accepted but preview bitmap is null — native stitch may have failed")
+            }
         } else {
             Log.w(TAG, "Frame rejected — preview unchanged (coverage=${result.coverage})")
-        }
-        lastCoverage = result.coverage
-        lastSolidAngleCoverage = result.solidAngleCoverage
-        val preview = result.previewBitmap?.let { retainBitmap(it) } ?: lastPreviewBitmap
-        if (result.previewBitmap != null) {
-            lastPreviewBitmap?.recycle()
-            lastPreviewBitmap = preview
-        }
-        onCoverageUpdate(result.coverage, result.solidAngleCoverage, preview)
-        if (result.accepted && preview == null) {
-            Log.e(TAG, "Frame accepted but preview bitmap is null — native stitch may have failed")
+            onCoverageUpdate(result.coverage, result.solidAngleCoverage, lastPreviewBitmap)
         }
         result.frameInfo?.let { info ->
             onDebugFrameStitchResult?.invoke(
